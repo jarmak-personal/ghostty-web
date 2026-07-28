@@ -59,9 +59,12 @@ mutable registry state.
 Only tag retained post-merge commits that are ancestors of `hvir-main`. Persistent artifact tags
 use `hvir-v<package-version>-<revision>` and must not move or be deleted. The release workflow
 repeats all quality gates with pinned build tools, then uses GitHub CLI's draft-then-publish path to
-lock all three assets in an immutable release. It verifies an identical published release on rerun
-but never overwrites an asset. Pull-request runs continue to validate the package boundary, but
-their checkout can be GitHub's synthetic test merge and is never promoted.
+lock all three assets in an immutable release. Before building, the dedicated read-only release
+settings token confirms immutability is enabled; the job-scoped `GITHUB_TOKEN` remains the only
+credential used to create the release. After publication, the workflow requires GitHub to report
+the release as immutable and verifies its signed attestation. It verifies an identical published
+release on rerun but never overwrites an asset. Pull-request runs continue to validate the package
+boundary, but their checkout can be GitHub's synthetic test merge and is never promoted.
 
 ## One-time repository setup
 
@@ -80,7 +83,10 @@ After this infrastructure merges:
 6. Enable immutable releases under the repository's general settings before creating the first
    `hvir-v*` tag. GitHub then locks every published release's assets and tag and generates a signed
    release attestation.
-7. Optionally add a tag ruleset for `hvir-v*` to protect the interval between tag creation and
+7. Store a fine-grained token as `GHOSTTY_WEB_RELEASE_TOKEN`, scoped only to this repository with
+   Administration read access and Actions/workflow read access. The workflow uses it only to read
+   the immutable-release setting before publication.
+8. Optionally add a tag ruleset for `hvir-v*` to protect the interval between tag creation and
    immutable release publication. Immutability itself protects the tag after publication.
 
 The Project's built-in workflows may set new items to `Todo` and closed items to `Done`. Repository

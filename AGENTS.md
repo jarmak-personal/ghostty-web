@@ -33,6 +33,8 @@ package artifact produced by `bun run pack:hvir` and attached to a tagged GitHub
 deliberately removes upstream's npm publish and Release Please workflows; do not restore them
 during an upstream sync. Persistent artifacts use the fork-only
 `.github/workflows/release-hvir-artifact.yml` workflow and require repository release immutability.
+Its pre-publication settings check uses the read-only `GHOSTTY_WEB_RELEASE_TOKEN`; release creation
+continues to use the job-scoped `GITHUB_TOKEN`.
 
 **Before committing, always run:**
 

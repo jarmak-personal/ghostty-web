@@ -118,10 +118,12 @@ To persist an accepted post-merge artifact, create the next immutable tag using
 and push the tag. `.github/workflows/release-hvir-artifact.yml` repeats the quality gates, builds
 the package with pinned Bun, Node/npm, and Zig versions, and attaches the tarball, checksum, and
 provenance through GitHub CLI's draft-then-publish immutable release path. The workflow refuses to
-run unless repository release immutability is enabled, and it rejects tags outside `hvir-main`,
-package-version mismatches, unexpected assets, and replacement of a different existing payload. It
-can be dispatched manually with an existing tag to verify an already published payload or retry
-before a release exists.
+build or publish unless the dedicated read-only settings token confirms repository release
+immutability is enabled. It also refuses to accept a published release unless GitHub reports it as
+immutable with a valid signed release attestation, and it rejects tags outside `hvir-main`,
+package-version mismatches, unexpected assets, and replacement of a different existing payload. The
+workflow can be dispatched manually with an existing tag to verify an already published payload or
+retry before a release exists.
 
 hvir consumes the tarball through its exact GitHub Release URL. `package-lock.json` records the URL
 and integrity hash, so normal `npm ci` and Electron packaging need neither Ghostty's source tree nor
