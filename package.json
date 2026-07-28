@@ -73,7 +73,7 @@
     "ai": "^7.0.2",
     "mitata": "^1.0.34",
     "prettier": "^3.6.2",
-    "release-please": "17.9.0",
+    "release-please": "17.10.4",
     "tsx": "^4.22.4",
     "typescript": "^5.9.3",
     "vite": "^4.5.0",
