@@ -18,6 +18,7 @@ concurrency:
 jobs:
   release-please:
     name: release-please
+    if: github.repository == 'coder/ghostty-web'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout main

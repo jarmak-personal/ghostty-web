@@ -1,5 +1,12 @@
 # Release runbook
 
+> [!IMPORTANT]
+> This is the inherited upstream release runbook. In the hvir fork, the upstream publish and
+> Release Please jobs are guarded to run only when `github.repository` is
+> `coder/ghostty-web`. The fork does not publish a registry package or GitHub Release. It produces
+> a CI-validated package with `bun run pack:hvir`, then hvir vendors the accepted tarball,
+> checksum, and provenance. See [`fork-maintenance.md`](fork-maintenance.md).
+
 ## Automated flow
 
 1. Pull requests must use a Conventional Commit title such as `feat(renderer): add cursor support`.

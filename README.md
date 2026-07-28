@@ -1,5 +1,13 @@
 # ghostty-web
 
+> [!NOTE]
+> This is an [hvir](https://github.com/jarmak-personal/hvir)-maintained compatibility fork of
+> [ghostty-web](https://github.com/coder/ghostty-web). It is not intended to replace or compete
+> with upstream. We maintain a small, reviewable patch set so hvir alpha users can validate
+> selected reliability fixes while generally useful changes are prepared for upstream. We are
+> grateful to the ghostty-web and Ghostty maintainers for the substantial work this fork builds
+> on. See [CONTRIBUTING.md](./CONTRIBUTING.md) for the fork and upstream contribution workflow.
+
 [![NPM Version](https://img.shields.io/npm/v/ghostty-web)](https://npmjs.com/package/ghostty-web) [![NPM Downloads](https://img.shields.io/npm/dw/ghostty-web)](https://npmjs.com/package/ghostty-web) [![npm bundle size](https://img.shields.io/bundlephobia/minzip/ghostty-web)](https://npmjs.com/package/ghostty-web) [![license](https://img.shields.io/github/license/coder/ghostty-web)](./LICENSE)
 
 [Ghostty](https://github.com/ghostty-org/ghostty) for the web with [xterm.js](https://github.com/xtermjs/xterm.js) API compatibility — giving you a proper VT100 implementation in the browser.

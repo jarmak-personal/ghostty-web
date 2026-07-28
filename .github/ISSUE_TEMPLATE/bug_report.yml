@@ -1,0 +1,86 @@
+name: Bug report
+description: Report reproducible incorrect behavior in the hvir compatibility fork.
+title: 'fix: '
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Search this fork and upstream before filing. Diagnostic output is untrusted material:
+        remove credentials, hostnames, paths, commands, and other sensitive data before posting.
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the failure and its user-visible impact.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Provide the smallest reliable sequence, including whether the terminal was local or SSH-backed.
+      placeholder: |
+        1. Open ...
+        2. Run ...
+        3. Switch ...
+    validations:
+      required: true
+  - type: dropdown
+    id: transport
+    attributes:
+      label: Terminal transport
+      options:
+        - Local
+        - SSH
+        - Both
+        - Not sure
+    validations:
+      required: true
+  - type: input
+    id: consumer
+    attributes:
+      label: Consumer and version
+      description: For example, hvir 0.1.5 or another embedding application and its version.
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: OS and architecture
+      placeholder: macOS 15.6 arm64
+    validations:
+      required: true
+  - type: input
+    id: runtime
+    attributes:
+      label: Browser or Electron/Chrome version
+      description: Include Electron and embedded Chrome versions when applicable.
+      placeholder: Electron 43.2.0 / Chrome 150.0.7871.129
+    validations:
+      required: true
+  - type: input
+    id: shell
+    attributes:
+      label: Shell and remote environment
+      description: Include the local shell and, for SSH, the remote OS/shell and connection pattern.
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Sanitized logs or diagnostics
+      description: Include timing, memory growth, renderer responsiveness, and PTY lifecycle evidence when relevant.
+      render: text
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Sensitive-data check
+      options:
+        - label: I reviewed the report and removed credentials and sensitive local or remote details.
+          required: true

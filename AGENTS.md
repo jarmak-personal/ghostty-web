@@ -10,6 +10,18 @@ bun test                            # Run test suite (95 tests)
 bun run dev                         # Start Vite dev server (http://localhost:8000)
 ```
 
+## hvir Fork Workflow
+
+This checkout may be the hvir compatibility fork. Before changing it, read
+[`CONTRIBUTING.md`](CONTRIBUTING.md) and [`docs/fork-maintenance.md`](docs/fork-maintenance.md).
+Substantive fork work starts from a governing issue, branches from `hvir-main`, and returns to
+`hvir-main` through a pull request. Keep fork-only integration work separate from changes that
+can be proposed upstream.
+
+Do not publish the upstream-owned `ghostty-web` npm package from the fork. hvir consumes an exact,
+vendored package artifact produced by `bun run pack:hvir`; the fork's inherited upstream publish
+workflows are deliberately guarded to run only in `coder/ghostty-web`.
+
 **Before committing, always run:**
 
 ```bash

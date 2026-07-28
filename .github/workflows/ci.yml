@@ -2,7 +2,7 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [hvir-main]
   pull_request:
   workflow_dispatch:
 
@@ -86,6 +86,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           submodules: recursive
 
       - uses: oven-sh/setup-bun@v1
@@ -113,3 +114,14 @@ jobs:
 
       - name: Build library
         run: bun run build
+
+      - name: Pack hvir candidate
+        run: bun run scripts/pack-hvir.ts
+
+      - name: Upload hvir candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ghostty-web-hvir-${{ github.sha }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 14

@@ -51,6 +51,7 @@
     "build:wasm": "./scripts/build-wasm.sh",
     "build:lib": "vite build",
     "build:wasm-copy": "cp ghostty-vt.wasm dist/",
+    "pack:hvir": "bun run build && bun run scripts/pack-hvir.ts",
     "clean": "rm -rf dist",
     "preview": "vite preview",
     "test": "bun test",

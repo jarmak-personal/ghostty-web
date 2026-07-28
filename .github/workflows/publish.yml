@@ -23,7 +23,9 @@ jobs:
   publish-stable:
     name: publish stable packages
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    if: >-
+      github.repository == 'coder/ghostty-web' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     steps:
       - name: Resolve tag
         id: tag
@@ -172,7 +174,10 @@ jobs:
   publish-next:
     name: publish next packages
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success'
+    if: >-
+      github.repository == 'coder/ghostty-web' &&
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'success'
     steps:
       - name: Checkout CI head
         uses: actions/checkout@v4
