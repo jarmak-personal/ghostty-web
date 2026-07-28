@@ -54,48 +54,51 @@ export function getGhostty(): Ghostty {
   return ghosttyInstance;
 }
 
-// Main Terminal class
-export { Terminal } from './terminal';
-
-// xterm.js-compatible interfaces
-export type {
-  ITerminalOptions,
-  ITheme,
-  ITerminalAddon,
-  ITerminalCore,
-  IDisposable,
-  IEvent,
-  IBufferRange,
-  IKeyEvent,
-  IUnicodeVersionProvider,
-} from './interfaces';
-
+export type { ITerminalDimensions } from './addons/fit';
+// Addons
+export { FitAddon } from './addons/fit';
+export { EventEmitter } from './event-emitter';
 // Ghostty WASM components (for advanced usage)
 export {
+  CellFlags,
+  DirtyState,
   Ghostty,
   GhosttyTerminal,
   KeyEncoder,
-  CellFlags,
-  DirtyState,
   KeyEncoderOption,
 } from './ghostty';
-export { Key, KeyAction, Mods } from './types';
-export type { KeyEvent, GhosttyCell, RGB, Cursor, TerminalHandle } from './types';
-
-// Low-level components (for custom integrations)
-export { CanvasRenderer } from './renderer';
-export type { RendererOptions, FontMetrics, IRenderable } from './renderer';
 export { InputHandler } from './input-handler';
-export { EventEmitter } from './event-emitter';
-export { SelectionManager } from './selection-manager';
-export type { SelectionCoordinates } from './selection-manager';
-
-// Addons
-export { FitAddon } from './addons/fit';
-export type { ITerminalDimensions } from './addons/fit';
-
+// xterm.js-compatible interfaces
+export type {
+  IBufferRange,
+  IDisposable,
+  IEvent,
+  IKeyEvent,
+  ITerminalAddon,
+  ITerminalCore,
+  ITerminalOptions,
+  ITheme,
+  IUnicodeVersionProvider,
+} from './interfaces';
+export { LinkDetector } from './link-detector';
 // Link providers
 export { OSC8LinkProvider } from './providers/osc8-link-provider';
 export { UrlRegexProvider } from './providers/url-regex-provider';
-export { LinkDetector } from './link-detector';
-export type { ILink, ILinkProvider, IBufferCellPosition } from './types';
+export type { FontMetrics, IRenderable, RendererOptions } from './renderer';
+// Low-level components (for custom integrations)
+export { CanvasRenderer } from './renderer';
+export type { SelectionCoordinates } from './selection-manager';
+export { SelectionManager } from './selection-manager';
+// Main Terminal class
+export { Terminal } from './terminal';
+export type {
+  Cursor,
+  GhosttyCell,
+  IBufferCellPosition,
+  ILink,
+  ILinkProvider,
+  KeyEvent,
+  RGB,
+  TerminalHandle,
+} from './types';
+export { Key, KeyAction, Mods } from './types';

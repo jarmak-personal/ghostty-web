@@ -13,13 +13,16 @@ updates:
     commit-message:
       prefix: deps
     groups:
-      bun-minor-and-patch:
+      bun-version-updates:
         applies-to: version-updates
         patterns:
           - '*'
+    ignore:
+      # Vite 8 breaks the UMD/CommonJS Ghostty.load() path; keep receiving
+      # compatible Vite 6 updates until the artifact smoke test can pass.
+      - dependency-name: vite
         update-types:
-          - minor
-          - patch
+          - version-update:semver-major
 
   - package-ecosystem: github-actions
     directory: /
@@ -33,10 +36,7 @@ updates:
     commit-message:
       prefix: ci
     groups:
-      actions-minor-and-patch:
+      actions-version-updates:
         applies-to: version-updates
         patterns:
           - '*'
-        update-types:
-          - minor
-          - patch
