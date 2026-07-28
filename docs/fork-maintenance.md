@@ -43,20 +43,25 @@ reduce unnecessary divergence, but the fork has no executable registry or Releas
 Do not restore either workflow during an upstream sync. A delete/modify conflict involving those
 paths is an intentional security review boundary, not a reason to accept the upstream file.
 
-The hvir fork has no npm publishing credentials and no independent release stream. Its delivery
-unit is the output of `bun run pack:hvir`:
+The hvir fork has no npm publishing credentials. Its only persistent release channel is the
+fork-specific `release-hvir-artifact.yml` workflow, and its delivery unit is the output of
+`bun run pack:hvir`:
 
 - a normal npm-compatible tarball containing compiled JS, types, and `ghostty-vt.wasm`;
 - a SHA-256 checksum; and
 - provenance naming the fork commit, recorded upstream baseline, and Ghostty submodule commit.
 
-hvir vendors an accepted artifact and refers to it with an exact local `file:` dependency. This
-keeps the terminal dependency behind hvir's existing `TerminalPane` seam while avoiding install-
-time source builds and mutable registry state.
+hvir refers to an accepted artifact by its exact GitHub Release URL. The npm lockfile records both
+that URL and its integrity hash. This keeps the terminal dependency behind hvir's existing
+`TerminalPane` seam while avoiding install-time source builds, committed binary tarballs, and
+mutable registry state.
 
-Only promote artifacts produced by the post-merge `hvir-main` run. Pull-request runs validate the
-package boundary, but their checkout can be GitHub's synthetic test merge rather than a retained
-branch commit.
+Only tag retained post-merge commits that are ancestors of `hvir-main`. Persistent artifact tags
+use `hvir-v<package-version>-<revision>` and must not move or be deleted. The release workflow
+repeats all quality gates with pinned build tools, then uses GitHub CLI's draft-then-publish path to
+lock all three assets in an immutable release. It verifies an identical published release on rerun
+but never overwrites an asset. Pull-request runs continue to validate the package boundary, but
+their checkout can be GitHub's synthetic test merge and is never promoted.
 
 ## One-time repository setup
 
@@ -72,6 +77,11 @@ After this infrastructure merges:
    merges.
 5. Keep Dependabot alerts and security updates enabled. Version updates for Bun dependencies and
    GitHub Actions are grouped weekly to limit fork churn.
+6. Enable immutable releases under the repository's general settings before creating the first
+   `hvir-v*` tag. GitHub then locks every published release's assets and tag and generates a signed
+   release attestation.
+7. Optionally add a tag ruleset for `hvir-v*` to protect the interval between tag creation and
+   immutable release publication. Immutability itself protects the tag after publication.
 
 The Project's built-in workflows may set new items to `Todo` and closed items to `Done`. Repository
 labels remain the source of issue categorization; no custom Project field is required for this

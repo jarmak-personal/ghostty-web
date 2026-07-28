@@ -17,6 +17,42 @@ interface PackResult {
   filename: string;
 }
 
+interface Toolchain {
+  bun: string;
+  node: string;
+  npm: string;
+  zig: string;
+}
+
+interface ProvenanceInput {
+  artifact: string;
+  buildPlatform: string;
+  forkMetadata: ForkMetadata;
+  ghosttyCommit: string;
+  packageMetadata: PackageMetadata;
+  sha256: string;
+  sourceCommit: string;
+  toolchain: Toolchain;
+}
+
+export function createProvenance(input: ProvenanceInput) {
+  return {
+    schemaVersion: 1,
+    package: input.packageMetadata.name,
+    packageVersion: input.packageMetadata.version,
+    artifact: input.artifact,
+    sha256: input.sha256,
+    sourceRepository: 'https://github.com/jarmak-personal/ghostty-web.git',
+    sourceCommit: input.sourceCommit,
+    upstreamRepository: input.forkMetadata.upstreamRepository,
+    upstreamBranch: input.forkMetadata.upstreamBranch,
+    upstreamCommit: input.forkMetadata.upstreamCommit,
+    ghosttyCommit: input.ghosttyCommit,
+    buildPlatform: input.buildPlatform,
+    toolchain: input.toolchain,
+  };
+}
+
 function run(command: string, args: string[]): string {
   const result = Bun.spawnSync([command, ...args], {
     cwd: process.cwd(),
@@ -100,19 +136,21 @@ async function main(): Promise<void> {
   await writeFile(
     provenancePath,
     `${JSON.stringify(
-      {
-        schemaVersion: 1,
-        package: packageMetadata.name,
-        packageVersion: packageMetadata.version,
+      createProvenance({
         artifact: basename(artifactPath),
         sha256,
-        sourceRepository: 'https://github.com/jarmak-personal/ghostty-web.git',
         sourceCommit,
-        upstreamRepository: forkMetadata.upstreamRepository,
-        upstreamBranch: forkMetadata.upstreamBranch,
-        upstreamCommit: forkMetadata.upstreamCommit,
         ghosttyCommit,
-      },
+        buildPlatform: `${process.platform}-${process.arch}`,
+        forkMetadata,
+        packageMetadata,
+        toolchain: {
+          bun: run('bun', ['--version']),
+          node: run('node', ['--version']),
+          npm: run('npm', ['--version']),
+          zig: run('zig', ['version']),
+        },
+      }),
       null,
       2
     )}\n`
@@ -123,7 +161,9 @@ async function main(): Promise<void> {
   console.log(`Provenance ${provenancePath}`);
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.message : error);
-  process.exitCode = 1;
-});
+if (import.meta.main) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.message : error);
+    process.exitCode = 1;
+  });
+}

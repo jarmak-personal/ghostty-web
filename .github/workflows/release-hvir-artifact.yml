@@ -1,0 +1,252 @@
+name: Release hvir artifact
+
+on:
+  push:
+    tags:
+      - 'hvir-v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing hvir artifact tag, for example hvir-v0.4.0-1
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hvir-artifact-release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: build and release hvir artifact
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+
+    steps:
+      - name: Resolve artifact tag
+        id: tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          tag="${INPUT_TAG:-$REF_NAME}"
+          if [[ ! "$tag" =~ ^hvir-v([0-9]+\.[0-9]+\.[0-9]+)-([1-9][0-9]*)$ ]]; then
+            echo "::error::Expected hvir-v<package-version>-<revision>, received '$tag'"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "package_version=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+          echo "revision=${BASH_REMATCH[2]}" >> "$GITHUB_OUTPUT"
+
+      - name: Check out tagged source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Validate tagged source
+        env:
+          PACKAGE_VERSION: ${{ steps.tag.outputs.package_version }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git fetch origin hvir-main:refs/remotes/origin/hvir-main --tags
+          tag_commit=$(git rev-list -n 1 "$TAG")
+          source_commit=$(git rev-parse HEAD)
+          if [[ "$tag_commit" != "$source_commit" ]]; then
+            echo "::error::Tag $TAG resolves to $tag_commit, but checkout is $source_commit"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$source_commit" origin/hvir-main; then
+            echo "::error::Tag $TAG is not an ancestor of origin/hvir-main"
+            exit 1
+          fi
+          actual_version=$(node -p "require('./package.json').version")
+          if [[ "$actual_version" != "$PACKAGE_VERSION" ]]; then
+            echo "::error::Tag package version $PACKAGE_VERSION does not match package.json $actual_version"
+            exit 1
+          fi
+
+      - name: Require immutable releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          enabled=$(gh api "repos/$GITHUB_REPOSITORY/immutable-releases" --jq '.enabled')
+          if [[ "$enabled" != 'true' ]]; then
+            echo "::error::Enable immutable releases in repository settings before publishing an hvir artifact"
+            exit 1
+          fi
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.18.0
+          package-manager-cache: false
+
+      - uses: ./.github/actions/setup-zig
+        with:
+          version: 0.15.2
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Check formatting
+        run: bun run fmt
+
+      - name: Run linter
+        run: bun run lint
+
+      - name: Check types
+        run: bun run typecheck
+
+      - name: Build WASM for tests
+        run: bun run build:wasm
+
+      - name: Run tests
+        run: bun test
+
+      - name: Build hvir package
+        run: bun run pack:hvir
+
+      - name: Check WASM size
+        run: bun run scripts/check-wasm-size.ts
+
+      - name: Validate release payload
+        id: payload
+        run: |
+          set -euo pipefail
+          mapfile -t tarballs < <(find artifacts -maxdepth 1 -type f -name '*.tgz' -print)
+          if [[ "${#tarballs[@]}" -ne 1 ]]; then
+            echo "::error::Expected one package tarball, found ${#tarballs[@]}"
+            exit 1
+          fi
+
+          artifact=${tarballs[0]}
+          checksum="${artifact}.sha256"
+          provenance="${artifact}.provenance.json"
+          for path in "$checksum" "$provenance"; do
+            if [[ ! -f "$path" ]]; then
+              echo "::error::Missing release payload $path"
+              exit 1
+            fi
+          done
+
+          (cd artifacts && sha256sum --check "$(basename "$checksum")")
+
+          ARTIFACT="$artifact" \
+          PROVENANCE="$provenance" \
+          SOURCE_COMMIT="$(git rev-parse HEAD)" \
+          GHOSTTY_COMMIT="$(git -C ghostty rev-parse HEAD)" \
+          node <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const provenance = JSON.parse(fs.readFileSync(process.env.PROVENANCE, 'utf8'));
+          const expected = {
+            artifact: path.basename(process.env.ARTIFACT),
+            buildPlatform: 'linux-x64',
+            sourceCommit: process.env.SOURCE_COMMIT,
+            ghosttyCommit: process.env.GHOSTTY_COMMIT,
+          };
+          for (const [field, value] of Object.entries(expected)) {
+            if (provenance[field] !== value) {
+              throw new Error(`Provenance ${field} ${provenance[field]} does not match ${value}`);
+            }
+          }
+          const expectedToolchain = {
+            bun: '1.3.14',
+            node: 'v24.18.0',
+            npm: '11.16.0',
+            zig: '0.15.2',
+          };
+          for (const [tool, version] of Object.entries(expectedToolchain)) {
+            if (provenance.toolchain?.[tool] !== version) {
+              throw new Error(
+                `Unexpected ${tool} provenance: ${provenance.toolchain?.[tool]} (expected ${version})`,
+              );
+            }
+          }
+          NODE
+
+          echo "artifact=$artifact" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=$(basename "$artifact")" >> "$GITHUB_OUTPUT"
+          echo "checksum=$checksum" >> "$GITHUB_OUTPUT"
+          echo "checksum_name=$(basename "$checksum")" >> "$GITHUB_OUTPUT"
+          echo "provenance=$provenance" >> "$GITHUB_OUTPUT"
+          echo "provenance_name=$(basename "$provenance")" >> "$GITHUB_OUTPUT"
+
+      - name: Create or verify immutable GitHub Release
+        env:
+          ARTIFACT: ${{ steps.payload.outputs.artifact }}
+          ARTIFACT_NAME: ${{ steps.payload.outputs.artifact_name }}
+          CHECKSUM: ${{ steps.payload.outputs.checksum }}
+          CHECKSUM_NAME: ${{ steps.payload.outputs.checksum_name }}
+          GH_TOKEN: ${{ github.token }}
+          PROVENANCE: ${{ steps.payload.outputs.provenance }}
+          PROVENANCE_NAME: ${{ steps.payload.outputs.provenance_name }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            state=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --json isDraft,isPrerelease --jq '[.isDraft, .isPrerelease] | @tsv')
+            if [[ "$state" != $'false\tfalse' ]]; then
+              echo "::error::Existing release $TAG must be published and non-prerelease"
+              exit 1
+            fi
+
+            actual_assets=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --json assets --jq '.assets[].name' | sort)
+            expected_assets=$(printf '%s\n' "$ARTIFACT_NAME" "$CHECKSUM_NAME" "$PROVENANCE_NAME" | sort)
+            if [[ "$actual_assets" != "$expected_assets" ]]; then
+              echo "::error::Existing release $TAG does not contain the exact expected asset set"
+              exit 1
+            fi
+
+            existing=$(mktemp -d)
+            gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$existing" \
+              --pattern "$ARTIFACT_NAME" \
+              --pattern "$CHECKSUM_NAME" \
+              --pattern "$PROVENANCE_NAME"
+            cmp "$ARTIFACT" "$existing/$ARTIFACT_NAME"
+            cmp "$CHECKSUM" "$existing/$CHECKSUM_NAME"
+            cmp "$PROVENANCE" "$existing/$PROVENANCE_NAME"
+            gh release verify "$TAG" --repo "$GITHUB_REPOSITORY"
+            echo "Immutable release $TAG already contains the exact reproducible payload."
+            exit 0
+          fi
+
+          source_commit=$(git rev-parse HEAD)
+          ghostty_commit=$(git -C ghostty rev-parse HEAD)
+          upstream_commit=$(node -p "require('./fork.json').upstreamCommit")
+          notes=$(mktemp)
+          cat > "$notes" <<EOF
+          Persistent package artifact for hvir's ghostty-web compatibility fork.
+
+          - Fork source: [$source_commit](https://github.com/$GITHUB_REPOSITORY/commit/$source_commit)
+          - Ghostty source: [$ghostty_commit](https://github.com/ghostty-org/ghostty/commit/$ghostty_commit)
+          - Upstream ghostty-web baseline: [$upstream_commit](https://github.com/coder/ghostty-web/commit/$upstream_commit)
+          - Package: \`$ARTIFACT_NAME\`
+
+          This release does not publish the upstream-owned npm package. hvir consumes the tarball by its exact release URL and npm lockfile integrity.
+          EOF
+
+          # gh stages assets on a draft internally before publishing when release
+          # immutability is enabled, so all three files are locked together.
+          gh release create "$TAG" \
+            "$ARTIFACT" "$CHECKSUM" "$PROVENANCE" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "hvir ghostty-web artifact ${TAG#hvir-v}" \
+            --notes-file "$notes" \
+            --latest
+          gh release verify "$TAG" --repo "$GITHUB_REPOSITORY"

@@ -28,9 +28,11 @@ Substantive fork work starts from a governing issue, branches from `hvir-main`, 
 `hvir-main` through a pull request. Keep fork-only integration work separate from changes that
 can be proposed upstream.
 
-Do not publish the upstream-owned `ghostty-web` npm package from the fork. hvir consumes an exact,
-vendored package artifact produced by `bun run pack:hvir`. The fork deliberately removes
-upstream's publish and Release Please workflows; do not restore them during an upstream sync.
+Do not publish the upstream-owned `ghostty-web` npm package from the fork. hvir consumes an exact
+package artifact produced by `bun run pack:hvir` and attached to a tagged GitHub Release. The fork
+deliberately removes upstream's npm publish and Release Please workflows; do not restore them
+during an upstream sync. Persistent artifacts use the fork-only
+`.github/workflows/release-hvir-artifact.yml` workflow and require repository release immutability.
 
 **Before committing, always run:**
 

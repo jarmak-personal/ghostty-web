@@ -4,9 +4,9 @@
 > This runbook is retained only as upstream reference. The hvir fork deliberately removes the
 > `publish.yml` and `release-please.yml` workflows described below, so these procedures are not an
 > executable fork release path and must not be restored during upstream sync. The fork does not
-> publish a registry package or GitHub Release. It produces a CI-validated package with
-> `bun run pack:hvir`, then hvir vendors the accepted tarball, checksum, and provenance. See
-> [`fork-maintenance.md`](fork-maintenance.md).
+> publish a registry package. Its separate `release-hvir-artifact.yml` workflow attaches the
+> output of `bun run pack:hvir` to a fork-only GitHub Release for exact URL consumption by hvir.
+> See [`fork-maintenance.md`](fork-maintenance.md).
 
 ## Automated flow
 
