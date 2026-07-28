@@ -112,6 +112,13 @@ async function main(): Promise<void> {
         upstreamBranch: forkMetadata.upstreamBranch,
         upstreamCommit: forkMetadata.upstreamCommit,
         ghosttyCommit,
+        buildPlatform: `${process.platform}-${process.arch}`,
+        toolchain: {
+          bun: run('bun', ['--version']),
+          node: run('node', ['--version']),
+          npm: run('npm', ['--version']),
+          zig: run('zig', ['version']),
+        },
       },
       null,
       2

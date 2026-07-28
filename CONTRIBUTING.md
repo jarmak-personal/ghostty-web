@@ -71,11 +71,11 @@ git switch -c sync/upstream-YYYYMMDD
 git merge --no-ff upstream/main
 ```
 
-Resolve conflicts by preserving the smallest fork patch set. Do not restore upstream's publish or
-Release Please workflows: executable release automation is intentionally absent from
-`hvir-main`. Update `fork.json` to the exact `upstream/main` commit, run all checks, and open a
-pull request to `hvir-main`. Merge an upstream sync PR with a merge commit so Git retains the
-upstream ancestry; ordinary fork PRs may be squashed.
+Resolve conflicts by preserving the smallest fork patch set. Do not restore upstream's npm publish
+or Release Please workflows. Preserve the fork-only hvir artifact release workflow instead. Update
+`fork.json` to the exact `upstream/main` commit, run all checks, and open a pull request to
+`hvir-main`. Merge an upstream sync PR with a merge commit so Git retains the upstream ancestry;
+ordinary fork PRs may be squashed.
 
 ## Contribute a fix upstream
 
@@ -99,8 +99,9 @@ upstream result; upstream merge is not by itself proof that the fork patch can b
 
 ## Package for hvir
 
-The fork does not publish to npm or maintain a separate public release channel. From a clean
-checkout with the required Zig and Bun versions, run:
+The fork does not publish to npm. Its narrow GitHub Release channel persists package artifacts for
+hvir without claiming the upstream package name in a registry. From a clean checkout with the
+required Zig and Bun versions, run:
 
 ```sh
 bun run fmt && bun run lint && bun run typecheck && bun test
@@ -110,14 +111,21 @@ bun run pack:hvir
 The pack command builds Ghostty WASM and the library, then writes a tarball, SHA-256 checksum, and
 provenance JSON under `artifacts/`. The filename includes the source commit. CI performs the same
 packaging check on pull requests and `hvir-main` and retains its candidate artifact for 14 days.
-Promote only an artifact from the post-merge `hvir-main` run; pull-request artifacts may identify
-GitHub's synthetic test merge rather than a retained branch commit.
+Pull-request artifacts may identify GitHub's synthetic test merge and are never release inputs.
 
-After acceptance, commit the exact three files into hvir under `vendor/ghostty-web/` and use the
-tarball through an exact `file:` dependency. Keep the checksum and provenance next to it. This
-makes hvir installs reproducible without asking hvir contributors to build Ghostty or granting the
-fork registry credentials.
+To persist an accepted post-merge artifact, create the next immutable tag using
+`hvir-v<package-version>-<revision>`, for example `hvir-v0.4.0-1`, at the exact `hvir-main` commit
+and push the tag. `.github/workflows/release-hvir-artifact.yml` repeats the quality gates, builds
+the package with pinned Bun and Zig versions, and attaches the tarball, checksum, and provenance
+to a GitHub Release. The workflow refuses tags outside `hvir-main`, package-version mismatches,
+unexpected assets, and replacement of a different existing payload. It can be dispatched manually
+with an existing tag to verify or retry an interrupted run.
 
-Publishing can be reconsidered later if the fork gains external consumers. It requires a
-distinct package name and an explicit maintenance decision; it must never target the
-upstream-owned `ghostty-web` package.
+hvir consumes the tarball through its exact GitHub Release URL. `package-lock.json` records the URL
+and integrity hash, so normal `npm ci` and Electron packaging need neither Ghostty's source tree nor
+the fork's Bun and Zig toolchain. The package is JavaScript, declarations, and WASM; it does not
+require independent Apple signing. hvir's normal application signing seals it as a bundled
+resource in the final macOS app.
+
+A future registry publication would require a distinct package name and an explicit maintenance
+decision. It must never target the upstream-owned `ghostty-web` package.
