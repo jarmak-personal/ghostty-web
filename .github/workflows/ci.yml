@@ -101,13 +101,7 @@ jobs:
         run: ./scripts/build-wasm.sh
 
       - name: Check WASM size
-        run: |
-          SIZE=$(stat -c%s ghostty-vt.wasm)
-          echo "WASM size: $SIZE bytes"
-          if [ "$SIZE" -gt 524288 ]; then
-            echo "❌ Error: WASM exceeds 512 KB limit"
-            exit 1
-          fi
+        run: bun run scripts/check-wasm-size.ts
 
       - name: Install dependencies
         run: bun install
