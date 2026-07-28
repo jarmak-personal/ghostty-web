@@ -74,16 +74,6 @@ jobs:
             exit 1
           fi
 
-      - name: Require immutable releases
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          enabled=$(gh api "repos/$GITHUB_REPOSITORY/immutable-releases" --jq '.enabled')
-          if [[ "$enabled" != 'true' ]]; then
-            echo "::error::Enable immutable releases in repository settings before publishing an hvir artifact"
-            exit 1
-          fi
-
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.14
@@ -196,13 +186,18 @@ jobs:
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
           set -euo pipefail
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          verify_immutable_release() {
             state=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
-              --json isDraft,isPrerelease --jq '[.isDraft, .isPrerelease] | @tsv')
-            if [[ "$state" != $'false\tfalse' ]]; then
-              echo "::error::Existing release $TAG must be published and non-prerelease"
+              --json isDraft,isImmutable,isPrerelease \
+              --jq '[.isDraft, .isImmutable, .isPrerelease] | @tsv')
+            if [[ "$state" != $'false\ttrue\tfalse' ]]; then
+              echo "::error::Release $TAG must be published, immutable, and non-prerelease"
               exit 1
             fi
+          }
+
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            verify_immutable_release
 
             actual_assets=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
               --json assets --jq '.assets[].name' | sort)
@@ -249,4 +244,5 @@ jobs:
             --title "hvir ghostty-web artifact ${TAG#hvir-v}" \
             --notes-file "$notes" \
             --latest
+          verify_immutable_release
           gh release verify "$TAG" --repo "$GITHUB_REPOSITORY"

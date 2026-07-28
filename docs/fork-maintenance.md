@@ -59,9 +59,12 @@ mutable registry state.
 Only tag retained post-merge commits that are ancestors of `hvir-main`. Persistent artifact tags
 use `hvir-v<package-version>-<revision>` and must not move or be deleted. The release workflow
 repeats all quality gates with pinned build tools, then uses GitHub CLI's draft-then-publish path to
-lock all three assets in an immutable release. It verifies an identical published release on rerun
-but never overwrites an asset. Pull-request runs continue to validate the package boundary, but
-their checkout can be GitHub's synthetic test merge and is never promoted.
+lock all three assets in an immutable release. The workflow token cannot read repository
+Administration settings, so the setting remains a maintainer precondition; after publication the
+workflow requires GitHub to report the release as immutable and verifies its signed attestation. It
+verifies an identical published release on rerun but never overwrites an asset. Pull-request runs
+continue to validate the package boundary, but their checkout can be GitHub's synthetic test merge
+and is never promoted.
 
 ## One-time repository setup
 
