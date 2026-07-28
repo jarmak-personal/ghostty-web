@@ -37,9 +37,11 @@ sync pull request instead.
 
 ## Publication boundary
 
-The inherited `publish.yml` and `release-please.yml` jobs have repository-identity guards. They
-must remain inert unless `github.repository` is exactly `coder/ghostty-web`. Recheck those guards
-on every upstream sync that touches release workflows.
+The upstream `publish.yml` and `release-please.yml` workflows are deliberately absent from
+`hvir-main`. The underlying release scripts and configuration remain as inert upstream source to
+reduce unnecessary divergence, but the fork has no executable registry or Release Please path.
+Do not restore either workflow during an upstream sync. A delete/modify conflict involving those
+paths is an intentional security review boundary, not a reason to accept the upstream file.
 
 The hvir fork has no npm publishing credentials and no independent release stream. Its delivery
 unit is the output of `bun run pack:hvir`:

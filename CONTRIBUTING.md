@@ -71,11 +71,11 @@ git switch -c sync/upstream-YYYYMMDD
 git merge --no-ff upstream/main
 ```
 
-Resolve conflicts by preserving the smallest fork patch set and the repository guards that keep
-upstream npm publishing inert outside `coder/ghostty-web`. Update `fork.json` to the exact
-`upstream/main` commit, run all checks, and open a pull request to `hvir-main`. Merge an upstream
-sync PR with a merge commit so Git retains the upstream ancestry; ordinary fork PRs may be
-squashed.
+Resolve conflicts by preserving the smallest fork patch set. Do not restore upstream's publish or
+Release Please workflows: executable release automation is intentionally absent from
+`hvir-main`. Update `fork.json` to the exact `upstream/main` commit, run all checks, and open a
+pull request to `hvir-main`. Merge an upstream sync PR with a merge commit so Git retains the
+upstream ancestry; ordinary fork PRs may be squashed.
 
 ## Contribute a fix upstream
 

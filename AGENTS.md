@@ -29,8 +29,8 @@ Substantive fork work starts from a governing issue, branches from `hvir-main`, 
 can be proposed upstream.
 
 Do not publish the upstream-owned `ghostty-web` npm package from the fork. hvir consumes an exact,
-vendored package artifact produced by `bun run pack:hvir`; the fork's inherited upstream publish
-workflows are deliberately guarded to run only in `coder/ghostty-web`.
+vendored package artifact produced by `bun run pack:hvir`. The fork deliberately removes
+upstream's publish and Release Please workflows; do not restore them during an upstream sync.
 
 **Before committing, always run:**
 

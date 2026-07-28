@@ -13,7 +13,7 @@ Describe the observable result and why it belongs in the hvir compatibility fork
 ## Fork hygiene
 
 - [ ] The change is focused and does not introduce unrelated divergence from ghostty-web.
-- [ ] Any upstream-sync conflict preserves the fork's npm publication guards.
+- [ ] An upstream sync does not restore upstream's publish or Release Please workflows.
 - [ ] `fork.json` is updated if this pull request incorporates a new upstream baseline.
 
 ## Verification

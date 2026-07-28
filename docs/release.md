@@ -1,11 +1,12 @@
-# Release runbook
+# Upstream release runbook
 
 > [!IMPORTANT]
-> This is the inherited upstream release runbook. In the hvir fork, the upstream publish and
-> Release Please jobs are guarded to run only when `github.repository` is
-> `coder/ghostty-web`. The fork does not publish a registry package or GitHub Release. It produces
-> a CI-validated package with `bun run pack:hvir`, then hvir vendors the accepted tarball,
-> checksum, and provenance. See [`fork-maintenance.md`](fork-maintenance.md).
+> This runbook is retained only as upstream reference. The hvir fork deliberately removes the
+> `publish.yml` and `release-please.yml` workflows described below, so these procedures are not an
+> executable fork release path and must not be restored during upstream sync. The fork does not
+> publish a registry package or GitHub Release. It produces a CI-validated package with
+> `bun run pack:hvir`, then hvir vendors the accepted tarball, checksum, and provenance. See
+> [`fork-maintenance.md`](fork-maintenance.md).
 
 ## Automated flow
 
