@@ -7,14 +7,13 @@
  * Run with: npx @ghostty-web/demo
  */
 
+// Node-pty for cross-platform PTY support
+import pty from '@lydell/node-pty';
 import fs from 'fs';
 import http from 'http';
 import { homedir } from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
-
-// Node-pty for cross-platform PTY support
-import pty from '@lydell/node-pty';
 // WebSocket server
 import { WebSocketServer } from 'ws';
 
@@ -47,6 +46,7 @@ function parsePort(value) {
 // ============================================================================
 
 import { createRequire } from 'module';
+
 const require = createRequire(import.meta.url);
 
 function findGhosttyWeb() {

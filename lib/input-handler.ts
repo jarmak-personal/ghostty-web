@@ -13,8 +13,7 @@
  * - Captures all keyboard input (preventDefault on everything)
  */
 
-import type { Ghostty } from './ghostty';
-import type { KeyEncoder } from './ghostty';
+import type { Ghostty, KeyEncoder } from './ghostty';
 import type { IKeyEvent } from './interfaces';
 import { Key, KeyAction, KeyEncoderOption, Mods } from './types';
 
