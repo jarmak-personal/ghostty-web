@@ -32,7 +32,7 @@ Do not publish the upstream-owned `ghostty-web` npm package from the fork. hvir 
 package artifact produced by `bun run pack:hvir` and attached to a tagged GitHub Release. The fork
 deliberately removes upstream's npm publish and Release Please workflows; do not restore them
 during an upstream sync. Persistent artifacts use the fork-only
-`.github/workflows/release-hvir-artifact.yml` workflow.
+`.github/workflows/release-hvir-artifact.yml` workflow and require repository release immutability.
 
 **Before committing, always run:**
 

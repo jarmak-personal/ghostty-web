@@ -58,9 +58,10 @@ mutable registry state.
 
 Only tag retained post-merge commits that are ancestors of `hvir-main`. Persistent artifact tags
 use `hvir-v<package-version>-<revision>` and must not move or be deleted. The release workflow
-repeats all quality gates with pinned build tools, then creates or verifies the exact three-asset
-release without overwriting assets. Pull-request runs continue to validate the package boundary,
-but their checkout can be GitHub's synthetic test merge and is never promoted.
+repeats all quality gates with pinned build tools, then uses GitHub CLI's draft-then-publish path to
+lock all three assets in an immutable release. It verifies an identical published release on rerun
+but never overwrites an asset. Pull-request runs continue to validate the package boundary, but
+their checkout can be GitHub's synthetic test merge and is never promoted.
 
 ## One-time repository setup
 
@@ -76,7 +77,11 @@ After this infrastructure merges:
    merges.
 5. Keep Dependabot alerts and security updates enabled. Version updates for Bun dependencies and
    GitHub Actions are grouped weekly to limit fork churn.
-6. Add a tag ruleset for `hvir-v*` that prevents tag updates and deletion after creation.
+6. Enable immutable releases under the repository's general settings before creating the first
+   `hvir-v*` tag. GitHub then locks every published release's assets and tag and generates a signed
+   release attestation.
+7. Optionally add a tag ruleset for `hvir-v*` to protect the interval between tag creation and
+   immutable release publication. Immutability itself protects the tag after publication.
 
 The Project's built-in workflows may set new items to `Todo` and closed items to `Done`. Repository
 labels remain the source of issue categorization; no custom Project field is required for this

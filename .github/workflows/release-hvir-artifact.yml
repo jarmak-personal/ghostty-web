@@ -57,7 +57,7 @@ jobs:
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
           set -euo pipefail
-          git fetch origin hvir-main --tags
+          git fetch origin hvir-main:refs/remotes/origin/hvir-main --tags
           tag_commit=$(git rev-list -n 1 "$TAG")
           source_commit=$(git rev-parse HEAD)
           if [[ "$tag_commit" != "$source_commit" ]]; then
@@ -71,6 +71,16 @@ jobs:
           actual_version=$(node -p "require('./package.json').version")
           if [[ "$actual_version" != "$PACKAGE_VERSION" ]]; then
             echo "::error::Tag package version $PACKAGE_VERSION does not match package.json $actual_version"
+            exit 1
+          fi
+
+      - name: Require immutable releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          enabled=$(gh api "repos/$GITHUB_REPOSITORY/immutable-releases" --jq '.enabled')
+          if [[ "$enabled" != 'true' ]]; then
+            echo "::error::Enable immutable releases in repository settings before publishing an hvir artifact"
             exit 1
           fi
 
@@ -208,7 +218,8 @@ jobs:
             cmp "$ARTIFACT" "$existing/$ARTIFACT_NAME"
             cmp "$CHECKSUM" "$existing/$CHECKSUM_NAME"
             cmp "$PROVENANCE" "$existing/$PROVENANCE_NAME"
-            echo "Release $TAG already contains the exact reproducible payload; nothing to replace."
+            gh release verify "$TAG" --repo "$GITHUB_REPOSITORY"
+            echo "Immutable release $TAG already contains the exact reproducible payload."
             exit 0
           fi
 
@@ -227,6 +238,8 @@ jobs:
           This release does not publish the upstream-owned npm package. hvir consumes the tarball by its exact release URL and npm lockfile integrity.
           EOF
 
+          # gh stages assets on a draft internally before publishing when release
+          # immutability is enabled, so all three files are locked together.
           gh release create "$TAG" \
             "$ARTIFACT" "$CHECKSUM" "$PROVENANCE" \
             --repo "$GITHUB_REPOSITORY" \
@@ -234,3 +247,4 @@ jobs:
             --title "hvir ghostty-web artifact ${TAG#hvir-v}" \
             --notes-file "$notes" \
             --latest
+          gh release verify "$TAG" --repo "$GITHUB_REPOSITORY"
