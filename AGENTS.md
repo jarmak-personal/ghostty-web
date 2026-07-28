@@ -2,6 +2,16 @@
 
 **For AI coding agents working on this repository.**
 
+> [!IMPORTANT]
+> **This repository is the hvir compatibility fork:**
+> [`jarmak-personal/ghostty-web`](https://github.com/jarmak-personal/ghostty-web). Normal work starts
+> from a governing issue in this fork, branches from `hvir-main`, and opens a pull request back to
+> this fork with base `hvir-main`. **Do not open an issue or pull request against
+> `coder/ghostty-web` from `hvir-main` or from an ordinary fork branch.** An upstream contribution
+> happens only when the maintainer explicitly designates it, and it must use a clean branch created
+> from `upstream/main` with all hvir-only infrastructure and integration changes excluded. When the
+> destination is uncertain, stop with the fork issue or fork pull request; do not notify upstream.
+
 ## Quick Start
 
 ```bash
@@ -12,7 +22,7 @@ bun run dev                         # Start Vite dev server (http://localhost:80
 
 ## hvir Fork Workflow
 
-This checkout may be the hvir compatibility fork. Before changing it, read
+This is the hvir compatibility fork. Before changing it, read
 [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`docs/fork-maintenance.md`](docs/fork-maintenance.md).
 Substantive fork work starts from a governing issue, branches from `hvir-main`, and returns to
 `hvir-main` through a pull request. Keep fork-only integration work separate from changes that
