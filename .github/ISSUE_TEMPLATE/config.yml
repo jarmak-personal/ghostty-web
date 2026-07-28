@@ -1,5 +1,8 @@
 blank_issues_enabled: false
 contact_links:
-  - name: Search upstream ghostty-web issues
-    url: https://github.com/coder/ghostty-web/issues
-    about: Check whether the behavior is already reported or fixed upstream.
+  - name: Ask a question or report a problem
+    url: https://github.com/jarmak-personal/ghostty-web/discussions/categories/q-a
+    about: Get help or share a problem in Q&A.
+  - name: Propose an idea
+    url: https://github.com/jarmak-personal/ghostty-web/discussions/categories/ideas
+    about: Suggest and discuss a possible improvement.

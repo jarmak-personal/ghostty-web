@@ -7,11 +7,17 @@ ghostty-web community.
 
 ## Start with an issue
 
-Substantive work starts with an issue in this fork. Search both the
+Substantive work starts with a maintainer-authored issue in this fork. The issue and pull-request
+trackers are intentionally locked against open-ended conversation; new and reopened tracker
+items are automatically locked. If you are not already coordinating a contribution with the
+maintainers, use [Discussions](https://github.com/jarmak-personal/ghostty-web/discussions) to ask a
+question, report a problem, or propose an idea.
+
+Before creating a planning issue, search the
 [fork issues](https://github.com/jarmak-personal/ghostty-web/issues) and
-[upstream issues](https://github.com/coder/ghostty-web/issues) before opening one. The issue should
-state the observed problem, affected environment, desired outcome, acceptance criteria, and
-whether the result appears hvir-specific or generally useful upstream.
+[upstream issues](https://github.com/coder/ghostty-web/issues). The issue should state the observed
+problem, affected environment, desired outcome, acceptance criteria, and whether the result
+appears hvir-specific or generally useful upstream.
 
 The repository automatically adds new issues to the public
 [Ghostty-Web HVIR Fork project](https://github.com/users/jarmak-personal/projects/2). Issues are the

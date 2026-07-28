@@ -58,10 +58,16 @@ After this infrastructure merges:
 3. Confirm a test issue is added to
    [Project 2](https://github.com/users/jarmak-personal/projects/2), then close it.
 4. Require the `pr-title`, `fmt`, `lint`, `type check`, `test`, and `build` checks for pull requests
-   to `hvir-main`.
+   to `hvir-main`, along with the CodeQL `Analyze JavaScript and TypeScript` check.
 5. Keep merge commits available for upstream-sync pull requests; ordinary changes may use squash
    merges.
+6. Keep Dependabot alerts and security updates enabled. Version updates for Bun dependencies and
+   GitHub Actions are grouped weekly to limit fork churn.
 
 The Project's built-in workflows may set new items to `Todo` and closed items to `Done`. Repository
 labels remain the source of issue categorization; no custom Project field is required for this
 small fork unless the planning model grows.
+
+The issue chooser routes public reports and proposals to Discussions. Tracker issues and pull
+requests are planning and delivery records, and the trusted default-branch workflow locks their
+conversations on open, reopen, and unlock events.
