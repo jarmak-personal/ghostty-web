@@ -1,8 +1,8 @@
 import { createAnthropic } from '@ai-sdk/anthropic';
-import { Output, ToolLoopAgent, stepCountIs } from 'ai';
+import { Output, stepCountIs, ToolLoopAgent } from 'ai';
 import { buildReleaseNotesPrompt } from './prompt';
 import { createReleaseInspectionTools } from './tools';
-import { type Editorial, type GenerateEditorialInput, editorialSchema } from './types';
+import { type Editorial, editorialSchema, type GenerateEditorialInput } from './types';
 
 export async function generateEditorial(input: GenerateEditorialInput): Promise<Editorial> {
   if (!input.model) {

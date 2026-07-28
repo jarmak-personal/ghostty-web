@@ -1,12 +1,13 @@
 {
-  "$schema": "https://biomejs.dev/schemas/1.9.4/schema.json",
-  "organizeImports": {
-    "enabled": true
-  },
+  "$schema": "https://biomejs.dev/schemas/2.5.6/schema.json",
+  "assist": { "actions": { "source": { "organizeImports": "on" } } },
   "linter": {
     "enabled": true,
     "rules": {
-      "recommended": true,
+      "preset": "recommended",
+      "a11y": {
+        "useButtonType": "off"
+      },
       "suspicious": {
         "noExplicitAny": "off",
         "noControlCharactersInRegex": "off"
@@ -38,6 +39,16 @@
     }
   },
   "files": {
-    "ignore": ["node_modules", "dist", "coverage", "*.wasm", ".git", ".vite", "bun.lock"]
+    "includes": [
+      "**",
+      "!**/node_modules",
+      "!**/dist",
+      "!**/coverage",
+      "!**/ghostty",
+      "!**/*.wasm",
+      "!**/.git",
+      "!**/.vite",
+      "!**/bun.lock"
+    ]
   }
 }

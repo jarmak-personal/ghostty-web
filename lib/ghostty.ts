@@ -17,9 +17,9 @@ import {
   KeyEncoderOption,
   type KeyEvent,
   type KittyKeyFlags,
-  type RGB,
   type RenderStateColors,
   type RenderStateCursor,
+  type RGB,
   type TerminalHandle,
 } from './types';
 
@@ -31,9 +31,9 @@ export {
   type GhosttyCell,
   type GhosttyTerminalConfig,
   KeyEncoderOption,
-  type RGB,
   type RenderStateColors,
   type RenderStateCursor,
+  type RGB,
 };
 
 /**
