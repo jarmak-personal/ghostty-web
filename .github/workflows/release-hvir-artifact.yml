@@ -74,6 +74,21 @@ jobs:
             exit 1
           fi
 
+      - name: Require immutable releases
+        env:
+          GH_TOKEN: ${{ secrets.GHOSTTY_WEB_RELEASE_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo "::error::GHOSTTY_WEB_RELEASE_TOKEN is required to verify release immutability"
+            exit 1
+          fi
+          enabled=$(gh api "repos/$GITHUB_REPOSITORY/immutable-releases" --jq '.enabled')
+          if [[ "$enabled" != 'true' ]]; then
+            echo "::error::Enable immutable releases in repository settings before publishing an hvir artifact"
+            exit 1
+          fi
+
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.14
