@@ -1003,6 +1003,21 @@ describe('InputHandler', () => {
       expect(dataReceived[0]).toBe(pasteText);
     });
 
+    test('replaces unsafe control characters in pasted text', () => {
+      const handler = new InputHandler(
+        ghostty,
+        container as any,
+        (data) => dataReceived.push(data),
+        () => {
+          bellCalled = true;
+        }
+      );
+
+      container.dispatchEvent(createClipboardEvent('safe\x03command\x1b[201~'));
+
+      expect(dataReceived).toEqual(['safe command [201~']);
+    });
+
     test('handles beforeinput insertFromPaste with data', () => {
       const inputElement = createMockContainer();
       const handler = new InputHandler(
@@ -1051,6 +1066,27 @@ describe('InputHandler', () => {
 
       expect(dataReceived.length).toBe(1);
       expect(dataReceived[0]).toBe(`\x1b[200~${pasteText}\x1b[201~`);
+    });
+
+    test('sanitizes beforeinput data inside bracketed paste markers', () => {
+      const inputElement = createMockContainer();
+      const handler = new InputHandler(
+        ghostty,
+        container as any,
+        (data) => dataReceived.push(data),
+        () => {
+          bellCalled = true;
+        },
+        undefined,
+        undefined,
+        (mode) => mode === 2004,
+        undefined,
+        inputElement as any
+      );
+
+      inputElement.dispatchEvent(createBeforeInputEvent('insertFromPaste', 'safe\x03command'));
+
+      expect(dataReceived).toEqual(['\x1b[200~safe command\x1b[201~']);
     });
 
     test('handles multi-line paste', () => {
