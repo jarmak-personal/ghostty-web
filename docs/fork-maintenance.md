@@ -16,6 +16,14 @@ hvir. A fork change should be one of:
 Do not use the fork to accumulate unrelated features or silently diverge from ghostty-web's API.
 Every retained patch needs a governing issue and an observable hvir reason.
 
+## Current release posture
+
+Through hvir 0.2.0, `hvir-main` is in a polish-and-stabilize phase. Changes should improve the
+reliability, performance, diagnostics, packaging, or maintainability of behavior hvir already
+ships. Potential low-level hvir integrations may be explored in Discussions or clearly disposable
+branches, but feature experiments do not merge into `hvir-main` during this window unless the
+maintainer explicitly changes the release scope.
+
 ## Upstream baseline
 
 [`fork.json`](../fork.json) records the exact upstream commit last incorporated into `hvir-main`.
@@ -52,16 +60,15 @@ branch commit.
 
 After this infrastructure merges:
 
-1. Create a fine-grained token with read access to this repository's issues and write access to
-   the user Project.
-2. Store it as the repository Actions secret `ADD_TO_PROJECT_PAT`.
-3. Confirm a test issue is added to
+1. In Project 2's Workflows settings, enable the native `Auto-add to project` workflow for issues
+   from `jarmak-personal/ghostty-web`.
+2. Confirm a test issue is added to
    [Project 2](https://github.com/users/jarmak-personal/projects/2), then close it.
-4. Require the `pr-title`, `fmt`, `lint`, `type check`, `test`, and `build` checks for pull requests
+3. Require the `pr-title`, `fmt`, `lint`, `type check`, `test`, and `build` checks for pull requests
    to `hvir-main`, along with the CodeQL `Analyze JavaScript and TypeScript` check.
-5. Keep merge commits available for upstream-sync pull requests; ordinary changes may use squash
+4. Keep merge commits available for upstream-sync pull requests; ordinary changes may use squash
    merges.
-6. Keep Dependabot alerts and security updates enabled. Version updates for Bun dependencies and
+5. Keep Dependabot alerts and security updates enabled. Version updates for Bun dependencies and
    GitHub Actions are grouped weekly to limit fork churn.
 
 The Project's built-in workflows may set new items to `Todo` and closed items to `Done`. Repository

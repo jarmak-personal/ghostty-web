@@ -19,9 +19,14 @@ Before creating a planning issue, search the
 problem, affected environment, desired outcome, acceptance criteria, and whether the result
 appears hvir-specific or generally useful upstream.
 
-The repository automatically adds new issues to the public
-[Ghostty-Web HVIR Fork project](https://github.com/users/jarmak-personal/projects/2). Issues are the
-planning records; pull requests link to them rather than serving as a second backlog.
+The public [Ghostty-Web HVIR Fork project](https://github.com/users/jarmak-personal/projects/2)
+uses its native auto-add workflow for new fork issues. Issues are the planning records; pull
+requests link to them rather than serving as a second backlog.
+
+Until hvir 0.2.0, accepted fork work is limited to polishing and stabilizing the existing terminal
+integration. Use Discussions or a clearly disposable exploratory branch for possible low-level
+hvir integrations; exploration does not imply that a feature belongs on `hvir-main` during this
+stabilization window.
 
 For an ordinary change:
 
