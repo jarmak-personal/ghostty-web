@@ -503,6 +503,22 @@ describe('paste()', () => {
       term.dispose();
     });
 
+    test('should replace unsafe control characters with spaces', async () => {
+      if (!container) return;
+      const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
+      term.open(container);
+
+      let receivedData = '';
+      term.onData((data) => {
+        receivedData = data;
+      });
+
+      term.paste('safe\x03command\x1b[201~');
+
+      expect(receivedData).toBe('safe command [201~');
+      term.dispose();
+    });
+
     test('should respect disableStdin option', async () => {
       const term = await createIsolatedTerminal({ cols: 80, rows: 24, disableStdin: true });
       // Using shared container from beforeEach
@@ -1574,8 +1590,8 @@ describe('Terminal Modes', () => {
     expect(receivedData).toBe('test');
 
     term.write('\x1b[?2004h');
-    term.paste('test2');
-    expect(receivedData).toBe('\x1b[200~test2\x1b[201~');
+    term.paste('test2\x03command');
+    expect(receivedData).toBe('\x1b[200~test2 command\x1b[201~');
 
     term.dispose();
   });
