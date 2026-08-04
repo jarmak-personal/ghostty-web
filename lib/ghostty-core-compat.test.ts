@@ -49,4 +49,46 @@ describe('Ghostty v1.3 core compatibility', () => {
       terminal.free();
     }
   });
+
+  test('reports active Kitty keyboard flags', async () => {
+    const ghostty = await Ghostty.load();
+    const terminal = ghostty.createTerminal(80, 24);
+
+    try {
+      terminal.write('\x1b[?u');
+      expect(terminal.readResponse()).toBe('\x1b[?0u');
+
+      terminal.write('\x1b[>1u\x1b[?u');
+      expect(terminal.getKittyKeyboardFlags()).toBe(1);
+      expect(terminal.readResponse()).toBe('\x1b[?1u');
+
+      terminal.write('\x1b[<u\x1b[?u');
+      expect(terminal.getKittyKeyboardFlags()).toBe(0);
+      expect(terminal.readResponse()).toBe('\x1b[?0u');
+    } finally {
+      terminal.free();
+    }
+  });
+
+  test('isolates negotiated keyboard state per terminal', async () => {
+    const ghostty = await Ghostty.load();
+    const first = ghostty.createTerminal(80, 24);
+    const second = ghostty.createTerminal(80, 24);
+
+    try {
+      first.write('\x1b[>1u\x1b[>4;2m');
+
+      expect(first.getKittyKeyboardFlags()).toBe(1);
+      expect(first.hasModifyOtherKeysState2()).toBe(true);
+      expect(second.getKittyKeyboardFlags()).toBe(0);
+      expect(second.hasModifyOtherKeysState2()).toBe(false);
+
+      first.write('\x1bc');
+      expect(first.getKittyKeyboardFlags()).toBe(0);
+      expect(first.hasModifyOtherKeysState2()).toBe(false);
+    } finally {
+      first.free();
+      second.free();
+    }
+  });
 });

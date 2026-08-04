@@ -16,7 +16,7 @@
 import type { Ghostty, KeyEncoder } from './ghostty';
 import type { IKeyEvent } from './interfaces';
 import { encodePaste } from './paste';
-import { Key, KeyAction, KeyEncoderOption, Mods } from './types';
+import { Key, KeyAction, KeyEncoderOption, KittyKeyFlags, Mods } from './types';
 
 /**
  * Map KeyboardEvent.code values to USB HID Key enum values
@@ -172,6 +172,11 @@ export interface MouseTrackingConfig {
   getCanvasOffset: () => { left: number; top: number };
 }
 
+export interface KeyboardProtocolState {
+  kittyFlags: KittyKeyFlags;
+  modifyOtherKeysState2: boolean;
+}
+
 export class InputHandler {
   private encoder: KeyEncoder;
   private container: HTMLElement;
@@ -183,6 +188,7 @@ export class InputHandler {
   private getModeCallback?: (mode: number) => boolean;
   private onCopyCallback?: () => boolean;
   private mouseConfig?: MouseTrackingConfig;
+  private getKeyboardProtocolStateCallback?: () => KeyboardProtocolState;
   private keydownListener: ((e: KeyboardEvent) => void) | null = null;
   private keypressListener: ((e: KeyboardEvent) => void) | null = null;
   private pasteListener: ((e: ClipboardEvent) => void) | null = null;
@@ -220,6 +226,7 @@ export class InputHandler {
    * @param onCopy - Optional callback to handle copy (Cmd+C/Ctrl+C with selection)
    * @param inputElement - Optional input element for beforeinput events
    * @param mouseConfig - Optional mouse tracking configuration
+   * @param getKeyboardProtocolState - Optional callback for negotiated keyboard protocol state
    */
   constructor(
     ghostty: Ghostty,
@@ -231,7 +238,8 @@ export class InputHandler {
     getMode?: (mode: number) => boolean,
     onCopy?: () => boolean,
     inputElement?: HTMLElement,
-    mouseConfig?: MouseTrackingConfig
+    mouseConfig?: MouseTrackingConfig,
+    getKeyboardProtocolState?: () => KeyboardProtocolState
   ) {
     this.encoder = ghostty.createKeyEncoder();
     this.container = container;
@@ -243,6 +251,7 @@ export class InputHandler {
     this.getModeCallback = getMode;
     this.onCopyCallback = onCopy;
     this.mouseConfig = mouseConfig;
+    this.getKeyboardProtocolStateCallback = getKeyboardProtocolState;
 
     // Attach event listeners
     this.attach();
@@ -391,7 +400,6 @@ export class InputHandler {
     }
 
     // Handle Cmd+C for copy (on Mac, Cmd+C should copy, not send interrupt)
-    // Note: Ctrl+C on all platforms sends interrupt signal (0x03)
     if (event.metaKey && event.code === 'KeyC') {
       // Try to copy selection via callback
       // If there's a selection and copy succeeds, prevent default
@@ -399,6 +407,21 @@ export class InputHandler {
       if (this.onCopyCallback && this.onCopyCallback()) {
         event.preventDefault();
       }
+      return;
+    }
+
+    // Ctrl+Shift+C is the conventional Linux terminal copy chord. Reserve it
+    // even without a selection so it can never fall through as Ctrl+C.
+    if (
+      event.ctrlKey &&
+      event.shiftKey &&
+      !event.altKey &&
+      !event.metaKey &&
+      event.code === 'KeyC'
+    ) {
+      this.onCopyCallback?.();
+      event.preventDefault();
+      event.stopPropagation();
       return;
     }
 
@@ -420,6 +443,11 @@ export class InputHandler {
 
     // Extract modifiers
     const mods = this.extractModifiers(event);
+    const keyboardProtocolState = this.getKeyboardProtocolStateCallback?.();
+    const hasExtendedKeyboardProtocol =
+      keyboardProtocolState !== undefined &&
+      (keyboardProtocolState.kittyFlags !== KittyKeyFlags.DISABLED ||
+        keyboardProtocolState.modifyOtherKeysState2);
 
     // Handle simple special keys that produce standard sequences
     if (mods === Mods.NONE || mods === Mods.SHIFT) {
@@ -427,7 +455,9 @@ export class InputHandler {
 
       switch (key) {
         case Key.ENTER:
-          simpleOutput = '\r'; // Carriage return
+          if (mods === Mods.NONE || !hasExtendedKeyboardProtocol) {
+            simpleOutput = '\r'; // Carriage return
+          }
           break;
         case Key.TAB:
           if (mods === Mods.SHIFT) {
@@ -519,6 +549,13 @@ export class InputHandler {
       if (this.getModeCallback) {
         const appCursorMode = this.getModeCallback(1);
         this.encoder.setOption(KeyEncoderOption.CURSOR_KEY_APPLICATION, appCursorMode);
+      }
+      if (keyboardProtocolState) {
+        this.encoder.setKittyFlags(keyboardProtocolState.kittyFlags);
+        this.encoder.setOption(
+          KeyEncoderOption.MODIFY_OTHER_KEYS_STATE_2,
+          keyboardProtocolState.modifyOtherKeysState2
+        );
       }
 
       // For letter/number keys, even with modifiers, pass the base character

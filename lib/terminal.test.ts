@@ -1560,6 +1560,39 @@ describe('Terminal Config', () => {
 });
 
 describe('Terminal Modes', () => {
+  test('encodes Shift+Enter from keyboard modes negotiated through VT input', async () => {
+    if (typeof document === 'undefined') return;
+    const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
+    const container = document.createElement('div');
+    term.open(container);
+    const receivedData: string[] = [];
+    term.onData((data) => receivedData.push(data));
+    const pressShiftEnter = () => {
+      container.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          code: 'Enter',
+          shiftKey: true,
+          bubbles: true,
+          cancelable: true,
+        })
+      );
+    };
+
+    pressShiftEnter();
+    term.write('\x1b[>1u');
+    pressShiftEnter();
+    term.write('\x1b[<u');
+    pressShiftEnter();
+    term.write('\x1b[>4;2m');
+    pressShiftEnter();
+    term.write('\x1b[>4;0m');
+    pressShiftEnter();
+
+    expect(receivedData).toEqual(['\r', '\x1b[13;2u', '\r', '\x1b[27;2;13~', '\r']);
+    term.dispose();
+  });
+
   test('should detect bracketed paste mode', async () => {
     if (typeof document === 'undefined') return;
     const term = await createIsolatedTerminal({ cols: 80, rows: 24 });

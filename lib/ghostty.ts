@@ -742,6 +742,14 @@ export class GhosttyTerminal {
     return this.exports.ghostty_terminal_get_mode(this.handle, mode, isAnsi) !== 0;
   }
 
+  getKittyKeyboardFlags(): KittyKeyFlags {
+    return this.exports.ghostty_terminal_get_kitty_keyboard_flags(this.handle) as KittyKeyFlags;
+  }
+
+  hasModifyOtherKeysState2(): boolean {
+    return this.exports.ghostty_terminal_has_modify_other_keys_state_2(this.handle) !== 0;
+  }
+
   // ==========================================================================
   // Private helpers
   // ==========================================================================
