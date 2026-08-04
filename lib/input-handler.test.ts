@@ -661,6 +661,34 @@ describe('InputHandler', () => {
       handler.dispose();
     });
 
+    test('routes mapped special keys through negotiated keyboard state', () => {
+      const handler = new InputHandler(
+        ghostty,
+        container as any,
+        (data) => dataReceived.push(data),
+        () => {
+          bellCalled = true;
+        },
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        () => ({
+          kittyFlags: KittyKeyFlags.DISAMBIGUATE,
+          modifyOtherKeysState2: false,
+        })
+      );
+
+      simulateKey(container, createKeyEvent('Escape', 'Escape'));
+      simulateKey(container, createKeyEvent('Tab', 'Tab', { shift: true }));
+      simulateKey(container, createKeyEvent('Backspace', 'Backspace', { shift: true }));
+
+      expect(dataReceived).toEqual(['\x1b[27u', '\x1b[9;2u', '\x1b[127;2u']);
+      handler.dispose();
+    });
+
     test('encodes Tab', () => {
       const handler = new InputHandler(
         ghostty,
@@ -1301,6 +1329,33 @@ describe('InputHandler', () => {
       simulateKey(container, createKeyEvent('KeyV', 'v', { ctrl: true }));
 
       expect(dataReceived.length).toBe(0);
+    });
+
+    test('allows Ctrl+Shift+V to paste exactly once', () => {
+      const inputElement = createMockContainer();
+      const handler = new InputHandler(
+        ghostty,
+        container as any,
+        (data) => dataReceived.push(data),
+        () => {
+          bellCalled = true;
+        },
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        inputElement as any
+      );
+      const keyEvent = createKeyEvent('KeyV', 'V', { ctrl: true, shift: true });
+      const pasteText = 'shifted paste';
+
+      simulateKey(container, keyEvent);
+      container.dispatchEvent(createClipboardEvent(pasteText));
+      inputElement.dispatchEvent(createBeforeInputEvent('insertFromPaste', pasteText));
+
+      expect(dataReceived).toEqual([pasteText]);
+      expect(keyEvent.preventDefault).not.toHaveBeenCalled();
+      handler.dispose();
     });
 
     test('allows Cmd+V to trigger paste', () => {

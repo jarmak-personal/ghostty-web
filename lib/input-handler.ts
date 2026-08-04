@@ -449,15 +449,15 @@ export class InputHandler {
       (keyboardProtocolState.kittyFlags !== KittyKeyFlags.DISABLED ||
         keyboardProtocolState.modifyOtherKeysState2);
 
-    // Handle simple special keys that produce standard sequences
-    if (mods === Mods.NONE || mods === Mods.SHIFT) {
+    // Preserve legacy shortcuts only while no extended keyboard protocol is
+    // active. Once negotiated, the Ghostty encoder owns mapped special keys
+    // so its Kitty/modifyOtherKeys tables remain internally consistent.
+    if ((mods === Mods.NONE || mods === Mods.SHIFT) && !hasExtendedKeyboardProtocol) {
       let simpleOutput: string | null = null;
 
       switch (key) {
         case Key.ENTER:
-          if (mods === Mods.NONE || !hasExtendedKeyboardProtocol) {
-            simpleOutput = '\r'; // Carriage return
-          }
+          simpleOutput = '\r'; // Carriage return
           break;
         case Key.TAB:
           if (mods === Mods.SHIFT) {
