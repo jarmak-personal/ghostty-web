@@ -3138,6 +3138,52 @@ describe('Echo Latency Optimization', () => {
 });
 
 // ==========================================================================
+// Scrollbar presentation
+// ==========================================================================
+
+describe('Scrollbar presentation', () => {
+  test('fully redraws once when the scrollbar fade-out completes', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
+    term.open(container);
+
+    // Keep the terminal render loop from adding unrelated renderer calls while
+    // the fade animation is advanced deterministically.
+    (term as any).cancelRenderLoop();
+    const { renderArgs, restore } = spyOnRendererRender(term);
+    const originalNow = Date.now;
+    const originalRequestAnimationFrame = globalThis.requestAnimationFrame;
+    let now = 0;
+
+    Date.now = () => now;
+    globalThis.requestAnimationFrame = ((callback: FrameRequestCallback) => {
+      now = 200;
+      callback(now);
+      return 1;
+    }) as typeof requestAnimationFrame;
+
+    try {
+      (term as any).scrollbarVisible = true;
+      (term as any).scrollbarOpacity = 1;
+      (term as any).fadeOutScrollbar();
+
+      expect(renderArgs.map((args) => ({ forceAll: args[1], opacity: args[4] }))).toEqual([
+        { forceAll: false, opacity: 1 },
+        { forceAll: true, opacity: 0 },
+      ]);
+      expect((term as any).scrollbarVisible).toBe(false);
+    } finally {
+      Date.now = originalNow;
+      globalThis.requestAnimationFrame = originalRequestAnimationFrame;
+      restore();
+      term.dispose();
+      document.body.removeChild(container);
+    }
+  });
+});
+
+// ==========================================================================
 // xterm.js Compatibility: Synchronous open()
 // ==========================================================================
 
