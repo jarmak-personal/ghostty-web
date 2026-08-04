@@ -5,7 +5,7 @@
 import { beforeEach, describe, expect, mock, test } from 'bun:test';
 import { Ghostty } from './ghostty';
 import { InputHandler } from './input-handler';
-import { Key, KeyAction, Mods } from './types';
+import { Key, KeyAction, KittyKeyFlags, Mods } from './types';
 
 // Mock DOM types for testing
 interface MockKeyboardEvent {
@@ -550,6 +550,55 @@ describe('InputHandler', () => {
       // SelectionManager handles the actual copying
       expect(dataReceived.length).toBe(0);
     });
+
+    test('Ctrl+Shift+C copies without sending Ctrl+C', () => {
+      const onCopy = mock(() => true);
+      const handler = new InputHandler(
+        ghostty,
+        container as any,
+        (data) => dataReceived.push(data),
+        () => {
+          bellCalled = true;
+        },
+        undefined,
+        undefined,
+        undefined,
+        onCopy
+      );
+      const event = createKeyEvent('KeyC', 'C', { ctrl: true, shift: true });
+
+      simulateKey(container, event);
+
+      expect(onCopy).toHaveBeenCalledTimes(1);
+      expect(dataReceived).toEqual([]);
+      expect(event.preventDefault).toHaveBeenCalledTimes(1);
+      expect(event.stopPropagation).toHaveBeenCalledTimes(1);
+      handler.dispose();
+    });
+
+    test('Ctrl+Shift+C remains reserved without a selection', () => {
+      const onCopy = mock(() => false);
+      const handler = new InputHandler(
+        ghostty,
+        container as any,
+        (data) => dataReceived.push(data),
+        () => {
+          bellCalled = true;
+        },
+        undefined,
+        undefined,
+        undefined,
+        onCopy
+      );
+      const event = createKeyEvent('KeyC', 'C', { ctrl: true, shift: true });
+
+      simulateKey(container, event);
+
+      expect(onCopy).toHaveBeenCalledTimes(1);
+      expect(dataReceived).toEqual([]);
+      expect(event.preventDefault).toHaveBeenCalledTimes(1);
+      handler.dispose();
+    });
   });
 
   describe('Special Keys', () => {
@@ -568,6 +617,76 @@ describe('InputHandler', () => {
       expect(dataReceived.length).toBe(1);
       // Enter should produce \r (0x0D)
       expect(dataReceived[0]).toBe('\r');
+    });
+
+    test('encodes Shift+Enter from negotiated keyboard state', () => {
+      let keyboardState = {
+        kittyFlags: KittyKeyFlags.DISABLED,
+        modifyOtherKeysState2: false,
+      };
+      const handler = new InputHandler(
+        ghostty,
+        container as any,
+        (data) => dataReceived.push(data),
+        () => {
+          bellCalled = true;
+        },
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        () => keyboardState
+      );
+
+      simulateKey(container, createKeyEvent('Enter', 'Enter', { shift: true }));
+      keyboardState = {
+        kittyFlags: KittyKeyFlags.DISAMBIGUATE,
+        modifyOtherKeysState2: false,
+      };
+      simulateKey(container, createKeyEvent('Enter', 'Enter', { shift: true }));
+      keyboardState = {
+        kittyFlags: KittyKeyFlags.DISABLED,
+        modifyOtherKeysState2: true,
+      };
+      simulateKey(container, createKeyEvent('Enter', 'Enter', { shift: true }));
+      keyboardState = {
+        kittyFlags: KittyKeyFlags.DISABLED,
+        modifyOtherKeysState2: false,
+      };
+      simulateKey(container, createKeyEvent('Enter', 'Enter', { shift: true }));
+
+      expect(dataReceived).toEqual(['\r', '\x1b[13;2u', '\x1b[27;2;13~', '\r']);
+      handler.dispose();
+    });
+
+    test('routes mapped special keys through negotiated keyboard state', () => {
+      const handler = new InputHandler(
+        ghostty,
+        container as any,
+        (data) => dataReceived.push(data),
+        () => {
+          bellCalled = true;
+        },
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        () => ({
+          kittyFlags: KittyKeyFlags.DISAMBIGUATE,
+          modifyOtherKeysState2: false,
+        })
+      );
+
+      simulateKey(container, createKeyEvent('Escape', 'Escape'));
+      simulateKey(container, createKeyEvent('Tab', 'Tab', { shift: true }));
+      simulateKey(container, createKeyEvent('Backspace', 'Backspace', { shift: true }));
+
+      expect(dataReceived).toEqual(['\x1b[27u', '\x1b[9;2u', '\x1b[127;2u']);
+      handler.dispose();
     });
 
     test('encodes Tab', () => {
@@ -1210,6 +1329,33 @@ describe('InputHandler', () => {
       simulateKey(container, createKeyEvent('KeyV', 'v', { ctrl: true }));
 
       expect(dataReceived.length).toBe(0);
+    });
+
+    test('allows Ctrl+Shift+V to paste exactly once', () => {
+      const inputElement = createMockContainer();
+      const handler = new InputHandler(
+        ghostty,
+        container as any,
+        (data) => dataReceived.push(data),
+        () => {
+          bellCalled = true;
+        },
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        inputElement as any
+      );
+      const keyEvent = createKeyEvent('KeyV', 'V', { ctrl: true, shift: true });
+      const pasteText = 'shifted paste';
+
+      simulateKey(container, keyEvent);
+      container.dispatchEvent(createClipboardEvent(pasteText));
+      inputElement.dispatchEvent(createBeforeInputEvent('insertFromPaste', pasteText));
+
+      expect(dataReceived).toEqual([pasteText]);
+      expect(keyEvent.preventDefault).not.toHaveBeenCalled();
+      handler.dispose();
     });
 
     test('allows Cmd+V to trigger paste', () => {

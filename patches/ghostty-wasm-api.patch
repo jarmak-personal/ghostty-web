@@ -29,10 +29,10 @@ index 4f8fef88e..ca9fb1d4d 100644
  #include <ghostty/vt/key.h>
 diff --git a/include/ghostty/vt/terminal.h b/include/ghostty/vt/terminal.h
 new file mode 100644
-index 000000000..c467102c3
+index 000000000..6251bf694
 --- /dev/null
 +++ b/include/ghostty/vt/terminal.h
-@@ -0,0 +1,285 @@
+@@ -0,0 +1,291 @@
 +/**
 + * @file terminal.h
 + *
@@ -215,6 +215,12 @@ index 000000000..c467102c3
 + */
 +bool ghostty_terminal_get_mode(GhosttyTerminal term, int mode, bool is_ansi);
 +
++/** Get the active Kitty keyboard protocol flags. */
++uint8_t ghostty_terminal_get_kitty_keyboard_flags(GhosttyTerminal term);
++
++/** Check whether xterm modifyOtherKeys mode 2 is active. */
++bool ghostty_terminal_has_modify_other_keys_state_2(GhosttyTerminal term);
++
 +/* ============================================================================
 + * Scrollback API
 + * ========================================================================= */
@@ -319,10 +325,10 @@ index 000000000..c467102c3
 +
 +#endif /* GHOSTTY_VT_TERMINAL_H */
 diff --git a/src/lib_vt.zig b/src/lib_vt.zig
-index 426660621..a238a6a2f 100644
+index 426660621..c3de6c2b5 100644
 --- a/src/lib_vt.zig
 +++ b/src/lib_vt.zig
-@@ -143,6 +143,45 @@ comptime {
+@@ -143,6 +143,47 @@ comptime {
          @export(&c.sgr_unknown_partial, .{ .name = "ghostty_sgr_unknown_partial" });
          @export(&c.sgr_attribute_tag, .{ .name = "ghostty_sgr_attribute_tag" });
          @export(&c.sgr_attribute_value, .{ .name = "ghostty_sgr_attribute_value" });
@@ -351,6 +357,8 @@ index 426660621..a238a6a2f 100644
 +        @export(&c.terminal_is_alternate_screen, .{ .name = "ghostty_terminal_is_alternate_screen" });
 +        @export(&c.terminal_has_mouse_tracking, .{ .name = "ghostty_terminal_has_mouse_tracking" });
 +        @export(&c.terminal_get_mode, .{ .name = "ghostty_terminal_get_mode" });
++        @export(&c.terminal_get_kitty_keyboard_flags, .{ .name = "ghostty_terminal_get_kitty_keyboard_flags" });
++        @export(&c.terminal_has_modify_other_keys_state_2, .{ .name = "ghostty_terminal_has_modify_other_keys_state_2" });
 +
 +        // Scrollback API
 +        @export(&c.terminal_get_scrollback_length, .{ .name = "ghostty_terminal_get_scrollback_length" });
@@ -403,7 +411,7 @@ index ea8ca1445..75a72480b 100644
      }
 
 diff --git a/src/terminal/c/main.zig b/src/terminal/c/main.zig
-index bc92597f5..d0ee49c1b 100644
+index bc92597f5..39f6c5239 100644
 --- a/src/terminal/c/main.zig
 +++ b/src/terminal/c/main.zig
 @@ -4,6 +4,7 @@ pub const key_event = @import("key_event.zig");
@@ -414,7 +422,7 @@ index bc92597f5..d0ee49c1b 100644
 
  // The full C API, unexported.
  pub const osc_new = osc.new;
-@@ -52,6 +53,46 @@ pub const key_encoder_encode = key_encode.encode;
+@@ -52,6 +53,48 @@ pub const key_encoder_encode = key_encode.encode;
 
  pub const paste_is_safe = paste.is_safe;
 
@@ -443,6 +451,8 @@ index bc92597f5..d0ee49c1b 100644
 +pub const terminal_is_alternate_screen = terminal.isAlternateScreen;
 +pub const terminal_has_mouse_tracking = terminal.hasMouseTracking;
 +pub const terminal_get_mode = terminal.getMode;
++pub const terminal_get_kitty_keyboard_flags = terminal.getKittyKeyboardFlags;
++pub const terminal_has_modify_other_keys_state_2 = terminal.hasModifyOtherKeysState2;
 +
 +// Scrollback API
 +pub const terminal_get_scrollback_length = terminal.getScrollbackLength;
@@ -461,7 +471,7 @@ index bc92597f5..d0ee49c1b 100644
  test {
      _ = color;
      _ = osc;
-@@ -59,6 +100,7 @@ test {
+@@ -59,6 +102,7 @@ test {
      _ = key_encode;
      _ = paste;
      _ = sgr;
@@ -471,10 +481,10 @@ index bc92597f5..d0ee49c1b 100644
      _ = @import("../../lib/allocator.zig");
 diff --git a/src/terminal/c/terminal.zig b/src/terminal/c/terminal.zig
 new file mode 100644
-index 000000000..61679f983
+index 000000000..7013e2870
 --- /dev/null
 +++ b/src/terminal/c/terminal.zig
-@@ -0,0 +1,1116 @@
+@@ -0,0 +1,1134 @@
 +//! C API wrapper for Terminal
 +//!
 +//! This provides a minimal, high-performance interface to Ghostty's Terminal
@@ -648,6 +658,7 @@ index 000000000..61679f983
 +            .mouse_shape => self.terminal.mouse_shape = value,
 +            .color_operation => try self.colorOperation(value.op, &value.requests),
 +            .kitty_color_report => try self.kittyColorOperation(value),
++            .kitty_keyboard_query => try self.queryKittyKeyboard(),
 +
 +            // Actions that require no response and have no terminal effect
 +            .dcs_hook,
@@ -662,7 +673,6 @@ index 000000000..61679f983
 +            .request_mode_unknown,
 +            .size_report,
 +            .xtversion,
-+            .kitty_keyboard_query,
 +            .window_title,
 +            .report_pwd,
 +            .show_desktop_notification,
@@ -702,6 +712,14 @@ index 000000000..61679f983
 +                // Not supported in WASM context
 +            },
 +        }
++    }
++
++    fn queryKittyKeyboard(self: *ResponseHandler) !void {
++        var buf: [16]u8 = undefined;
++        const response = try std.fmt.bufPrint(&buf, "\x1B[?{}u", .{
++            self.terminal.screens.active.kitty_keyboard.current().int(),
++        });
++        try self.response_buffer.appendSlice(self.alloc, response);
 +    }
 +
 +    fn handleDeviceAttributes(self: *ResponseHandler, req: ansi.DeviceAttributeReq) !void {
@@ -1244,6 +1262,16 @@ index 000000000..61679f983
 +    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return false));
 +    const mode = modespkg.modeFromInt(@intCast(mode_num), is_ansi) orelse return false;
 +    return wrapper.terminal.modes.get(mode);
++}
++
++pub fn getKittyKeyboardFlags(ptr: ?*anyopaque) callconv(.c) u8 {
++    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return 0));
++    return @intCast(wrapper.terminal.screens.active.kitty_keyboard.current().int());
++}
++
++pub fn hasModifyOtherKeysState2(ptr: ?*anyopaque) callconv(.c) bool {
++    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return false));
++    return wrapper.terminal.flags.modify_other_keys_2;
 +}
 +
 +// ============================================================================

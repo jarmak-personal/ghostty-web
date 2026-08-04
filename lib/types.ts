@@ -442,6 +442,8 @@ export interface GhosttyWasmExports extends WebAssembly.Exports {
   ghostty_terminal_is_alternate_screen(terminal: TerminalHandle): boolean;
   ghostty_terminal_has_mouse_tracking(terminal: TerminalHandle): number;
   ghostty_terminal_get_mode(terminal: TerminalHandle, mode: number, isAnsi: boolean): number;
+  ghostty_terminal_get_kitty_keyboard_flags(terminal: TerminalHandle): number;
+  ghostty_terminal_has_modify_other_keys_state_2(terminal: TerminalHandle): number;
 
   // Scrollback API
   ghostty_terminal_get_scrollback_length(terminal: TerminalHandle): number;

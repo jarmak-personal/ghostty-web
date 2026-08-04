@@ -480,7 +480,11 @@ export class Terminal implements ITerminalCore {
           return this.copySelection();
         },
         this.textarea,
-        mouseConfig
+        mouseConfig,
+        () => ({
+          kittyFlags: this.wasmTerm?.getKittyKeyboardFlags() ?? 0,
+          modifyOtherKeysState2: this.wasmTerm?.hasModifyOtherKeysState2() ?? false,
+        })
       );
 
       // Create selection manager (pass textarea for context menu positioning)
