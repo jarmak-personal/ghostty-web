@@ -6,6 +6,7 @@ import {
   parseCompatibilityTag,
   planPublication,
   type RemoteRelease,
+  selectReleaseFromPages,
   selectReleasePlan,
   validateSnapshot,
 } from './hvir-release';
@@ -63,13 +64,14 @@ describe('hvir release tag planning', () => {
         tag('hvir-v0.3.0-20', previous, '0.3.0'),
         tag('hvir-v0.4.0-99', previous, '0.3.0'),
         tag('hvir-v0.4.0-100', previous, '0.4.0', false),
+        tag('hvir-v0.4.0-4', previous, '0.4.0', false),
         tag('release-v0.4.0-200'),
       ])
     ).toEqual({
       packageVersion: '0.4.0',
       resume: false,
-      revision: 4,
-      tag: 'hvir-v0.4.0-4',
+      revision: 5,
+      tag: 'hvir-v0.4.0-5',
     });
   });
 
@@ -109,6 +111,7 @@ describe('hvir publication retry planning', () => {
   test('creates a release only when no release exists', () => {
     expect(planPublication(undefined, expectedAssets)).toEqual({
       action: 'create',
+      discardAssetIds: [],
       missingAssets: ['package.tgz', 'package.tgz.sha256'],
     });
   });
@@ -121,6 +124,7 @@ describe('hvir publication retry planning', () => {
       )
     ).toEqual({
       action: 'resume-draft',
+      discardAssetIds: [],
       missingAssets: ['package.tgz.sha256'],
     });
   });
@@ -128,7 +132,28 @@ describe('hvir publication retry planning', () => {
   test('verifies an already-published byte-identical immutable release', () => {
     expect(planPublication(release(), expectedAssets)).toEqual({
       action: 'verify-published',
+      discardAssetIds: [],
       missingAssets: [],
+    });
+  });
+
+  test('discards an interrupted draft asset before uploading the missing candidate', () => {
+    expect(
+      planPublication(
+        release({
+          assets: [
+            { ...expectedAssets[0], digest: null, id: 42, size: 0, state: 'starter' },
+            expectedAssets[1],
+          ],
+          draft: true,
+          immutable: false,
+        }),
+        expectedAssets
+      )
+    ).toEqual({
+      action: 'resume-draft',
+      discardAssetIds: [42],
+      missingAssets: ['package.tgz'],
     });
   });
 
@@ -151,5 +176,22 @@ describe('hvir publication retry planning', () => {
         expectedAssets
       )
     ).toThrow('unexpected assets');
+  });
+});
+
+describe('hvir release discovery', () => {
+  test('finds a draft by tag across paginated authenticated release listings', () => {
+    const draft = release({ draft: true, immutable: false });
+    const unrelated = release({ tag_name: 'hvir-v0.4.0-1' });
+    expect(selectReleaseFromPages([[unrelated], [draft]], draft.tag_name)).toBe(draft);
+  });
+
+  test('prefers a published release and rejects ambiguous duplicate drafts', () => {
+    const published = release();
+    const draft = release({ draft: true, immutable: false });
+    expect(selectReleaseFromPages([[draft, published]], published.tag_name)).toBe(published);
+    expect(() =>
+      selectReleaseFromPages([[draft, { ...draft, assets: [] }]], draft.tag_name)
+    ).toThrow('Multiple draft releases');
   });
 });

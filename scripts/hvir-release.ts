@@ -33,6 +33,7 @@ export interface ReleasePlan {
 
 export interface AssetIdentity {
   digest: string | null;
+  id?: number;
   name: string;
   size: number;
   state?: string;
@@ -48,6 +49,7 @@ export interface RemoteRelease {
 
 export interface PublicationPlan {
   action: 'create' | 'resume-draft' | 'verify-published';
+  discardAssetIds: number[];
   missingAssets: string[];
 }
 
@@ -156,8 +158,15 @@ export function selectReleasePlan(
     };
   }
 
-  const revision =
+  const occupiedRevisions = new Set(
+    records
+      .map((record) => parseCompatibilityTag(record.name))
+      .filter((tag) => tag?.packageVersion === packageVersion)
+      .map((tag) => tag!.revision)
+  );
+  let revision =
     relevant.reduce((highest, record) => Math.max(highest, record?.revision ?? 0), 0) + 1;
+  while (occupiedRevisions.has(revision)) revision += 1;
   return {
     packageVersion,
     resume: false,
@@ -188,7 +197,11 @@ export function planPublication(
   expectedAssets: AssetIdentity[]
 ): PublicationPlan {
   if (!release)
-    return { action: 'create', missingAssets: expectedAssets.map((asset) => asset.name) };
+    return {
+      action: 'create',
+      discardAssetIds: [],
+      missingAssets: expectedAssets.map((asset) => asset.name),
+    };
   if (release.prerelease) {
     throw new Error(`Release ${release.tag_name} is a prerelease and cannot be used.`);
   }
@@ -199,29 +212,43 @@ export function planPublication(
   }
 
   const actual = new Map<string, AssetIdentity>();
+  const discardAssetIds: number[] = [];
+  const seenNames = new Set<string>();
+  const unexpected: string[] = [];
   for (const asset of release.assets) {
-    if (actual.has(asset.name)) {
+    if (seenNames.has(asset.name)) {
       throw new Error(`Release ${release.tag_name} contains duplicate asset ${asset.name}.`);
+    }
+    seenNames.add(asset.name);
+    const wanted = expected.get(asset.name);
+    if (!wanted) {
+      unexpected.push(asset.name);
+      continue;
+    }
+    if (release.draft && asset.state === 'starter') {
+      if (!Number.isSafeInteger(asset.id) || asset.id! <= 0) {
+        throw new Error(
+          `Draft release ${release.tag_name} starter asset ${asset.name} has no valid asset ID.`
+        );
+      }
+      discardAssetIds.push(asset.id!);
+      continue;
+    }
+    if (asset.state !== 'uploaded') {
+      throw new Error(
+        `Release ${release.tag_name} asset ${asset.name} has unexpected state '${asset.state}'.`
+      );
+    }
+    if (asset.digest !== wanted.digest || asset.size !== wanted.size) {
+      throw new Error(`Release ${release.tag_name} asset ${asset.name} is not byte-identical.`);
     }
     actual.set(asset.name, asset);
   }
 
-  const unexpected = [...actual.keys()].filter((name) => !expected.has(name));
   if (unexpected.length > 0) {
     throw new Error(
       `Release ${release.tag_name} contains unexpected assets: ${unexpected.join(', ')}`
     );
-  }
-
-  for (const [name, asset] of actual) {
-    const wanted = expected.get(name)!;
-    if (
-      asset.state !== 'uploaded' ||
-      asset.digest !== wanted.digest ||
-      asset.size !== wanted.size
-    ) {
-      throw new Error(`Release ${release.tag_name} asset ${name} is not byte-identical.`);
-    }
   }
 
   const missingAssets = [...expected.keys()].filter((name) => !actual.has(name));
@@ -234,13 +261,39 @@ export function planPublication(
         `Published release ${release.tag_name} is missing assets: ${missingAssets.join(', ')}`
       );
     }
-    return { action: 'verify-published', missingAssets: [] };
+    return { action: 'verify-published', discardAssetIds: [], missingAssets: [] };
   }
 
   if (release.immutable) {
     throw new Error(`Draft release ${release.tag_name} unexpectedly reports itself as immutable.`);
   }
-  return { action: 'resume-draft', missingAssets };
+  return { action: 'resume-draft', discardAssetIds, missingAssets };
+}
+
+export function selectReleaseForTag(
+  releases: RemoteRelease[],
+  tag: string
+): RemoteRelease | undefined {
+  const matches = releases.filter((release) => release.tag_name === tag);
+  const published = matches.filter((release) => !release.draft);
+  if (published.length > 1) {
+    throw new Error(`Multiple published releases exist for tag ${tag}.`);
+  }
+  if (published.length === 1) return published[0];
+  if (matches.length > 1) {
+    throw new Error(`Multiple draft releases exist for tag ${tag}; manual cleanup is required.`);
+  }
+  return matches[0];
+}
+
+export function selectReleaseFromPages(
+  pages: RemoteRelease[][],
+  tag: string
+): RemoteRelease | undefined {
+  if (!Array.isArray(pages) || pages.some((page) => !Array.isArray(page))) {
+    throw new Error('GitHub returned an invalid release listing.');
+  }
+  return selectReleaseForTag(pages.flat(), tag);
 }
 
 function git(args: string[], allowFailure = false): CommandResult {
@@ -356,12 +409,14 @@ function createRemoteTag(repository: string, tag: string, sourceCommit: string):
 }
 
 function getRelease(repository: string, tag: string): RemoteRelease | undefined {
-  const result = execute('gh', ['api', `repos/${repository}/releases/tags/${tag}`], true);
-  if (result.exitCode !== 0) {
-    if (result.stderr.includes('HTTP 404')) return undefined;
-    throw new Error(`Unable to inspect release ${tag}: ${result.stderr || result.stdout}`);
-  }
-  return JSON.parse(result.stdout) as RemoteRelease;
+  const result = execute('gh', [
+    'api',
+    '--paginate',
+    '--slurp',
+    `repos/${repository}/releases?per_page=100`,
+  ]);
+  const pages = JSON.parse(result.stdout) as RemoteRelease[][];
+  return selectReleaseFromPages(pages, tag);
 }
 
 async function expectedAsset(path: string): Promise<ExpectedAsset> {
@@ -452,6 +507,14 @@ async function publishCommand(): Promise<void> {
     ]);
     publishedNow = true;
   } else if (initialPlan.action === 'resume-draft') {
+    for (const assetId of initialPlan.discardAssetIds) {
+      execute('gh', [
+        'api',
+        '--method',
+        'DELETE',
+        `repos/${repository}/releases/assets/${assetId}`,
+      ]);
+    }
     if (initialPlan.missingAssets.length > 0) {
       execute('gh', [
         'release',
