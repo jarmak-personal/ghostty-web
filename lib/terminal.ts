@@ -1795,20 +1795,21 @@ export class Terminal implements ITerminalCore {
       const progress = Math.min(elapsed / this.SCROLLBAR_FADE_DURATION_MS, 1);
       this.scrollbarOpacity = startOpacity * (1 - progress);
 
-      // Trigger render to show updated opacity
-      if (this.renderer && this.wasmTerm) {
-        this.renderer.render(this.wasmTerm, false, this.viewportY, this, this.scrollbarOpacity);
-      }
-
-      if (progress < 1) {
-        requestAnimationFrame(animate);
-      } else {
+      const finished = progress >= 1;
+      if (finished) {
         this.scrollbarVisible = false;
         this.scrollbarOpacity = 0;
-        // Final render to clear scrollbar completely
-        if (this.renderer && this.wasmTerm) {
-          this.renderer.render(this.wasmTerm, false, this.viewportY, this, 0);
-        }
+      }
+
+      // The scrollbar clears the right edge before painting. Its final frame
+      // must restore every underlying row, even when the terminal buffer has
+      // no dirty cells of its own.
+      if (this.renderer && this.wasmTerm) {
+        this.renderer.render(this.wasmTerm, finished, this.viewportY, this, this.scrollbarOpacity);
+      }
+
+      if (!finished) {
+        requestAnimationFrame(animate);
       }
     };
     animate();
