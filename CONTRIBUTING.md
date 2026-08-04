@@ -113,17 +113,25 @@ provenance JSON under `artifacts/`. The filename includes the source commit. CI 
 packaging check on pull requests and `hvir-main` and retains its candidate artifact for 14 days.
 Pull-request artifacts may identify GitHub's synthetic test merge and are never release inputs.
 
-To persist an accepted post-merge artifact, create the next immutable tag using
-`hvir-v<package-version>-<revision>`, for example `hvir-v0.4.0-1`, at the exact `hvir-main` commit
-and push the tag. `.github/workflows/release-hvir-artifact.yml` repeats the quality gates, builds
-the package with pinned Bun, Node/npm, and Zig versions, and attaches the tarball, checksum, and
-provenance through GitHub CLI's draft-then-publish immutable release path. The workflow refuses to
-build or publish unless the dedicated read-only settings token confirms repository release
-immutability is enabled. It also refuses to accept a published release unless GitHub reports it as
-immutable with a valid signed release attestation, and it rejects tags outside `hvir-main`,
-package-version mismatches, unexpected assets, and replacement of a different existing payload. The
-workflow can be dispatched manually with an existing tag to verify an already published payload or
-retry before a release exists.
+To persist an accepted post-merge artifact, open the **Release hvir artifact** workflow in GitHub
+Actions, leave the default `hvir-main` branch selected, and choose **Run workflow**. There are no
+release inputs. The serialized workflow snapshots that dispatch revision, reads its package
+version, and allocates the next validated `hvir-v<package-version>-<revision>` tag. It repeats the
+quality gates, builds the package with pinned Bun, Node/npm, and Zig versions, and creates the tag
+only after every pre-publication check passes. It then attaches the tarball, checksum, and
+provenance through GitHub CLI's draft-then-publish immutable release path.
+
+The workflow refuses to build or publish unless the dedicated read-only settings token confirms
+repository release immutability is enabled. It also refuses to accept a published release unless
+GitHub reports it as immutable with a valid signed release attestation, and it rejects tags outside
+`hvir-main`, package-version mismatches, unexpected assets, and replacement of a different existing
+payload. A successful rerun verifies an identical immutable release instead of allocating another
+revision.
+
+If a release attempt fails, use **Re-run jobs** on that original workflow run. GitHub retains the
+original ref and source revision for a rerun, so a retry can resume the exact tag and complete an
+exact partial draft without overwriting an asset. Starting **Run workflow** again is a new release
+decision for the then-current `hvir-main` head, not a retry of the failed snapshot.
 
 hvir consumes the tarball through its exact GitHub Release URL. `package-lock.json` records the URL
 and integrity hash, so normal `npm ci` and Electron packaging need neither Ghostty's source tree nor

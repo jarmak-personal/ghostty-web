@@ -1,21 +1,13 @@
 name: Release hvir artifact
 
 on:
-  push:
-    tags:
-      - 'hvir-v*'
   workflow_dispatch:
-    inputs:
-      tag:
-        description: Existing hvir artifact tag, for example hvir-v0.4.0-1
-        required: true
-        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: hvir-artifact-release-${{ inputs.tag || github.ref_name }}
+  group: hvir-artifact-release
   cancel-in-progress: false
 
 jobs:
@@ -27,52 +19,30 @@ jobs:
       contents: write
 
     steps:
-      - name: Resolve artifact tag
-        id: tag
+      - name: Snapshot current hvir-main revision
+        id: source
         env:
-          INPUT_TAG: ${{ inputs.tag }}
-          REF_NAME: ${{ github.ref_name }}
+          DISPATCH_REF: ${{ github.ref }}
+          DISPATCH_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          tag="${INPUT_TAG:-$REF_NAME}"
-          if [[ ! "$tag" =~ ^hvir-v([0-9]+\.[0-9]+\.[0-9]+)-([1-9][0-9]*)$ ]]; then
-            echo "::error::Expected hvir-v<package-version>-<revision>, received '$tag'"
+          if [[ "$DISPATCH_REF" != 'refs/heads/hvir-main' ]]; then
+            echo "::error::Run this workflow from hvir-main, received '$DISPATCH_REF'"
             exit 1
           fi
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "package_version=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
-          echo "revision=${BASH_REMATCH[2]}" >> "$GITHUB_OUTPUT"
+          if [[ ! "$DISPATCH_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::GitHub supplied an invalid source revision '$DISPATCH_SHA'"
+            exit 1
+          fi
+          echo "commit=$DISPATCH_SHA" >> "$GITHUB_OUTPUT"
 
-      - name: Check out tagged source
+      - name: Check out snapshotted source
         uses: actions/checkout@v7
         with:
-          ref: ${{ steps.tag.outputs.tag }}
+          ref: ${{ steps.source.outputs.commit }}
           fetch-depth: 0
           persist-credentials: false
           submodules: recursive
-
-      - name: Validate tagged source
-        env:
-          PACKAGE_VERSION: ${{ steps.tag.outputs.package_version }}
-          TAG: ${{ steps.tag.outputs.tag }}
-        run: |
-          set -euo pipefail
-          git fetch origin hvir-main:refs/remotes/origin/hvir-main --tags
-          tag_commit=$(git rev-list -n 1 "$TAG")
-          source_commit=$(git rev-parse HEAD)
-          if [[ "$tag_commit" != "$source_commit" ]]; then
-            echo "::error::Tag $TAG resolves to $tag_commit, but checkout is $source_commit"
-            exit 1
-          fi
-          if ! git merge-base --is-ancestor "$source_commit" origin/hvir-main; then
-            echo "::error::Tag $TAG is not an ancestor of origin/hvir-main"
-            exit 1
-          fi
-          actual_version=$(node -p "require('./package.json').version")
-          if [[ "$actual_version" != "$PACKAGE_VERSION" ]]; then
-            echo "::error::Tag package version $PACKAGE_VERSION does not match package.json $actual_version"
-            exit 1
-          fi
 
       - name: Require immutable releases
         env:
@@ -105,6 +75,15 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Fetch hvir release history
+        run: git fetch origin hvir-main:refs/remotes/origin/hvir-main --tags
+
+      - name: Plan compatibility release
+        id: release
+        env:
+          SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
+        run: bun run scripts/hvir-release.ts plan
+
       - name: Check formatting
         run: bun run fmt
 
@@ -120,7 +99,7 @@ jobs:
       - name: Run tests
         run: bun test
 
-      - name: Build hvir package
+      - name: Build and pack hvir package
         run: bun run pack:hvir
 
       - name: Check WASM size
@@ -128,6 +107,9 @@ jobs:
 
       - name: Validate release payload
         id: payload
+        env:
+          PACKAGE_VERSION: ${{ steps.release.outputs.package_version }}
+          SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
         run: |
           set -euo pipefail
           mapfile -t tarballs < <(find artifacts -maxdepth 1 -type f -name '*.tgz' -print)
@@ -146,21 +128,37 @@ jobs:
             fi
           done
 
+          mapfile -t payload_files < <(find artifacts -maxdepth 1 -type f -print)
+          if [[ "${#payload_files[@]}" -ne 3 ]]; then
+            echo "::error::Expected exactly three release payload files, found ${#payload_files[@]}"
+            exit 1
+          fi
+
           (cd artifacts && sha256sum --check "$(basename "$checksum")")
 
           ARTIFACT="$artifact" \
-          PROVENANCE="$provenance" \
-          SOURCE_COMMIT="$(git rev-parse HEAD)" \
+          CHECKSUM="$checksum" \
           GHOSTTY_COMMIT="$(git -C ghostty rev-parse HEAD)" \
+          PROVENANCE="$provenance" \
           node <<'NODE'
           const fs = require('node:fs');
           const path = require('node:path');
+          const packageMetadata = require('./package.json');
+          const forkMetadata = require('./fork.json');
           const provenance = JSON.parse(fs.readFileSync(process.env.PROVENANCE, 'utf8'));
+          const checksumSha = fs.readFileSync(process.env.CHECKSUM, 'utf8').split(/\s+/)[0];
           const expected = {
             artifact: path.basename(process.env.ARTIFACT),
             buildPlatform: 'linux-x64',
-            sourceCommit: process.env.SOURCE_COMMIT,
             ghosttyCommit: process.env.GHOSTTY_COMMIT,
+            package: packageMetadata.name,
+            packageVersion: process.env.PACKAGE_VERSION,
+            sha256: checksumSha,
+            sourceCommit: process.env.SOURCE_COMMIT,
+            sourceRepository: `https://github.com/${process.env.GITHUB_REPOSITORY}.git`,
+            upstreamBranch: forkMetadata.upstreamBranch,
+            upstreamCommit: forkMetadata.upstreamCommit,
+            upstreamRepository: forkMetadata.upstreamRepository,
           };
           for (const [field, value] of Object.entries(expected)) {
             if (provenance[field] !== value) {
@@ -183,81 +181,16 @@ jobs:
           NODE
 
           echo "artifact=$artifact" >> "$GITHUB_OUTPUT"
-          echo "artifact_name=$(basename "$artifact")" >> "$GITHUB_OUTPUT"
           echo "checksum=$checksum" >> "$GITHUB_OUTPUT"
-          echo "checksum_name=$(basename "$checksum")" >> "$GITHUB_OUTPUT"
           echo "provenance=$provenance" >> "$GITHUB_OUTPUT"
-          echo "provenance_name=$(basename "$provenance")" >> "$GITHUB_OUTPUT"
 
-      - name: Create or verify immutable GitHub Release
+      - name: Create or resume immutable GitHub Release
         env:
           ARTIFACT: ${{ steps.payload.outputs.artifact }}
-          ARTIFACT_NAME: ${{ steps.payload.outputs.artifact_name }}
           CHECKSUM: ${{ steps.payload.outputs.checksum }}
-          CHECKSUM_NAME: ${{ steps.payload.outputs.checksum_name }}
           GH_TOKEN: ${{ github.token }}
+          PACKAGE_VERSION: ${{ steps.release.outputs.package_version }}
           PROVENANCE: ${{ steps.payload.outputs.provenance }}
-          PROVENANCE_NAME: ${{ steps.payload.outputs.provenance_name }}
-          TAG: ${{ steps.tag.outputs.tag }}
-        run: |
-          set -euo pipefail
-          verify_immutable_release() {
-            state=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
-              --json isDraft,isImmutable,isPrerelease \
-              --jq '[.isDraft, .isImmutable, .isPrerelease] | @tsv')
-            if [[ "$state" != $'false\ttrue\tfalse' ]]; then
-              echo "::error::Release $TAG must be published, immutable, and non-prerelease"
-              exit 1
-            fi
-          }
-
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            verify_immutable_release
-
-            actual_assets=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
-              --json assets --jq '.assets[].name' | sort)
-            expected_assets=$(printf '%s\n' "$ARTIFACT_NAME" "$CHECKSUM_NAME" "$PROVENANCE_NAME" | sort)
-            if [[ "$actual_assets" != "$expected_assets" ]]; then
-              echo "::error::Existing release $TAG does not contain the exact expected asset set"
-              exit 1
-            fi
-
-            existing=$(mktemp -d)
-            gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$existing" \
-              --pattern "$ARTIFACT_NAME" \
-              --pattern "$CHECKSUM_NAME" \
-              --pattern "$PROVENANCE_NAME"
-            cmp "$ARTIFACT" "$existing/$ARTIFACT_NAME"
-            cmp "$CHECKSUM" "$existing/$CHECKSUM_NAME"
-            cmp "$PROVENANCE" "$existing/$PROVENANCE_NAME"
-            gh release verify "$TAG" --repo "$GITHUB_REPOSITORY"
-            echo "Immutable release $TAG already contains the exact reproducible payload."
-            exit 0
-          fi
-
-          source_commit=$(git rev-parse HEAD)
-          ghostty_commit=$(git -C ghostty rev-parse HEAD)
-          upstream_commit=$(node -p "require('./fork.json').upstreamCommit")
-          notes=$(mktemp)
-          cat > "$notes" <<EOF
-          Persistent package artifact for hvir's ghostty-web compatibility fork.
-
-          - Fork source: [$source_commit](https://github.com/$GITHUB_REPOSITORY/commit/$source_commit)
-          - Ghostty source: [$ghostty_commit](https://github.com/ghostty-org/ghostty/commit/$ghostty_commit)
-          - Upstream ghostty-web baseline: [$upstream_commit](https://github.com/coder/ghostty-web/commit/$upstream_commit)
-          - Package: \`$ARTIFACT_NAME\`
-
-          This release does not publish the upstream-owned npm package. hvir consumes the tarball by its exact release URL and npm lockfile integrity.
-          EOF
-
-          # gh stages assets on a draft internally before publishing when release
-          # immutability is enabled, so all three files are locked together.
-          gh release create "$TAG" \
-            "$ARTIFACT" "$CHECKSUM" "$PROVENANCE" \
-            --repo "$GITHUB_REPOSITORY" \
-            --verify-tag \
-            --title "hvir ghostty-web artifact ${TAG#hvir-v}" \
-            --notes-file "$notes" \
-            --latest
-          verify_immutable_release
-          gh release verify "$TAG" --repo "$GITHUB_REPOSITORY"
+          SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: bun run scripts/hvir-release.ts publish
