@@ -26,8 +26,12 @@ export class LinkDetector {
   /**
    * Register a link provider
    */
-  registerProvider(provider: ILinkProvider): void {
-    this.providers.push(provider);
+  registerProvider(provider: ILinkProvider, highPriority: boolean = false): void {
+    if (highPriority) {
+      this.providers.unshift(provider);
+    } else {
+      this.providers.push(provider);
+    }
     this.invalidateCache(); // New provider may detect different links
   }
 
