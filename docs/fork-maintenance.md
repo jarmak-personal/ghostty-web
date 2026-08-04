@@ -56,14 +56,25 @@ that URL and its integrity hash. This keeps the terminal dependency behind hvir'
 `TerminalPane` seam while avoiding install-time source builds, committed binary tarballs, and
 mutable registry state.
 
-Only tag retained post-merge commits that are ancestors of `hvir-main`. Persistent artifact tags
-use `hvir-v<package-version>-<revision>` and must not move or be deleted. The release workflow
-repeats all quality gates with pinned build tools, then uses GitHub CLI's draft-then-publish path to
-lock all three assets in an immutable release. Before building, the dedicated read-only release
-settings token confirms immutability is enabled; the job-scoped `GITHUB_TOKEN` remains the only
-credential used to create the release. After publication, the workflow requires GitHub to report
-the release as immutable and verifies its signed attestation. It verifies an identical published
-release on rerun but never overwrites an asset. Pull-request runs continue to validate the package
+Persistent artifact tags use `hvir-v<package-version>-<revision>` and must not move or be deleted.
+A maintainer starts publication only through the no-input **Release hvir artifact** workflow on
+`hvir-main`. The workflow serializes attempts, snapshots the dispatch SHA, ignores malformed or
+unrelated repository metadata, and allocates the next revision from validated compatibility tags
+whose package versions match retained `hvir-main` sources. Branch movement after dispatch does not
+change the snapshotted release source.
+
+The release workflow repeats all quality gates with pinned build tools, then creates the selected
+tag at the exact source commit and uses GitHub CLI's draft-then-publish path to lock all three assets
+in an immutable release. Before building, the dedicated read-only release settings token confirms
+immutability is enabled; the job-scoped `GITHUB_TOKEN` remains the only credential used to create
+the tag and release. Failed gates create no tag or published release. Only successful publication
+marks the release as latest.
+
+Retry a failed publication with **Re-run jobs** on its original workflow run, which retains the
+original Git ref and SHA. The rerun resumes a tag already created for that source, fills only missing
+assets in an exact partial draft, or verifies a byte-identical published immutable release. It never
+moves a tag or overwrites an asset. A fresh **Run workflow** action snapshots the current
+`hvir-main` head and is a new release attempt. Pull-request runs continue to validate the package
 boundary, but their checkout can be GitHub's synthetic test merge and is never promoted.
 
 ## One-time repository setup
