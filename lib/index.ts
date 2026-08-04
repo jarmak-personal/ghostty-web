@@ -89,6 +89,7 @@ export type { FontMetrics, IRenderable, RendererOptions } from './renderer';
 export { CanvasRenderer } from './renderer';
 export type { SelectionCoordinates } from './selection-manager';
 export { SelectionManager } from './selection-manager';
+export type { TerminalRenderStats } from './terminal';
 // Main Terminal class
 export { Terminal } from './terminal';
 export type {

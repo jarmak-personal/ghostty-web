@@ -43,6 +43,16 @@ import type { ILink, ILinkProvider } from './types';
 // Terminal Class
 // ============================================================================
 
+export interface TerminalRenderStats {
+  parsedWrites: number;
+  renderRequests: number;
+  renderFrames: number;
+  fullRenderFrames: number;
+  paused: boolean;
+  pendingFrame: boolean;
+  cursorVisible: boolean;
+}
+
 export class Terminal implements ITerminalCore {
   // Public properties (xterm.js compatibility)
   public cols: number;
@@ -102,8 +112,13 @@ export class Terminal implements ITerminalCore {
   private isOpen = false;
   private isDisposed = false;
   private animationFrameId?: number;
+  private renderPaused = false;
+  private forceFullRender = false;
+  private parsedWrites = 0;
+  private renderRequests = 0;
+  private renderFrames = 0;
+  private fullRenderFrames = 0;
   private writeQueue: Uint8Array[] = [];
-  private awaitingEcho = false;
 
   // Addons
   private addons: ITerminalAddon[] = [];
@@ -118,7 +133,6 @@ export class Terminal implements ITerminalCore {
   public viewportY: number = 0; // Top line of viewport in scrollback buffer (0 = at bottom, can be fractional during smooth scroll)
   private targetViewportY: number = 0; // Target viewport position for smooth scrolling
   private scrollAnimationStartTime?: number;
-  private scrollAnimationStartY?: number;
   private scrollAnimationFrame?: number;
   private customWheelEventHandler?: (event: WheelEvent) => boolean;
   private lastCursorY: number = 0; // Track cursor position for onCursorMove
@@ -242,18 +256,9 @@ export class Terminal implements ITerminalCore {
       this.selectionManager.clearSelection();
     }
 
-    // Resize canvas to match new font metrics
-    this.renderer.resize(this.cols, this.rows);
-
-    // Update canvas element dimensions to match renderer
-    const metrics = this.renderer.getMetrics();
-    this.canvas.width = metrics.width * this.cols;
-    this.canvas.height = metrics.height * this.rows;
-    this.canvas.style.width = `${metrics.width * this.cols}px`;
-    this.canvas.style.height = `${metrics.height * this.rows}px`;
-
-    // Force full re-render with new font
-    this.renderer.render(this.wasmTerm, true, this.viewportY, this);
+    // CanvasRenderer owns the DPI-aware backing store. It will resize and
+    // fully paint in the same presentation frame.
+    this.requestRender(true);
   }
 
   /**
@@ -425,7 +430,9 @@ export class Terminal implements ITerminalCore {
         cursorStyle: this.options.cursorStyle,
         cursorBlink: this.options.cursorBlink,
         theme: this.options.theme,
+        requestRender: () => this.requestRender(),
       });
+      this.renderer.setRenderPaused(this.renderPaused);
 
       // Size canvas to terminal dimensions (use renderer.resize for proper DPI scaling)
       this.renderer.resize(this.cols, this.rows);
@@ -458,7 +465,6 @@ export class Terminal implements ITerminalCore {
           }
           // Clear selection when user types
           this.selectionManager?.clearSelection();
-          this.awaitingEcho = true;
           // Input handler fires data events
           this.dataEmitter.fire(data);
         },
@@ -506,10 +512,9 @@ export class Terminal implements ITerminalCore {
       // Initialize link detection system
       this.linkDetector = new LinkDetector(this);
 
-      // Register link providers
-      // OSC8 first (explicit hyperlinks take precedence)
+      // Register built-ins in fallback order. Public custom providers are
+      // intentionally prepended so applications can override both built-ins.
       this.linkDetector.registerProvider(new OSC8LinkProvider(this));
-      // URL regex second (fallback for plain text URLs)
       this.linkDetector.registerProvider(new UrlRegexProvider(this));
 
       // Setup mouse event handling for links and scrollbar
@@ -526,11 +531,8 @@ export class Terminal implements ITerminalCore {
       // Use capture phase to ensure we get the event before browser scrolling
       parent.addEventListener('wheel', this.handleWheel, { passive: false, capture: true });
 
-      // Render initial blank screen (force full redraw)
-      this.renderer.render(this.wasmTerm, true, this.viewportY, this, this.scrollbarOpacity);
-
-      // Start render loop
-      this.startRenderLoop();
+      // Present the initial screen on one coalesced frame.
+      this.requestRender(true);
 
       // Focus input (auto-focus so user can start typing immediately)
       this.focus();
@@ -564,6 +566,8 @@ export class Terminal implements ITerminalCore {
     // preserve selection when new data arrives. Selection is cleared by user actions
     // like clicking or typing, not by incoming data.
 
+    this.parsedWrites++;
+
     // Write directly to WASM terminal (handles VT parsing internally)
     this.wasmTerm!.write(data);
 
@@ -593,17 +597,12 @@ export class Terminal implements ITerminalCore {
       this.checkForTitleChange(data);
     }
 
+    this.requestRender();
+
     // Call callback if provided
     if (callback) {
       // Queue callback after next render
       requestAnimationFrame(callback);
-    }
-
-    if (this.awaitingEcho) {
-      this.awaitingEcho = false;
-      if (this.renderer && this.wasmTerm) {
-        this.renderer.render(this.wasmTerm, false, this.viewportY, this, this.scrollbarOpacity);
-      }
     }
 
     // Render will happen on next animation frame
@@ -636,8 +635,6 @@ export class Terminal implements ITerminalCore {
       return;
     }
 
-    this.awaitingEcho = true;
-
     this.dataEmitter.fire(encodePaste(data, this.wasmTerm!.hasBracketedPaste()));
   }
 
@@ -656,7 +653,6 @@ export class Terminal implements ITerminalCore {
     }
 
     if (wasUserInput) {
-      this.awaitingEcho = true;
       // Trigger onData event as if user typed it
       this.dataEmitter.fire(data);
     } else {
@@ -689,28 +685,22 @@ export class Terminal implements ITerminalCore {
       // Resize WASM terminal (may reallocate buffers, invalidating TypedArray views)
       this.wasmTerm!.resize(cols, rows);
 
-      // Resize renderer
-      this.renderer!.resize(cols, rows);
-
-      // Update canvas dimensions
-      const metrics = this.renderer!.getMetrics();
-      this.canvas!.width = metrics.width * cols;
-      this.canvas!.height = metrics.height * rows;
-      this.canvas!.style.width = `${metrics.width * cols}px`;
-      this.canvas!.style.height = `${metrics.height * rows}px`;
-
       // Fire resize event
       this.resizeEmitter.fire({ cols, rows });
-
-      // Force full render
-      this.renderer!.render(this.wasmTerm!, true, this.viewportY, this);
     } catch (e) {
       console.error('Terminal resize failed:', e);
+    } finally {
+      // CanvasRenderer detects the new WASM dimensions and performs its
+      // DPI-aware backing-store resize immediately before the full paint.
+      // Keeping both operations inside one presentation callback prevents a
+      // cleared canvas from being exposed between animation frames. Schedule
+      // it even if WASM resize, resize listeners, or queued writes fail.
+      try {
+        this.flushWriteQueue();
+      } finally {
+        this.requestRender(true);
+      }
     }
-
-    // Flush any writes that were queued during resize, then restart render loop
-    this.flushWriteQueue();
-    this.startRenderLoop();
   }
 
   /**
@@ -720,6 +710,7 @@ export class Terminal implements ITerminalCore {
     this.assertOpen();
     // Send ANSI clear screen and cursor home sequences
     this.wasmTerm!.write('\x1b[2J\x1b[H');
+    this.requestRender();
   }
 
   /**
@@ -740,6 +731,7 @@ export class Terminal implements ITerminalCore {
 
     // Reset title
     this.currentTitle = '';
+    this.requestRender(true);
   }
 
   /**
@@ -880,7 +872,8 @@ export class Terminal implements ITerminalCore {
 
   /**
    * Register a custom link provider
-   * Multiple providers can be registered to detect different types of links
+   * Custom providers take precedence over built-ins. When multiple custom
+   * providers are registered, the most recently registered provider runs first.
    *
    * @example
    * ```typescript
@@ -896,7 +889,7 @@ export class Terminal implements ITerminalCore {
     if (!this.linkDetector) {
       throw new Error('Terminal must be opened before registering link providers');
     }
-    this.linkDetector.registerProvider(provider);
+    this.linkDetector.registerProvider(provider, true);
   }
 
   // ==========================================================================
@@ -931,6 +924,7 @@ export class Terminal implements ITerminalCore {
       if (scrollbackLength > 0) {
         this.showScrollbar();
       }
+      this.requestRender();
     }
   }
 
@@ -951,6 +945,7 @@ export class Terminal implements ITerminalCore {
       this.viewportY = scrollbackLength;
       this.scrollEmitter.fire(this.viewportY);
       this.showScrollbar();
+      this.requestRender();
     }
   }
 
@@ -965,6 +960,7 @@ export class Terminal implements ITerminalCore {
       if (this.getScrollbackLength() > 0) {
         this.showScrollbar();
       }
+      this.requestRender();
     }
   }
 
@@ -984,6 +980,7 @@ export class Terminal implements ITerminalCore {
       if (scrollbackLength > 0) {
         this.showScrollbar();
       }
+      this.requestRender();
     }
   }
 
@@ -1010,6 +1007,7 @@ export class Terminal implements ITerminalCore {
       if (scrollbackLength > 0) {
         this.showScrollbar();
       }
+      this.requestRender();
       return;
     }
 
@@ -1025,7 +1023,6 @@ export class Terminal implements ITerminalCore {
 
     // Start new animation
     this.scrollAnimationStartTime = Date.now();
-    this.scrollAnimationStartY = this.viewportY;
     this.animateScroll();
   }
 
@@ -1054,10 +1051,11 @@ export class Terminal implements ITerminalCore {
         this.showScrollbar();
       }
 
+      this.requestRender();
+
       // Animation complete
       this.scrollAnimationFrame = undefined;
       this.scrollAnimationStartTime = undefined;
-      this.scrollAnimationStartY = undefined;
       return;
     }
 
@@ -1078,6 +1076,8 @@ export class Terminal implements ITerminalCore {
       this.showScrollbar();
     }
 
+    this.requestRender();
+
     // Continue animation
     this.scrollAnimationFrame = requestAnimationFrame(this.animateScroll);
   };
@@ -1097,22 +1097,8 @@ export class Terminal implements ITerminalCore {
     this.isDisposed = true;
     this.isOpen = false;
 
-    // Stop render loop and clear write queue
-    this.cancelRenderLoop();
+    this.stopPresentationWork(false);
     this.writeQueue.length = 0;
-
-    // Stop smooth scroll animation
-    if (this.scrollAnimationFrame) {
-      cancelAnimationFrame(this.scrollAnimationFrame);
-      this.scrollAnimationFrame = undefined;
-    }
-
-    // Clear mouse move throttle timeout
-    if (this.mouseMoveThrottleTimeout) {
-      clearTimeout(this.mouseMoveThrottleTimeout);
-      this.mouseMoveThrottleTimeout = undefined;
-    }
-    this.pendingMouseMove = undefined;
 
     // Dispose addons
     for (const addon of this.addons) {
@@ -1135,6 +1121,50 @@ export class Terminal implements ITerminalCore {
     this.cursorMoveEmitter.dispose();
   }
 
+  /** Request one coalesced presentation frame. */
+  public requestRender(forceAll: boolean = false): void {
+    if (this.isDisposed) return;
+
+    this.renderRequests++;
+    if (forceAll) this.forceFullRender = true;
+
+    if (!this.renderPaused && this.isOpen && this.animationFrameId === undefined) {
+      this.startRenderLoop();
+    }
+  }
+
+  /** Pause or resume presentation without pausing terminal parsing. */
+  public setRenderPaused(paused: boolean): void {
+    if (this.isDisposed || this.renderPaused === paused) return;
+
+    this.renderPaused = paused;
+    if (!paused) {
+      this.renderer?.setRenderPaused(false);
+      this.requestRender(true);
+      return;
+    }
+
+    this.stopPresentationWork(true);
+  }
+
+  /** Make a blinking cursor visible now and restart its idle cadence. */
+  public resetCursorBlink(): void {
+    if (!this.isDisposed) this.renderer?.resetCursorBlink();
+  }
+
+  /** Inspect parser and presentation activity for diagnostics. */
+  public getRenderStats(): TerminalRenderStats {
+    return {
+      parsedWrites: this.parsedWrites,
+      renderRequests: this.renderRequests,
+      renderFrames: this.renderFrames,
+      fullRenderFrames: this.fullRenderFrames,
+      paused: this.renderPaused,
+      pendingFrame: this.animationFrameId !== undefined,
+      cursorVisible: this.renderer?.getCursorVisible() ?? false,
+    };
+  }
+
   // ==========================================================================
   // Private Methods
   // ==========================================================================
@@ -1143,10 +1173,43 @@ export class Terminal implements ITerminalCore {
    * Cancel the render loop
    */
   private cancelRenderLoop(): void {
-    if (this.animationFrameId) {
+    if (this.animationFrameId !== undefined) {
       cancelAnimationFrame(this.animationFrameId);
       this.animationFrameId = undefined;
     }
+  }
+
+  /** Stop transient presentation work owned by both pause and disposal. */
+  private stopPresentationWork(normalizeSmoothScroll: boolean): void {
+    this.cancelRenderLoop();
+    this.renderer?.setRenderPaused(true);
+
+    const smoothScrollWasActive =
+      this.scrollAnimationFrame !== undefined || this.scrollAnimationStartTime !== undefined;
+    if (this.scrollAnimationFrame !== undefined) {
+      cancelAnimationFrame(this.scrollAnimationFrame);
+      this.scrollAnimationFrame = undefined;
+    }
+    this.scrollAnimationStartTime = undefined;
+    if (normalizeSmoothScroll && smoothScrollWasActive) {
+      const normalizedViewportY = Math.max(0, Math.floor(this.targetViewportY));
+      this.viewportY = normalizedViewportY;
+      this.targetViewportY = normalizedViewportY;
+      this.scrollEmitter.fire(normalizedViewportY);
+    }
+
+    if (this.scrollbarHideTimeout !== undefined) {
+      window.clearTimeout(this.scrollbarHideTimeout);
+      this.scrollbarHideTimeout = undefined;
+    }
+    if (this.mouseMoveThrottleTimeout !== undefined) {
+      window.clearTimeout(this.mouseMoveThrottleTimeout);
+      this.mouseMoveThrottleTimeout = undefined;
+    }
+    this.pendingMouseMove = undefined;
+    this.selectionManager?.stopAutoScroll();
+    this.scrollbarVisible = false;
+    this.scrollbarOpacity = 0;
   }
 
   /**
@@ -1159,36 +1222,33 @@ export class Terminal implements ITerminalCore {
     }
   }
 
-  /**
-   * Start the render loop
-   */
+  /** Schedule one coalesced presentation frame. */
   private startRenderLoop(): void {
-    if (this.animationFrameId) return; // already running
-    const loop = () => {
-      if (!this.isDisposed && this.isOpen) {
-        // Render using WASM's native dirty tracking
-        // The render() method:
-        // 1. Calls update() once to sync state and check dirty flags
-        // 2. Only redraws dirty rows when forceAll=false
-        // 3. Always calls clearDirty() at the end
-        this.renderer!.render(this.wasmTerm!, false, this.viewportY, this, this.scrollbarOpacity);
+    if (
+      this.animationFrameId !== undefined ||
+      this.renderPaused ||
+      this.isDisposed ||
+      !this.isOpen
+    ) {
+      return;
+    }
 
-        // Check for cursor movement (Phase 2: onCursorMove event)
-        // Note: getCursor() reads from already-updated render state (from render() above)
-        const cursor = this.wasmTerm!.getCursor();
-        if (cursor.y !== this.lastCursorY) {
-          this.lastCursorY = cursor.y;
-          this.cursorMoveEmitter.fire();
-        }
+    this.animationFrameId = requestAnimationFrame(() => {
+      this.animationFrameId = undefined;
+      if (this.isDisposed || !this.isOpen || this.renderPaused) return;
 
-        // Note: onRender event is intentionally not fired in the render loop
-        // to avoid performance issues. For now, consumers can use requestAnimationFrame
-        // if they need frame-by-frame updates.
+      const forceAll = this.forceFullRender;
+      this.forceFullRender = false;
+      this.renderer!.render(this.wasmTerm!, forceAll, this.viewportY, this, this.scrollbarOpacity);
+      this.renderFrames++;
+      if (forceAll) this.fullRenderFrames++;
 
-        this.animationFrameId = requestAnimationFrame(loop);
+      const cursor = this.wasmTerm!.getCursor();
+      if (cursor.y !== this.lastCursorY) {
+        this.lastCursorY = cursor.y;
+        this.cursorMoveEmitter.fire();
       }
-    };
-    loop();
+    });
   }
 
   /**
@@ -1728,6 +1788,8 @@ export class Terminal implements ITerminalCore {
    * Show scrollbar with fade-in and schedule auto-hide
    */
   private showScrollbar(): void {
+    if (this.renderPaused) return;
+
     // Clear any existing hide timeout
     if (this.scrollbarHideTimeout) {
       window.clearTimeout(this.scrollbarHideTimeout);
@@ -1772,14 +1834,13 @@ export class Terminal implements ITerminalCore {
   private fadeInScrollbar(): void {
     const startTime = Date.now();
     const animate = () => {
+      if (this.isDisposed || this.renderPaused) return;
+
       const elapsed = Date.now() - startTime;
       const progress = Math.min(elapsed / this.SCROLLBAR_FADE_DURATION_MS, 1);
       this.scrollbarOpacity = progress;
 
-      // Trigger render to show updated opacity
-      if (this.renderer && this.wasmTerm) {
-        this.renderer.render(this.wasmTerm, false, this.viewportY, this, this.scrollbarOpacity);
-      }
+      this.requestRender();
 
       if (progress < 1) {
         requestAnimationFrame(animate);
@@ -1795,6 +1856,8 @@ export class Terminal implements ITerminalCore {
     const startTime = Date.now();
     const startOpacity = this.scrollbarOpacity;
     const animate = () => {
+      if (this.isDisposed || this.renderPaused) return;
+
       const elapsed = Date.now() - startTime;
       const progress = Math.min(elapsed / this.SCROLLBAR_FADE_DURATION_MS, 1);
       this.scrollbarOpacity = startOpacity * (1 - progress);
@@ -1805,12 +1868,8 @@ export class Terminal implements ITerminalCore {
         this.scrollbarOpacity = 0;
       }
 
-      // The scrollbar clears the right edge before painting. Its final frame
-      // must restore every underlying row, even when the terminal buffer has
-      // no dirty cells of its own.
-      if (this.renderer && this.wasmTerm) {
-        this.renderer.render(this.wasmTerm, finished, this.viewportY, this, this.scrollbarOpacity);
-      }
+      // The final frame must restore every row under the disappearing overlay.
+      this.requestRender(finished);
 
       if (!finished) {
         requestAnimationFrame(animate);

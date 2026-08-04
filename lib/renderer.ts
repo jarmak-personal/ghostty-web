@@ -48,6 +48,7 @@ export interface RendererOptions {
   cursorBlink?: boolean; // Default: false
   theme?: ITheme;
   devicePixelRatio?: number; // Default: window.devicePixelRatio
+  requestRender?: () => void;
 }
 
 export interface FontMetrics {
@@ -102,6 +103,8 @@ export class CanvasRenderer {
   private devicePixelRatio: number;
   private metrics: FontMetrics;
   private palette: string[];
+  private requestRender: () => void;
+  private renderPaused = false;
 
   // Cursor blinking state
   private cursorVisible: boolean = true;
@@ -145,6 +148,7 @@ export class CanvasRenderer {
       throw new Error('Failed to get 2D rendering context');
     }
     this.ctx = ctx;
+    this.requestRender = options.requestRender ?? (() => {});
 
     // Apply options
     this.fontSize = options.fontSize ?? 15;
@@ -216,6 +220,7 @@ export class CanvasRenderer {
    */
   public remeasureFont(): void {
     this.metrics = this.measureFont();
+    this.requestRender();
   }
 
   // ==========================================================================
@@ -767,7 +772,7 @@ export class CanvasRenderer {
     // xterm.js uses ~530ms blink interval
     this.cursorBlinkInterval = window.setInterval(() => {
       this.cursorVisible = !this.cursorVisible;
-      // Note: Render loop should redraw cursor line automatically
+      this.requestRender();
     }, 530);
   }
 
@@ -777,6 +782,14 @@ export class CanvasRenderer {
       this.cursorBlinkInterval = undefined;
     }
     this.cursorVisible = true;
+  }
+
+  /** Make a blinking cursor visible now and restart its idle cadence. */
+  public resetCursorBlink(): void {
+    if (!this.cursorBlink || this.renderPaused) return;
+    this.stopCursorBlink();
+    this.startCursorBlink();
+    this.requestRender();
   }
 
   // ==========================================================================
@@ -808,6 +821,7 @@ export class CanvasRenderer {
       this.theme.brightCyan,
       this.theme.brightWhite,
     ];
+    this.requestRender();
   }
 
   /**
@@ -816,6 +830,7 @@ export class CanvasRenderer {
   public setFontSize(size: number): void {
     this.fontSize = size;
     this.metrics = this.measureFont();
+    this.requestRender();
   }
 
   /**
@@ -824,6 +839,7 @@ export class CanvasRenderer {
   public setFontFamily(family: string): void {
     this.fontFamily = family;
     this.metrics = this.measureFont();
+    this.requestRender();
   }
 
   /**
@@ -831,6 +847,7 @@ export class CanvasRenderer {
    */
   public setCursorStyle(style: 'block' | 'underline' | 'bar'): void {
     this.cursorStyle = style;
+    this.requestRender();
   }
 
   /**
@@ -839,10 +856,23 @@ export class CanvasRenderer {
   public setCursorBlink(enabled: boolean): void {
     if (enabled && !this.cursorBlink) {
       this.cursorBlink = true;
-      this.startCursorBlink();
+      if (!this.renderPaused) this.startCursorBlink();
     } else if (!enabled && this.cursorBlink) {
       this.cursorBlink = false;
       this.stopCursorBlink();
+    }
+    this.requestRender();
+  }
+
+  /** Suspend or resume cursor presentation timing with terminal rendering. */
+  public setRenderPaused(paused: boolean): void {
+    if (this.renderPaused === paused) return;
+
+    this.renderPaused = paused;
+    if (paused) {
+      this.stopCursorBlink();
+    } else if (this.cursorBlink) {
+      this.startCursorBlink();
     }
   }
 
@@ -950,6 +980,7 @@ export class CanvasRenderer {
    */
   public setHoveredHyperlinkId(hyperlinkId: number): void {
     this.hoveredHyperlinkId = hyperlinkId;
+    this.requestRender();
   }
 
   /**
@@ -965,6 +996,12 @@ export class CanvasRenderer {
     } | null
   ): void {
     this.hoveredLinkRange = range;
+    this.requestRender();
+  }
+
+  /** Current cursor presentation state, exposed through terminal diagnostics. */
+  public getCursorVisible(): boolean {
+    return this.cursorVisible;
   }
 
   /**

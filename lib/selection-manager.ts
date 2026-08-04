@@ -836,7 +836,7 @@ export class SelectionManager {
   /**
    * Stop auto-scrolling
    */
-  private stopAutoScroll(): void {
+  public stopAutoScroll(): void {
     if (this.autoScrollInterval !== null) {
       clearInterval(this.autoScrollInterval);
       this.autoScrollInterval = null;
@@ -1046,10 +1046,6 @@ export class SelectionManager {
    * Request a render update (triggers selection overlay redraw)
    */
   private requestRender(): void {
-    // The render loop will automatically pick up the new selection state
-    // and redraw the affected lines. This happens at 60fps.
-    //
-    // Note: When clearSelection() is called, it adds dirty rows to dirtySelectionRows
-    // which the renderer can use to know which lines to redraw.
+    this.terminal.requestRender();
   }
 }

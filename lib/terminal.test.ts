@@ -70,15 +70,6 @@ function spyOnRendererRender(term: Terminal): {
   };
 }
 
-function expectEchoRender(
-  term: Terminal,
-  renderArgs: Array<Parameters<NonNullable<Terminal['renderer']>['render']>>
-): void {
-  expect(renderArgs).toHaveLength(1);
-  expect(renderArgs[0][0]).toBe(term.wasmTerm);
-  expect(renderArgs[0][1]).toBe(false);
-}
-
 describe('Terminal', () => {
   let container: HTMLElement;
 
@@ -1491,6 +1482,7 @@ describe('Terminal Config', () => {
 
     try {
       // Get the default colors from render state
+      term.wasmTerm!.update();
       const colors = term.wasmTerm!.getColors();
 
       // Verify foreground is green (0x00FF00)
@@ -2882,6 +2874,7 @@ describe('Grapheme Cluster Support', () => {
     const term = await createIsolatedTerminal();
     term.open(container!);
     term.write('Hello');
+    term.wasmTerm!.update();
 
     // Get the viewport and check the first cell
     const viewport = term.wasmTerm!.getViewport();
@@ -2895,6 +2888,7 @@ describe('Grapheme Cluster Support', () => {
     const term = await createIsolatedTerminal();
     term.open(container!);
     term.write('Test');
+    term.wasmTerm!.update();
 
     // Test basic ASCII
     const grapheme = term.wasmTerm!.getGraphemeString(0, 0);
@@ -2919,6 +2913,7 @@ describe('Grapheme Cluster Support', () => {
     const term = await createIsolatedTerminal();
     term.open(container!);
     term.write('A');
+    term.wasmTerm!.update();
 
     const codepoints = term.wasmTerm!.getGrapheme(0, 0);
     expect(codepoints).not.toBeNull();
@@ -3005,10 +3000,10 @@ describe('Write Behavior', () => {
 });
 
 // ==========================================================================
-// xterm.js Compatibility: Echo Latency Optimization
+// hvir compatibility: echo presentation uses the coalesced scheduler
 // ==========================================================================
 
-describe('Echo Latency Optimization', () => {
+describe('Echo presentation scheduling', () => {
   let container: HTMLElement | null = null;
 
   beforeEach(async () => {
@@ -3025,26 +3020,38 @@ describe('Echo Latency Optimization', () => {
     }
   });
 
-  test('renders synchronously for the first write after user input', async () => {
+  test('coalesces echo and subsequent output into one scheduled frame', async () => {
     if (!container) return;
 
     const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
     term.open(container);
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
     const { renderArgs, restore } = spyOnRendererRender(term);
+    const framesBeforeInput = term.getRenderStats().renderFrames;
 
     try {
       term.input('x', true);
-      expect(renderArgs).toHaveLength(0);
-
       term.write('x');
-      expectEchoRender(term, renderArgs);
+      term.write('bulk output');
+
+      expect(renderArgs).toHaveLength(0);
+      expect(term.getRenderStats().pendingFrame).toBe(true);
+
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+
+      expect(renderArgs).toHaveLength(1);
+      expect(renderArgs[0][1]).toBe(false);
+      expect(term.getRenderStats()).toMatchObject({
+        renderFrames: framesBeforeInput + 1,
+        pendingFrame: false,
+      });
     } finally {
       restore();
       term.dispose();
     }
   });
 
-  test('does not synchronously render subsequent output without another user input', async () => {
+  test('coalesces subsequent output without another user input', async () => {
     if (!container) return;
 
     const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
@@ -3054,10 +3061,10 @@ describe('Echo Latency Optimization', () => {
     try {
       term.input('x', true);
       term.write('x');
-      expectEchoRender(term, renderArgs);
+      expect(renderArgs).toHaveLength(0);
 
       term.write('bulk output');
-      expect(renderArgs).toHaveLength(1);
+      expect(renderArgs).toHaveLength(0);
     } finally {
       restore();
       term.dispose();
@@ -3083,7 +3090,7 @@ describe('Echo Latency Optimization', () => {
     }
   });
 
-  test('renders synchronously for the first write after paste', async () => {
+  test('does not render synchronously for the first write after paste', async () => {
     if (!container) return;
 
     const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
@@ -3095,14 +3102,14 @@ describe('Echo Latency Optimization', () => {
       expect(renderArgs).toHaveLength(0);
 
       term.write('hello');
-      expectEchoRender(term, renderArgs);
+      expect(renderArgs).toHaveLength(0);
     } finally {
       restore();
       term.dispose();
     }
   });
 
-  test('does not mark echo when stdin is disabled', async () => {
+  test('keeps disabled input on the coalesced scheduler path', async () => {
     if (!container) return;
 
     const term = await createIsolatedTerminal({ cols: 80, rows: 24, disableStdin: true });
@@ -3121,7 +3128,7 @@ describe('Echo Latency Optimization', () => {
     }
   });
 
-  test('renders synchronously for the first write after keyboard input', async () => {
+  test('does not render synchronously for the first write after keyboard input', async () => {
     if (!container) return;
 
     const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
@@ -3142,14 +3149,14 @@ describe('Echo Latency Optimization', () => {
 
       expect(receivedData.length).toBeGreaterThan(0);
       term.write('a');
-      expectEchoRender(term, renderArgs);
+      expect(renderArgs).toHaveLength(0);
     } finally {
       restore();
       term.dispose();
     }
   });
 
-  test('marks echo before firing synchronous onData listeners', async () => {
+  test('coalesces synchronous onData writes without bypassing the scheduler', async () => {
     if (!container) return;
 
     const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
@@ -3159,10 +3166,10 @@ describe('Echo Latency Optimization', () => {
 
     try {
       term.input('z', true);
-      expectEchoRender(term, renderArgs);
+      expect(renderArgs).toHaveLength(0);
 
       term.write('bulk output');
-      expect(renderArgs).toHaveLength(1);
+      expect(renderArgs).toHaveLength(0);
     } finally {
       restore();
       term.dispose();
@@ -3181,25 +3188,40 @@ describe('Scrollbar presentation', () => {
     const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
     term.open(container);
 
-    // Keep the terminal render loop from adding unrelated renderer calls while
-    // the fade animation is advanced deterministically.
+    // Keep the initial frame from adding an unrelated renderer call while the
+    // fade animation is advanced deterministically.
     (term as any).cancelRenderLoop();
+    (term as any).forceFullRender = false;
     const { renderArgs, restore } = spyOnRendererRender(term);
     const originalNow = Date.now;
     const originalRequestAnimationFrame = globalThis.requestAnimationFrame;
     let now = 0;
+    let nextFrame = 1;
+    const callbacks = new Map<number, FrameRequestCallback>();
 
     Date.now = () => now;
     globalThis.requestAnimationFrame = ((callback: FrameRequestCallback) => {
-      now = 200;
-      callback(now);
-      return 1;
+      const id = nextFrame++;
+      callbacks.set(id, callback);
+      return id;
     }) as typeof requestAnimationFrame;
 
     try {
       (term as any).scrollbarVisible = true;
       (term as any).scrollbarOpacity = 1;
       (term as any).fadeOutScrollbar();
+
+      const runNextFrame = () => {
+        const next = callbacks.entries().next().value as [number, FrameRequestCallback] | undefined;
+        if (!next) throw new Error('Expected a pending animation frame');
+        callbacks.delete(next[0]);
+        next[1](now);
+      };
+
+      runNextFrame(); // First opacity presentation
+      now = 200;
+      runNextFrame(); // Finish the fade and request a full presentation
+      runNextFrame(); // Present the restored terminal rows
 
       expect(renderArgs.map((args) => ({ forceAll: args[1], opacity: args[4] }))).toEqual([
         { forceAll: false, opacity: 1 },
