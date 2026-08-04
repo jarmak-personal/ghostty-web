@@ -44,11 +44,16 @@ function installAnimationFrameHarness(): {
 function createSchedulerHarness(): Terminal & {
   renderCalls: RenderCall[];
   cursorResetCount: number;
+  rendererPauseStates: boolean[];
+  scrollEvents: number[];
 } {
   const renderCalls: RenderCall[] = [];
+  const rendererPauseStates: boolean[] = [];
+  const scrollEvents: number[] = [];
   const renderer = {
     render: (...args: RenderCall) => renderCalls.push(args),
     getCursorVisible: () => true,
+    setRenderPaused: (paused: boolean) => rendererPauseStates.push(paused),
     resetCursorBlink: () => {
       terminal.cursorResetCount++;
     },
@@ -66,6 +71,8 @@ function createSchedulerHarness(): Terminal & {
     writeQueue: [],
     animationFrameId: undefined,
     scrollAnimationFrame: undefined,
+    scrollAnimationStartTime: undefined,
+    targetViewportY: 0,
     scrollbarVisible: false,
     scrollbarOpacity: 0,
     viewportY: 0,
@@ -81,10 +88,12 @@ function createSchedulerHarness(): Terminal & {
     selectionChangeEmitter: disposable,
     keyEmitter: disposable,
     titleChangeEmitter: disposable,
-    scrollEmitter: disposable,
+    scrollEmitter: { fire: (viewportY: number) => scrollEvents.push(viewportY), dispose: () => {} },
     renderEmitter: disposable,
     renderCalls,
     cursorResetCount: 0,
+    rendererPauseStates,
+    scrollEvents,
   }) as ReturnType<typeof createSchedulerHarness>;
   return terminal;
 }
@@ -175,6 +184,34 @@ describe('hvir presentation scheduler', () => {
       });
       expect(terminal.renderCalls).toHaveLength(0);
       expect(terminal.cursorResetCount).toBe(0);
+      expect(terminal.rendererPauseStates).toEqual([true]);
+    } finally {
+      frames.restore();
+    }
+  });
+
+  test('normalizes an interrupted smooth scroll when presentation pauses', () => {
+    const frames = installAnimationFrameHarness();
+    try {
+      const terminal = createSchedulerHarness();
+      const scrollFrame = requestAnimationFrame(() => {});
+      Object.assign(terminal, {
+        viewportY: 1.75,
+        targetViewportY: 4.9,
+        scrollAnimationStartTime: Date.now(),
+        scrollAnimationFrame: scrollFrame,
+      });
+
+      terminal.setRenderPaused(true);
+
+      expect(frames.callbacks.size).toBe(0);
+      expect(terminal.getViewportY()).toBe(4);
+      expect(terminal.scrollEvents).toEqual([4]);
+      expect(terminal.rendererPauseStates).toEqual([true]);
+
+      terminal.setRenderPaused(false);
+      expect(terminal.rendererPauseStates).toEqual([true, false]);
+      expect(frames.callbacks.size).toBe(1);
     } finally {
       frames.restore();
     }
@@ -201,6 +238,7 @@ describe('hvir presentation scheduler', () => {
         cursorBlink: true,
         cursorVisible: false,
         cursorBlinkInterval: undefined,
+        renderPaused: false,
         requestRender: () => {
           renderRequests++;
         },
@@ -219,6 +257,16 @@ describe('hvir presentation scheduler', () => {
       expect(renderer.getCursorVisible()).toBe(false);
       expect(renderRequests).toBe(3);
 
+      renderer.setRenderPaused(true);
+      expect(intervals.size).toBe(0);
+      expect(renderer.getCursorVisible()).toBe(true);
+      renderer.resetCursorBlink();
+      expect(intervals.size).toBe(0);
+      expect(renderRequests).toBe(3);
+
+      renderer.setRenderPaused(false);
+      expect(intervals.size).toBe(1);
+
       renderer.setCursorBlink(false);
       const requestsAfterDisable = renderRequests;
       renderer.resetCursorBlink();
@@ -231,13 +279,33 @@ describe('hvir presentation scheduler', () => {
     }
   });
 
-  test('registers custom link providers ahead of built-in providers', () => {
+  test('requests a repaint after font metrics are remeasured', () => {
+    let renderRequests = 0;
+    const renderer = new CanvasRenderer(document.createElement('canvas'), {
+      requestRender: () => {
+        renderRequests++;
+      },
+    });
+
+    try {
+      renderer.remeasureFont();
+      expect(renderRequests).toBe(1);
+    } finally {
+      renderer.dispose();
+    }
+  });
+
+  test('resolves custom link providers before built-ins with documented ordering', () => {
     const providers: ILinkProvider[] = [];
     const detector = new LinkDetector({} as ConstructorParameters<typeof LinkDetector>[0]);
-    const builtin = { provideLinks: () => {} };
-    const custom = { provideLinks: () => {} };
-    detector.registerProvider(builtin);
-    detector.registerProvider(custom, true);
+    const osc8 = { provideLinks: () => {} };
+    const urlRegex = { provideLinks: () => {} };
+    const firstCustom = { provideLinks: () => {} };
+    const latestCustom = { provideLinks: () => {} };
+    detector.registerProvider(osc8);
+    detector.registerProvider(urlRegex);
+    detector.registerProvider(firstCustom, true);
+    detector.registerProvider(latestCustom, true);
     providers.push(...((detector as unknown as { providers: ILinkProvider[] }).providers ?? []));
 
     const terminalCalls: Array<[ILinkProvider, boolean | undefined]> = [];
@@ -248,10 +316,10 @@ describe('hvir presentation scheduler', () => {
         },
       },
     });
-    terminal.registerLinkProvider(custom);
+    terminal.registerLinkProvider(latestCustom);
 
-    expect(providers).toEqual([custom, builtin]);
-    expect(terminalCalls).toEqual([[custom, true]]);
+    expect(providers).toEqual([latestCustom, firstCustom, osc8, urlRegex]);
+    expect(terminalCalls).toEqual([[latestCustom, true]]);
   });
 
   test('resizes and fully paints atomically with device-pixel scaling', async () => {
@@ -308,6 +376,40 @@ describe('hvir presentation scheduler', () => {
       } else {
         Reflect.deleteProperty(window, 'devicePixelRatio');
       }
+      frames.restore();
+    }
+  });
+
+  test('schedules a full repaint when a resize listener throws', async () => {
+    const frames = installAnimationFrameHarness();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const terminal = await createIsolatedTerminal({ cols: 20, rows: 4 });
+    const originalConsoleError = console.error;
+    const resizeErrors: unknown[][] = [];
+    console.error = (...args: unknown[]) => resizeErrors.push(args);
+
+    try {
+      terminal.open(container);
+      frames.runNext();
+      terminal.onResize(() => {
+        throw new Error('resize listener failed');
+      });
+
+      terminal.resize(30, 4);
+
+      expect(resizeErrors).toHaveLength(1);
+      expect(frames.callbacks.size).toBe(1);
+      frames.runNext();
+      expect(terminal.getRenderStats()).toMatchObject({
+        renderFrames: 2,
+        fullRenderFrames: 2,
+        pendingFrame: false,
+      });
+    } finally {
+      console.error = originalConsoleError;
+      terminal.dispose();
+      container.remove();
       frames.restore();
     }
   });

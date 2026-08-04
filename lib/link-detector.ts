@@ -2,8 +2,8 @@
  * Link detection and caching system
  *
  * The LinkDetector coordinates between multiple link providers and caches
- * results for performance. Links are cached by position range, and earlier
- * providers (e.g. OSC8) take precedence over later ones (e.g. regex).
+ * results for performance. Links are cached by position range, and providers
+ * earlier in the resolved registration order take precedence over later ones.
  */
 
 import type { IBufferCellPosition, ILink, ILinkProvider } from './types';
@@ -24,7 +24,9 @@ export class LinkDetector {
   constructor(private terminal: ITerminalForLinkDetector) {}
 
   /**
-   * Register a link provider
+   * Register a link provider. Normal providers retain registration order;
+   * high-priority providers are prepended, so the newest high-priority
+   * registration takes precedence over existing providers.
    */
   registerProvider(provider: ILinkProvider, highPriority: boolean = false): void {
     if (highPriority) {
@@ -111,8 +113,8 @@ export class LinkDetector {
     // multiple OSC 8 links exist on the same line
     const { start: s, end: e } = link.range;
     const cacheKey = `r${s.y}:${s.x}-${e.x}`;
-    // Don't overwrite existing entries - earlier providers (OSC8) take
-    // precedence over later ones (regex) for the same range
+    // Don't overwrite existing entries: providers earlier in the resolved
+    // registration order take precedence for the same range.
     if (!this.linkCache.has(cacheKey)) {
       this.linkCache.set(cacheKey, link);
     }

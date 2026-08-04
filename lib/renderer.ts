@@ -104,6 +104,7 @@ export class CanvasRenderer {
   private metrics: FontMetrics;
   private palette: string[];
   private requestRender: () => void;
+  private renderPaused = false;
 
   // Cursor blinking state
   private cursorVisible: boolean = true;
@@ -219,6 +220,7 @@ export class CanvasRenderer {
    */
   public remeasureFont(): void {
     this.metrics = this.measureFont();
+    this.requestRender();
   }
 
   // ==========================================================================
@@ -784,7 +786,7 @@ export class CanvasRenderer {
 
   /** Make a blinking cursor visible now and restart its idle cadence. */
   public resetCursorBlink(): void {
-    if (!this.cursorBlink) return;
+    if (!this.cursorBlink || this.renderPaused) return;
     this.stopCursorBlink();
     this.startCursorBlink();
     this.requestRender();
@@ -854,12 +856,24 @@ export class CanvasRenderer {
   public setCursorBlink(enabled: boolean): void {
     if (enabled && !this.cursorBlink) {
       this.cursorBlink = true;
-      this.startCursorBlink();
+      if (!this.renderPaused) this.startCursorBlink();
     } else if (!enabled && this.cursorBlink) {
       this.cursorBlink = false;
       this.stopCursorBlink();
     }
     this.requestRender();
+  }
+
+  /** Suspend or resume cursor presentation timing with terminal rendering. */
+  public setRenderPaused(paused: boolean): void {
+    if (this.renderPaused === paused) return;
+
+    this.renderPaused = paused;
+    if (paused) {
+      this.stopCursorBlink();
+    } else if (this.cursorBlink) {
+      this.startCursorBlink();
+    }
   }
 
   /**

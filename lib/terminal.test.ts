@@ -3020,19 +3020,31 @@ describe('Echo presentation scheduling', () => {
     }
   });
 
-  test('does not render synchronously for the first write after user input', async () => {
+  test('coalesces echo and subsequent output into one scheduled frame', async () => {
     if (!container) return;
 
     const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
     term.open(container);
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
     const { renderArgs, restore } = spyOnRendererRender(term);
+    const framesBeforeInput = term.getRenderStats().renderFrames;
 
     try {
       term.input('x', true);
-      expect(renderArgs).toHaveLength(0);
-
       term.write('x');
+      term.write('bulk output');
+
       expect(renderArgs).toHaveLength(0);
+      expect(term.getRenderStats().pendingFrame).toBe(true);
+
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+
+      expect(renderArgs).toHaveLength(1);
+      expect(renderArgs[0][1]).toBe(false);
+      expect(term.getRenderStats()).toMatchObject({
+        renderFrames: framesBeforeInput + 1,
+        pendingFrame: false,
+      });
     } finally {
       restore();
       term.dispose();
@@ -3097,7 +3109,7 @@ describe('Echo presentation scheduling', () => {
     }
   });
 
-  test('does not mark echo when stdin is disabled', async () => {
+  test('keeps disabled input on the coalesced scheduler path', async () => {
     if (!container) return;
 
     const term = await createIsolatedTerminal({ cols: 80, rows: 24, disableStdin: true });
@@ -3144,7 +3156,7 @@ describe('Echo presentation scheduling', () => {
     }
   });
 
-  test('marks echo before synchronous onData listeners without bypassing the scheduler', async () => {
+  test('coalesces synchronous onData writes without bypassing the scheduler', async () => {
     if (!container) return;
 
     const term = await createIsolatedTerminal({ cols: 80, rows: 24 });

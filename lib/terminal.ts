@@ -119,7 +119,6 @@ export class Terminal implements ITerminalCore {
   private renderFrames = 0;
   private fullRenderFrames = 0;
   private writeQueue: Uint8Array[] = [];
-  private awaitingEcho = false;
 
   // Addons
   private addons: ITerminalAddon[] = [];
@@ -134,7 +133,6 @@ export class Terminal implements ITerminalCore {
   public viewportY: number = 0; // Top line of viewport in scrollback buffer (0 = at bottom, can be fractional during smooth scroll)
   private targetViewportY: number = 0; // Target viewport position for smooth scrolling
   private scrollAnimationStartTime?: number;
-  private scrollAnimationStartY?: number;
   private scrollAnimationFrame?: number;
   private customWheelEventHandler?: (event: WheelEvent) => boolean;
   private lastCursorY: number = 0; // Track cursor position for onCursorMove
@@ -434,6 +432,7 @@ export class Terminal implements ITerminalCore {
         theme: this.options.theme,
         requestRender: () => this.requestRender(),
       });
+      this.renderer.setRenderPaused(this.renderPaused);
 
       // Size canvas to terminal dimensions (use renderer.resize for proper DPI scaling)
       this.renderer.resize(this.cols, this.rows);
@@ -466,7 +465,6 @@ export class Terminal implements ITerminalCore {
           }
           // Clear selection when user types
           this.selectionManager?.clearSelection();
-          this.awaitingEcho = true;
           // Input handler fires data events
           this.dataEmitter.fire(data);
         },
@@ -514,10 +512,9 @@ export class Terminal implements ITerminalCore {
       // Initialize link detection system
       this.linkDetector = new LinkDetector(this);
 
-      // Register link providers
-      // OSC8 first (explicit hyperlinks take precedence)
+      // Register built-ins in fallback order. Public custom providers are
+      // intentionally prepended so applications can override both built-ins.
       this.linkDetector.registerProvider(new OSC8LinkProvider(this));
-      // URL regex second (fallback for plain text URLs)
       this.linkDetector.registerProvider(new UrlRegexProvider(this));
 
       // Setup mouse event handling for links and scrollbar
@@ -608,10 +605,6 @@ export class Terminal implements ITerminalCore {
       requestAnimationFrame(callback);
     }
 
-    if (this.awaitingEcho) {
-      this.awaitingEcho = false;
-    }
-
     // Render will happen on next animation frame
   }
 
@@ -642,8 +635,6 @@ export class Terminal implements ITerminalCore {
       return;
     }
 
-    this.awaitingEcho = true;
-
     this.dataEmitter.fire(encodePaste(data, this.wasmTerm!.hasBracketedPaste()));
   }
 
@@ -662,7 +653,6 @@ export class Terminal implements ITerminalCore {
     }
 
     if (wasUserInput) {
-      this.awaitingEcho = true;
       // Trigger onData event as if user typed it
       this.dataEmitter.fire(data);
     } else {
@@ -697,19 +687,20 @@ export class Terminal implements ITerminalCore {
 
       // Fire resize event
       this.resizeEmitter.fire({ cols, rows });
-
+    } catch (e) {
+      console.error('Terminal resize failed:', e);
+    } finally {
       // CanvasRenderer detects the new WASM dimensions and performs its
       // DPI-aware backing-store resize immediately before the full paint.
       // Keeping both operations inside one presentation callback prevents a
-      // cleared canvas from being exposed between animation frames.
-      this.requestRender(true);
-    } catch (e) {
-      console.error('Terminal resize failed:', e);
+      // cleared canvas from being exposed between animation frames. Schedule
+      // it even if WASM resize, resize listeners, or queued writes fail.
+      try {
+        this.flushWriteQueue();
+      } finally {
+        this.requestRender(true);
+      }
     }
-
-    // Flush any writes that were queued during resize. A successful resize
-    // already requested the next presentation frame.
-    this.flushWriteQueue();
   }
 
   /**
@@ -881,7 +872,8 @@ export class Terminal implements ITerminalCore {
 
   /**
    * Register a custom link provider
-   * Multiple providers can be registered to detect different types of links
+   * Custom providers take precedence over built-ins. When multiple custom
+   * providers are registered, the most recently registered provider runs first.
    *
    * @example
    * ```typescript
@@ -1031,7 +1023,6 @@ export class Terminal implements ITerminalCore {
 
     // Start new animation
     this.scrollAnimationStartTime = Date.now();
-    this.scrollAnimationStartY = this.viewportY;
     this.animateScroll();
   }
 
@@ -1065,7 +1056,6 @@ export class Terminal implements ITerminalCore {
       // Animation complete
       this.scrollAnimationFrame = undefined;
       this.scrollAnimationStartTime = undefined;
-      this.scrollAnimationStartY = undefined;
       return;
     }
 
@@ -1107,22 +1097,8 @@ export class Terminal implements ITerminalCore {
     this.isDisposed = true;
     this.isOpen = false;
 
-    // Stop render loop and clear write queue
-    this.cancelRenderLoop();
+    this.stopPresentationWork(false);
     this.writeQueue.length = 0;
-
-    // Stop smooth scroll animation
-    if (this.scrollAnimationFrame !== undefined) {
-      cancelAnimationFrame(this.scrollAnimationFrame);
-      this.scrollAnimationFrame = undefined;
-    }
-
-    // Clear mouse move throttle timeout
-    if (this.mouseMoveThrottleTimeout) {
-      clearTimeout(this.mouseMoveThrottleTimeout);
-      this.mouseMoveThrottleTimeout = undefined;
-    }
-    this.pendingMouseMove = undefined;
 
     // Dispose addons
     for (const addon of this.addons) {
@@ -1163,29 +1139,12 @@ export class Terminal implements ITerminalCore {
 
     this.renderPaused = paused;
     if (!paused) {
+      this.renderer?.setRenderPaused(false);
       this.requestRender(true);
       return;
     }
 
-    this.cancelRenderLoop();
-    if (this.scrollAnimationFrame !== undefined) {
-      cancelAnimationFrame(this.scrollAnimationFrame);
-      this.scrollAnimationFrame = undefined;
-    }
-    this.scrollAnimationStartTime = undefined;
-    this.scrollAnimationStartY = undefined;
-    if (this.scrollbarHideTimeout !== undefined) {
-      window.clearTimeout(this.scrollbarHideTimeout);
-      this.scrollbarHideTimeout = undefined;
-    }
-    if (this.mouseMoveThrottleTimeout !== undefined) {
-      window.clearTimeout(this.mouseMoveThrottleTimeout);
-      this.mouseMoveThrottleTimeout = undefined;
-    }
-    this.pendingMouseMove = undefined;
-    this.selectionManager?.stopAutoScroll();
-    this.scrollbarVisible = false;
-    this.scrollbarOpacity = 0;
+    this.stopPresentationWork(true);
   }
 
   /** Make a blinking cursor visible now and restart its idle cadence. */
@@ -1218,6 +1177,39 @@ export class Terminal implements ITerminalCore {
       cancelAnimationFrame(this.animationFrameId);
       this.animationFrameId = undefined;
     }
+  }
+
+  /** Stop transient presentation work owned by both pause and disposal. */
+  private stopPresentationWork(normalizeSmoothScroll: boolean): void {
+    this.cancelRenderLoop();
+    this.renderer?.setRenderPaused(true);
+
+    const smoothScrollWasActive =
+      this.scrollAnimationFrame !== undefined || this.scrollAnimationStartTime !== undefined;
+    if (this.scrollAnimationFrame !== undefined) {
+      cancelAnimationFrame(this.scrollAnimationFrame);
+      this.scrollAnimationFrame = undefined;
+    }
+    this.scrollAnimationStartTime = undefined;
+    if (normalizeSmoothScroll && smoothScrollWasActive) {
+      const normalizedViewportY = Math.max(0, Math.floor(this.targetViewportY));
+      this.viewportY = normalizedViewportY;
+      this.targetViewportY = normalizedViewportY;
+      this.scrollEmitter.fire(normalizedViewportY);
+    }
+
+    if (this.scrollbarHideTimeout !== undefined) {
+      window.clearTimeout(this.scrollbarHideTimeout);
+      this.scrollbarHideTimeout = undefined;
+    }
+    if (this.mouseMoveThrottleTimeout !== undefined) {
+      window.clearTimeout(this.mouseMoveThrottleTimeout);
+      this.mouseMoveThrottleTimeout = undefined;
+    }
+    this.pendingMouseMove = undefined;
+    this.selectionManager?.stopAutoScroll();
+    this.scrollbarVisible = false;
+    this.scrollbarOpacity = 0;
   }
 
   /**
