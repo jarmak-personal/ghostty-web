@@ -26,6 +26,9 @@ import {
   type TerminalHandle,
 } from './types';
 
+/** Matches the native retained-search query cap before crossing into WASM. */
+const MAX_RETAINED_SEARCH_QUERY_BYTES = 64 * 1024;
+
 // Re-export types for convenience
 export {
   CellFlags,
@@ -380,8 +383,11 @@ export class GhosttyTerminal {
 
   createRetainedSearch(query: string, caseSensitive: boolean): number {
     if (!this.handle || query.length === 0) return 0;
+    // Every UTF-16 code unit contributes at least one UTF-8 byte. Reject this
+    // cheap lower bound before TextEncoder can duplicate a pathological input.
+    if (query.length > MAX_RETAINED_SEARCH_QUERY_BYTES) return 0;
     const bytes = new TextEncoder().encode(query);
-    if (bytes.length === 0) return 0;
+    if (bytes.length === 0 || bytes.length > MAX_RETAINED_SEARCH_QUERY_BYTES) return 0;
     const ptr = this.exports.ghostty_wasm_alloc_u8_array(bytes.length);
     if (ptr === 0) return 0;
     try {

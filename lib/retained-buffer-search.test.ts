@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, test } from 'bun:test';
+import { GhosttyTerminal } from './ghostty';
 import type { ITerminalOptions } from './interfaces';
 import type { Terminal } from './terminal';
 import { createIsolatedTerminal } from './test-helpers';
+import type { GhosttyWasmExports } from './types';
 
 const terminals: Terminal[] = [];
 const containers: HTMLElement[] = [];
@@ -215,6 +217,33 @@ describe('retained normal-buffer search', () => {
   test('rejects over-64KiB UTF-8 queries without leaking current state', async () => {
     const terminal = await openTerminal({ cols: 20, rows: 3 });
     terminal.write('needle');
+
+    const allocations: number[] = [];
+    const nativeCreates: number[] = [];
+    const memory = new WebAssembly.Memory({ initial: 2 });
+    const exports = {
+      memory,
+      ghostty_terminal_new: () => 1,
+      ghostty_wasm_alloc_u8_array: (length: number) => {
+        allocations.push(length);
+        return 8;
+      },
+      ghostty_wasm_free_u8_array: () => {},
+      ghostty_terminal_retained_search_create: (
+        _handle: number,
+        _pointer: number,
+        length: number
+      ) => {
+        nativeCreates.push(length);
+        return 1;
+      },
+    } as unknown as GhosttyWasmExports;
+    const wrapper = new GhosttyTerminal(exports, memory, 1, 1);
+
+    expect(wrapper.createRetainedSearch('x'.repeat(64 * 1024 + 1), true)).toBe(0);
+    expect(wrapper.createRetainedSearch('界'.repeat((64 * 1024) / 3 + 1), true)).toBe(0);
+    expect(allocations).toEqual([]);
+    expect(nativeCreates).toEqual([]);
 
     await expect(
       terminal.searchRetainedBuffer('x'.repeat(64 * 1024 + 1), { caseSensitive: true })
