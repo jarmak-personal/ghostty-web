@@ -184,6 +184,7 @@ export class Terminal implements ITerminalCore {
       allowTransparency: options.allowTransparency ?? false,
       convertEol: options.convertEol ?? false,
       disableStdin: options.disableStdin ?? false,
+      disableContextMenu: options.disableContextMenu ?? false,
       smoothScrollDuration: options.smoothScrollDuration ?? 100, // Default: 100ms smooth scroll
     };
 
@@ -432,6 +433,7 @@ export class Terminal implements ITerminalCore {
       const textarea = this.textarea;
       // Desktop: mousedown
       this.canvas.addEventListener('mousedown', (ev) => {
+        if (ev.button !== 0) return;
         ev.preventDefault();
         textarea.focus();
       });
@@ -458,10 +460,11 @@ export class Terminal implements ITerminalCore {
       // Create mouse tracking configuration
       const canvas = this.canvas;
       const renderer = this.renderer;
-      const wasmTerm = this.wasmTerm;
+      const disableContextMenu = this.options.disableContextMenu;
       const mouseConfig: MouseTrackingConfig = {
-        hasMouseTracking: () => wasmTerm?.hasMouseTracking() ?? false,
-        hasSgrMouseMode: () => wasmTerm?.getMode(1006, false) ?? true, // SGR extended mode
+        hasMouseTracking: () => this.wasmTerm?.hasMouseTracking() ?? false,
+        shouldReportButton: (button) => !(disableContextMenu && button === 2),
+        hasSgrMouseMode: () => this.wasmTerm?.getMode(1006, false) ?? true, // SGR extended mode
         getCellDimensions: () => ({
           width: renderer.charWidth,
           height: renderer.charHeight,
@@ -516,7 +519,8 @@ export class Terminal implements ITerminalCore {
         this,
         this.renderer,
         this.wasmTerm,
-        this.textarea
+        this.textarea,
+        !disableContextMenu
       );
 
       // Connect selection manager to renderer
@@ -717,8 +721,13 @@ export class Terminal implements ITerminalCore {
    */
   clear(): void {
     this.assertOpen();
-    // Send ANSI clear screen and cursor home sequences
-    const synchronizationCompleted = this.writeToWasm('\x1b[2J\x1b[H');
+    this.selectionManager?.clearSelection();
+    this.resetViewport();
+    this.linkDetector?.invalidateCache();
+
+    // Erase retained history, visible cells, and home the cursor locally.
+    // This is parser input only and is never emitted through onData to the PTY.
+    const synchronizationCompleted = this.writeToWasm('\x1b[3J\x1b[2J\x1b[H');
     this.requestRender(synchronizationCompleted);
   }
 
@@ -728,19 +737,24 @@ export class Terminal implements ITerminalCore {
   reset(): void {
     this.assertOpen();
 
+    // Create the replacement before mutating the live parser lifecycle. A
+    // construction failure therefore leaves this Terminal fully usable.
+    const oldWasmTerm = this.wasmTerm!;
+    const config = this.buildWasmConfig();
+    const newWasmTerm = this.ghostty!.createTerminal(this.cols, this.rows, config);
+
     this.cancelRenderLoop();
     this.resetSynchronizedOutputTracking();
+    this.selectionManager?.clearSelection();
+    this.resetViewport();
+    this.linkDetector?.invalidateCache();
 
-    // Structured event subscriptions and queued payloads belong to the old
-    // parser lifecycle and must not survive reset.
-    this.terminalEventEmitter.dispose();
+    // Parser carry and queued records belong to oldWasmTerm and are discarded
+    // with it. Public event subscriptions belong to this retained Terminal.
 
-    // Free old WASM terminal and create new one
-    if (this.wasmTerm) {
-      this.wasmTerm.free();
-    }
-    const config = this.buildWasmConfig();
-    this.wasmTerm = this.ghostty!.createTerminal(this.cols, this.rows, config);
+    this.wasmTerm = newWasmTerm;
+    this.selectionManager?.replaceTerminal(newWasmTerm);
+    oldWasmTerm.free();
 
     // Preserve the existing Canvas while presentation is paused. Resume owns
     // the first complete paint of the replacement terminal.
@@ -748,6 +762,7 @@ export class Terminal implements ITerminalCore {
 
     // Reset title
     this.currentTitle = '';
+    this.lastCursorY = 0;
     this.requestRender(true);
   }
 
@@ -1098,6 +1113,26 @@ export class Terminal implements ITerminalCore {
     // Continue animation
     this.scrollAnimationFrame = requestAnimationFrame(this.animateScroll);
   };
+
+  /** Return the viewport to current output and revoke any in-flight scrolling. */
+  private resetViewport(): void {
+    const wasScrolled = this.viewportY !== 0 || this.targetViewportY !== 0;
+    if (this.scrollAnimationFrame !== undefined) {
+      cancelAnimationFrame(this.scrollAnimationFrame);
+      this.scrollAnimationFrame = undefined;
+    }
+    this.scrollAnimationStartTime = undefined;
+    this.viewportY = 0;
+    this.targetViewportY = 0;
+
+    if (this.scrollbarHideTimeout !== undefined) {
+      window.clearTimeout(this.scrollbarHideTimeout);
+      this.scrollbarHideTimeout = undefined;
+    }
+    this.scrollbarVisible = false;
+    this.scrollbarOpacity = 0;
+    if (wasScrolled) this.scrollEmitter.fire(0);
+  }
 
   // ==========================================================================
   // Lifecycle

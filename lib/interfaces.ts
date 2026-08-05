@@ -18,6 +18,14 @@ export interface ITerminalOptions {
   // Phase 1 additions
   convertEol?: boolean; // Convert \n to \r\n (default: false)
   disableStdin?: boolean; // Disable keyboard input (default: false)
+  /**
+   * Disable ghostty-web's hidden-textarea context-menu bridge (default: false).
+   *
+   * Embedders that set this own menu presentation, clipboard access, and focus
+   * restoration. Right-clicks are not forwarded as terminal mouse input while
+   * this option is enabled.
+   */
+  disableContextMenu?: boolean;
 
   // Scrolling options
   smoothScrollDuration?: number; // Duration in ms for smooth scroll animation (default: 100, 0 = instant)

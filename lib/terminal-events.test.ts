@@ -235,7 +235,7 @@ describe('Terminal structured events', () => {
     }
   });
 
-  test('releases event subscriptions and parser carry on reset and disposal', async () => {
+  test('preserves event subscriptions while releasing parser carry on reset', async () => {
     const term = await createIsolatedTerminal();
     const container = document.createElement('div');
     term.open(container);
@@ -249,12 +249,14 @@ describe('Terminal structured events', () => {
 
     term.reset();
     term.write(' remainder\x1b\\');
-    term.write('\x07');
     expect(oldEvents).toHaveLength(1);
+    term.write('\x07');
+    expect(oldEvents[1]).toEqual({ type: 'bell' });
 
     const newEvents: TerminalEvent[] = [];
     term.onTerminalEvent((event) => newEvents.push(event));
     term.write('\x1b]2;after\x1b\\\x1b]133;A\x1b\\');
+    expect(oldEvents[2]).toEqual({ type: 'title', title: 'after' });
     expect(newEvents[0]).toEqual({ type: 'title', title: 'after' });
     const marker = semanticEvent(newEvents);
     expect(term.resolveEventProvenance(marker.provenance)).not.toBeNull();

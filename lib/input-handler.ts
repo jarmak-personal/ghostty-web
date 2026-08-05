@@ -194,6 +194,8 @@ function getUnshiftedCodepoint(event: KeyboardEvent): number {
 export interface MouseTrackingConfig {
   /** Check if any mouse tracking mode is enabled */
   hasMouseTracking: () => boolean;
+  /** Check whether a mouse button may be forwarded to the terminal */
+  shouldReportButton?: (button: number) => boolean;
   /** Check if SGR extended mouse mode is enabled (mode 1006) */
   hasSgrMouseMode: () => boolean;
   /** Get cell dimensions for pixel to cell conversion */
@@ -886,6 +888,7 @@ export class InputHandler {
    */
   private handleMouseDown(event: MouseEvent): void {
     if (this.isDisposed) return;
+    if (this.mouseConfig?.shouldReportButton?.(event.button) === false) return;
     if (!this.mouseConfig?.hasMouseTracking()) return;
 
     const cell = this.pixelToCell(event);
@@ -911,6 +914,7 @@ export class InputHandler {
    */
   private handleMouseUp(event: MouseEvent): void {
     if (this.isDisposed) return;
+    if (this.mouseConfig?.shouldReportButton?.(event.button) === false) return;
     if (!this.mouseConfig?.hasMouseTracking()) return;
 
     const cell = this.pixelToCell(event);
