@@ -90,6 +90,12 @@ provenance can be checked with `term.resolveEventProvenance()` and fails closed 
 expires. Notification records expose the closed `osc-9` or `osc-777` parser source so an embedder can
 preserve source-specific presentation policy without interpreting raw escape sequences.
 
+The Canvas scheduler also honors Ghostty's parser-owned synchronized-output mode (DEC private mode
+2026). Parsing and terminal responses continue while presentation is deferred; completion produces
+one full frame, and abandoned synchronization is released after Ghostty's one-second safety timeout.
+`getRenderStats()` reports the live synchronized-output state and timeout-recovery count without
+retaining terminal content.
+
 For a comprehensive client <-> server example, refer to the [demo](./demo/index.html#L141).
 
 ## Development

@@ -579,6 +579,21 @@ export class GhosttyTerminal {
     return this.exports.ghostty_terminal_has_mouse_tracking(this.handle) !== 0;
   }
 
+  /** Whether Ghostty's parser-owned synchronized-output mode is active. */
+  isSynchronizedOutput(): boolean {
+    return this.getMode(2026, false);
+  }
+
+  /** Changes for every parsed synchronized-output enable, including repeats. */
+  getSynchronizedOutputGeneration(): number {
+    return this.exports.ghostty_terminal_get_synchronized_output_generation(this.handle) >>> 0;
+  }
+
+  /** Clear abandoned synchronized output without injecting synthetic PTY bytes. */
+  resetSynchronizedOutput(): void {
+    this.exports.ghostty_terminal_reset_synchronized_output(this.handle);
+  }
+
   // ==========================================================================
   // Extended API (scrollback, modes, etc.)
   // ==========================================================================

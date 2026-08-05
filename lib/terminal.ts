@@ -57,7 +57,12 @@ export interface TerminalRenderStats {
   paused: boolean;
   pendingFrame: boolean;
   cursorVisible: boolean;
+  synchronizedOutput: boolean;
+  synchronizedOutputRecoveries: number;
 }
+
+/** Keep the web scheduler aligned with Ghostty Termio's bounded recovery. */
+const SYNCHRONIZED_OUTPUT_TIMEOUT_MS = 1000;
 
 export class Terminal implements ITerminalCore {
   // Public properties (xterm.js compatibility)
@@ -128,6 +133,10 @@ export class Terminal implements ITerminalCore {
   private renderFrames = 0;
   private fullRenderFrames = 0;
   private writeQueue: Uint8Array[] = [];
+  private synchronizedOutputActive = false;
+  private synchronizedOutputGeneration = 0;
+  private synchronizedOutputTimeout?: number;
+  private synchronizedOutputRecoveries = 0;
 
   // Addons
   private addons: ITerminalAddon[] = [];
@@ -578,7 +587,7 @@ export class Terminal implements ITerminalCore {
     this.parsedWrites++;
 
     // Write directly to WASM terminal (handles VT parsing internally)
-    this.wasmTerm!.write(data);
+    const synchronizationCompleted = this.writeToWasm(data);
 
     // Drain a snapshot before firing listeners so reentrant writes cannot
     // reorder records for later listeners.
@@ -596,7 +605,7 @@ export class Terminal implements ITerminalCore {
       this.scrollToBottom();
     }
 
-    this.requestRender();
+    this.requestRender(synchronizationCompleted);
 
     // Call callback if provided
     if (callback) {
@@ -683,6 +692,7 @@ export class Terminal implements ITerminalCore {
 
       // Resize WASM terminal (may reallocate buffers, invalidating TypedArray views)
       this.wasmTerm!.resize(cols, rows);
+      this.reconcileSynchronizedOutput();
 
       // Fire resize event
       this.resizeEmitter.fire({ cols, rows });
@@ -708,8 +718,8 @@ export class Terminal implements ITerminalCore {
   clear(): void {
     this.assertOpen();
     // Send ANSI clear screen and cursor home sequences
-    this.wasmTerm!.write('\x1b[2J\x1b[H');
-    this.requestRender();
+    const synchronizationCompleted = this.writeToWasm('\x1b[2J\x1b[H');
+    this.requestRender(synchronizationCompleted);
   }
 
   /**
@@ -717,6 +727,9 @@ export class Terminal implements ITerminalCore {
    */
   reset(): void {
     this.assertOpen();
+
+    this.cancelRenderLoop();
+    this.resetSynchronizedOutputTracking();
 
     // Structured event subscriptions and queued payloads belong to the old
     // parser lifecycle and must not survive reset.
@@ -729,8 +742,9 @@ export class Terminal implements ITerminalCore {
     const config = this.buildWasmConfig();
     this.wasmTerm = this.ghostty!.createTerminal(this.cols, this.rows, config);
 
-    // Clear renderer
-    this.renderer!.clear();
+    // Preserve the existing Canvas while presentation is paused. Resume owns
+    // the first complete paint of the replacement terminal.
+    if (!this.renderPaused) this.renderer!.clear();
 
     // Reset title
     this.currentTitle = '';
@@ -1100,6 +1114,7 @@ export class Terminal implements ITerminalCore {
     this.isDisposed = true;
     this.isOpen = false;
 
+    this.resetSynchronizedOutputTracking();
     this.stopPresentationWork(false);
     this.writeQueue.length = 0;
 
@@ -1131,6 +1146,8 @@ export class Terminal implements ITerminalCore {
 
     this.renderRequests++;
     if (forceAll) this.forceFullRender = true;
+
+    if (this.synchronizedOutputActive) return;
 
     if (!this.renderPaused && this.isOpen && this.animationFrameId === undefined) {
       this.startRenderLoop();
@@ -1166,12 +1183,85 @@ export class Terminal implements ITerminalCore {
       paused: this.renderPaused,
       pendingFrame: this.animationFrameId !== undefined,
       cursorVisible: this.renderer?.getCursorVisible() ?? false,
+      synchronizedOutput: this.synchronizedOutputActive,
+      synchronizedOutputRecoveries: this.synchronizedOutputRecoveries,
     };
   }
 
   // ==========================================================================
   // Private Methods
   // ==========================================================================
+
+  /**
+   * Reconcile the Canvas scheduler with Ghostty's parser-owned mode.
+   *
+   * The generation distinguishes repeated DECSET 2026 actions so each one
+   * restarts the same one-second safety timer as native Ghostty. A generation
+   * that begins and ends within one write still forces one complete frame.
+   */
+  private reconcileSynchronizedOutput(): boolean {
+    if (!this.wasmTerm) return false;
+
+    const active = this.wasmTerm.isSynchronizedOutput();
+    const generation = this.wasmTerm.getSynchronizedOutputGeneration();
+    const sawEnable = generation !== this.synchronizedOutputGeneration;
+    this.synchronizedOutputGeneration = generation;
+
+    if (active) {
+      if (!this.synchronizedOutputActive) {
+        this.synchronizedOutputActive = true;
+        this.cancelRenderLoop();
+      }
+      if (sawEnable) this.armSynchronizedOutputTimeout(generation);
+      return false;
+    }
+
+    const completed = this.synchronizedOutputActive || sawEnable;
+    this.synchronizedOutputActive = false;
+    this.clearSynchronizedOutputTimeout();
+    return completed;
+  }
+
+  /** Parse once in Ghostty, then immediately reconcile its presentation mode. */
+  private writeToWasm(data: string | Uint8Array): boolean {
+    this.wasmTerm!.write(data);
+    // Snapshot before firing listeners. A listener may write reentrantly, and
+    // each write must reconcile against its own core state.
+    return this.reconcileSynchronizedOutput();
+  }
+
+  /** Restart the native-compatible abandonment timeout for one enable action. */
+  private armSynchronizedOutputTimeout(generation: number): void {
+    this.clearSynchronizedOutputTimeout();
+    this.synchronizedOutputTimeout = window.setTimeout(() => {
+      this.synchronizedOutputTimeout = undefined;
+      if (this.isDisposed || !this.isOpen || !this.wasmTerm) return;
+      if (
+        this.wasmTerm.getSynchronizedOutputGeneration() !== generation ||
+        !this.wasmTerm.isSynchronizedOutput()
+      ) {
+        return;
+      }
+
+      this.wasmTerm.resetSynchronizedOutput();
+      this.synchronizedOutputActive = false;
+      this.synchronizedOutputRecoveries++;
+      this.requestRender(true);
+    }, SYNCHRONIZED_OUTPUT_TIMEOUT_MS);
+  }
+
+  private clearSynchronizedOutputTimeout(): void {
+    if (this.synchronizedOutputTimeout === undefined) return;
+    window.clearTimeout(this.synchronizedOutputTimeout);
+    this.synchronizedOutputTimeout = undefined;
+  }
+
+  /** Release lifecycle state without carrying a timer across terminal owners. */
+  private resetSynchronizedOutputTracking(): void {
+    this.clearSynchronizedOutputTimeout();
+    this.synchronizedOutputActive = false;
+    this.synchronizedOutputGeneration = 0;
+  }
 
   /**
    * Cancel the render loop
@@ -1222,7 +1312,7 @@ export class Terminal implements ITerminalCore {
   private flushWriteQueue(): void {
     while (this.writeQueue.length > 0) {
       const data = this.writeQueue.shift()!;
-      this.wasmTerm!.write(data);
+      this.writeToWasm(data);
     }
   }
 
@@ -1231,6 +1321,7 @@ export class Terminal implements ITerminalCore {
     if (
       this.animationFrameId !== undefined ||
       this.renderPaused ||
+      this.synchronizedOutputActive ||
       this.isDisposed ||
       !this.isOpen
     ) {
@@ -1239,7 +1330,9 @@ export class Terminal implements ITerminalCore {
 
     this.animationFrameId = requestAnimationFrame(() => {
       this.animationFrameId = undefined;
-      if (this.isDisposed || !this.isOpen || this.renderPaused) return;
+      if (this.isDisposed || !this.isOpen || this.renderPaused || this.synchronizedOutputActive) {
+        return;
+      }
 
       const forceAll = this.forceFullRender;
       this.forceFullRender = false;
