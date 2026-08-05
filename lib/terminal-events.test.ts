@@ -46,7 +46,12 @@ describe('structured terminal event core', () => {
           type: 'semantic',
           action: 'fresh-line-new-prompt',
           options: 'aid=7',
-          provenance: expect.objectContaining({ id: expect.any(Number), screen: 'normal', row: 0 }),
+          provenance: expect.objectContaining({
+            id: expect.any(Number),
+            screen: 'normal',
+            row: 0,
+            column: 0,
+          }),
         },
         {
           type: 'palette',

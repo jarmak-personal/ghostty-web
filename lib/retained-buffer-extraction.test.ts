@@ -112,6 +112,78 @@ describe('exact retained semantic-boundary extraction', () => {
     expect(await terminal.extractRetainedBufferRange(nextStart, nextEnd)).toBe('beta\n');
   });
 
+  test('models pending wrap as a virtual exclusive column at the right margin', async () => {
+    const lastCell = await openTerminal({ cols: 5, rows: 3 });
+    lastCell.write('\x1b[1;5H');
+    const lastCellStart = lastCell.captureRetainedBufferBoundary();
+    lastCell.write('X');
+    const lastCellEnd = lastCell.captureRetainedBufferBoundary();
+    expect(lastCellStart).toMatchObject({ row: 0, column: 4 });
+    expect(lastCellEnd).toMatchObject({ row: 0, column: 5 });
+    expect(lastCell.resolveEventProvenance(lastCellStart)).toEqual({
+      screen: 'normal',
+      row: 0,
+      column: 4,
+    });
+    expect(lastCell.resolveEventProvenance(lastCellEnd)).toEqual({
+      screen: 'normal',
+      row: 0,
+      column: 5,
+    });
+    expect(await lastCell.extractRetainedBufferRange(lastCellStart, lastCellEnd)).toBe('X');
+    expect(await lastCell.extractRetainedBufferRange(lastCellEnd, lastCellEnd)).toBe('');
+    await expect(lastCell.extractRetainedBufferRange(lastCellEnd, lastCellStart)).rejects.toEqual(
+      expectCode('invalid-boundary')
+    );
+
+    const fullRow = await openTerminal({ cols: 5, rows: 3 });
+    const fullStart = fullRow.captureRetainedBufferBoundary();
+    fullRow.write('abcde');
+    const fullEnd = fullRow.captureRetainedBufferBoundary();
+    expect(fullEnd.column).toBe(5);
+    expect(await fullRow.extractRetainedBufferRange(fullStart, fullEnd)).toBe('abcde');
+
+    const wide = await openTerminal({ cols: 5, rows: 3 });
+    const wideStart = wide.captureRetainedBufferBoundary();
+    wide.write('abc界');
+    const wideEnd = wide.captureRetainedBufferBoundary();
+    expect(wideEnd.column).toBe(5);
+    expect(await wide.extractRetainedBufferRange(wideStart, wideEnd)).toBe('abc界');
+  });
+
+  test('preserves exact-width OSC 133 endpoints at the virtual margin', async () => {
+    const terminal = await openTerminal({ cols: 5, rows: 3 });
+    const events: TerminalEvent[] = [];
+    terminal.onTerminalEvent((event) => events.push(event));
+    terminal.write('\x1b]133;A\x1b\\abcde\x1b]133;B\x1b\\');
+    const [start, end] = semanticBoundaries(events);
+
+    expect(start).toMatchObject({ row: 0, column: 0 });
+    expect(end).toMatchObject({ row: 0, column: 5 });
+    expect(terminal.resolveEventProvenance(end)).toEqual({
+      screen: 'normal',
+      row: 0,
+      column: 5,
+    });
+    expect(await terminal.extractRetainedBufferRange(start, end)).toBe('abcde');
+  });
+
+  test('continues correctly from a pending-wrap start across soft and hard rows', async () => {
+    const soft = await openTerminal({ cols: 5, rows: 3 });
+    soft.write('abcde');
+    const softStart = soft.captureRetainedBufferBoundary();
+    soft.write('F');
+    const softEnd = soft.captureRetainedBufferBoundary();
+    expect(await soft.extractRetainedBufferRange(softStart, softEnd)).toBe('F');
+
+    const hard = await openTerminal({ cols: 5, rows: 3 });
+    hard.write('abcde');
+    const hardStart = hard.captureRetainedBufferBoundary();
+    hard.write('\r\nF');
+    const hardEnd = hard.captureRetainedBufferBoundary();
+    expect(await hard.extractRetainedBufferRange(hardStart, hardEnd)).toBe('\nF');
+  });
+
   test('crosses retained history and native page boundaries over multiple tasks', async () => {
     const terminal = await openTerminal({ cols: 200, rows: 2, scrollback: 20_000_000 });
     const start = terminal.captureRetainedBufferBoundary();

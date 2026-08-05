@@ -648,10 +648,10 @@ index bc92597f5..b56a70e25 100644
      _ = @import("../../lib/allocator.zig");
 diff --git a/src/terminal/c/terminal.zig b/src/terminal/c/terminal.zig
 new file mode 100644
-index 000000000..a66f64153
+index 000000000..91a009f53
 --- /dev/null
 +++ b/src/terminal/c/terminal.zig
-@@ -0,0 +1,2241 @@
+@@ -0,0 +1,2298 @@
 +//! C API wrapper for Terminal
 +//!
 +//! This provides a minimal, high-performance interface to Ghostty's Terminal
@@ -816,6 +816,7 @@ index 000000000..a66f64153
 +        pin: *PageList.Pin,
 +        row: *pagepkg.Row,
 +        serial: u64,
++        after_cell: bool,
 +    };
 +
 +    entries: [max_provenance_entries]?Entry = [_]?Entry{null} ** max_provenance_entries,
@@ -844,6 +845,7 @@ index 000000000..a66f64153
 +    fn register(self: *ProvenanceRegistry, terminal: *Terminal) ?Boundary {
 +        const screen_key = terminal.screens.active_key;
 +        const pages = &terminal.screens.active.pages;
++        const after_cell = terminal.screens.active.cursor.pending_wrap;
 +        const tracked = pages.trackPin(terminal.screens.active.cursor.page_pin.*) catch return null;
 +
 +        const slot = self.next_slot;
@@ -863,13 +865,14 @@ index 000000000..a66f64153
 +            .pin = tracked,
 +            .row = tracked.rowAndCell().row,
 +            .serial = tracked.node.serial,
++            .after_cell = after_cell,
 +        };
 +
 +        return .{
 +            .id = id,
 +            .screen = screen_key,
 +            .row = @intCast(pages.total_rows - pages.rows + terminal.screens.active.cursor.y),
-+            .column = tracked.x,
++            .column = if (after_cell) tracked.node.data.size.cols else tracked.x,
 +        };
 +    }
 +
@@ -927,10 +930,16 @@ index 000000000..a66f64153
 +        end_row: *pagepkg.Row,
 +        start_serial: u64,
 +        end_serial: u64,
++        start_after_cell: bool,
++        end_after_cell: bool,
++        format_start: PageList.Pin,
++        format_start_serial: u64,
 +        next_node: ?*PageList.List.Node,
 +        next_serial: u64,
 +        trailing_state: ?PageFormatter.TrailingState = null,
 +        output: std.Io.Writer.Allocating,
++        prefix_newline: bool = false,
++        no_cells: bool = false,
 +        complete: bool = false,
 +        active: bool = true,
 +
@@ -983,11 +992,12 @@ index 000000000..a66f64153
 +    ) ?u32 {
 +        const start_source = provenance.resolvePin(terminal, start_id, screen_key) orelse return null;
 +        const end_source = provenance.resolvePin(terminal, end_id, screen_key) orelse return null;
++        const empty = boundaryEql(start_source, end_source);
 +        // Do not use Pin.before across nodes here: creation must stay O(1).
 +        // Cross-page ordering is discovered one next pointer per step below.
 +        if (start_source.pin.node == end_source.pin.node and
-+            !start_source.pin.eql(end_source.pin.*) and
-+            !start_source.pin.before(end_source.pin.*)) return null;
++            !empty and
++            !boundaryBefore(start_source, end_source)) return null;
 +
 +        const screen = terminal.screens.get(screen_key) orelse return null;
 +        const start = screen.pages.trackPin(start_source.pin.*) catch return null;
@@ -995,6 +1005,16 @@ index 000000000..a66f64153
 +            screen.pages.untrackPin(start);
 +            return null;
 +        };
++        const format_start = if (start_source.after_cell and !empty) format_start: {
++            var next = start.down(1) orelse {
++                screen.pages.untrackPin(start);
++                screen.pages.untrackPin(end);
++                return null;
++            };
++            next.x = 0;
++            break :format_start next;
++        } else
++            start.*;
 +
 +        var id = self.next_id;
 +        while (id == 0 or self.entries.contains(id)) id +%= 1;
@@ -1009,9 +1029,19 @@ index 000000000..a66f64153
 +            .end_row = end.rowAndCell().row,
 +            .start_serial = start.node.serial,
 +            .end_serial = end.node.serial,
-+            .next_node = start.node,
-+            .next_serial = start.node.serial,
++            .start_after_cell = start_source.after_cell,
++            .end_after_cell = end_source.after_cell,
++            .format_start = format_start,
++            .format_start_serial = format_start.node.serial,
++            .next_node = format_start.node,
++            .next_serial = format_start.node.serial,
 +            .output = .init(alloc),
++            .prefix_newline = start_source.after_cell and
++                !empty and
++                !start.rowAndCell().row.wrap,
++            .no_cells = !empty and
++                !end_source.after_cell and
++                format_start.eql(end.*),
 +        };
 +        retained_range_create_tw.check(.registry_insert) catch {
 +            entry.deinit(terminal);
@@ -1022,6 +1052,19 @@ index 000000000..a66f64153
 +            return null;
 +        };
 +        return id;
++    }
++
++    fn boundaryEql(a: ProvenanceRegistry.Entry, b: ProvenanceRegistry.Entry) bool {
++        return a.pin.eql(b.pin.*) and a.after_cell == b.after_cell;
++    }
++
++    fn boundaryBefore(a: ProvenanceRegistry.Entry, b: ProvenanceRegistry.Entry) bool {
++        if (a.pin.node != b.pin.node) return false;
++        if (a.pin.y < b.pin.y) return true;
++        if (a.pin.y > b.pin.y) return false;
++        const a_x: usize = @as(usize, a.pin.x) + @intFromBool(a.after_cell);
++        const b_x: usize = @as(usize, b.pin.x) + @intFromBool(b.after_cell);
++        return a_x < b_x;
 +    }
 +
 +    fn remove(self: *RetainedRangeRegistry, terminal: *Terminal, id: u32) void {
@@ -1037,13 +1080,16 @@ index 000000000..a66f64153
 +        _ = terminal.screens.get(entry.screen) orelse return null;
 +        if (entry.start.node.serial != entry.start_serial or
 +            entry.end.node.serial != entry.end_serial or
++            entry.format_start.node.serial != entry.format_start_serial or
 +            entry.start.y >= entry.start.node.data.size.rows or
 +            entry.end.y >= entry.end.node.data.size.rows or
 +            entry.start.x >= entry.start.node.data.size.cols or
 +            entry.end.x >= entry.end.node.data.size.cols) return null;
 +        if (entry.start.rowAndCell().row != entry.start_row or entry.end.rowAndCell().row != entry.end_row) return null;
-+        if (entry.start.eql(entry.end.*)) return entry.end.*;
++        if (entry.start.eql(entry.end.*) and
++            entry.start_after_cell == entry.end_after_cell) return entry.end.*;
 +
++        if (entry.end_after_cell) return entry.end.*;
 +        if (entry.end.x > 0) return entry.end.left(1);
 +        var previous = entry.end.up(1) orelse return null;
 +        previous.x = previous.node.data.size.cols - 1;
@@ -1056,8 +1102,19 @@ index 000000000..a66f64153
 +        const entry = self.entries.getPtr(id) orelse return -1;
 +        const end_inclusive = self.validatedEnd(terminal, entry) orelse return -1;
 +        if (entry.complete) return 1;
-+        if (entry.start.eql(entry.end.*)) {
++        if (entry.start.eql(entry.end.*) and
++            entry.start_after_cell == entry.end_after_cell) {
 +            entry.complete = true;
++            return 1;
++        }
++
++        if (entry.prefix_newline) {
++            entry.output.writer.writeByte('\n') catch return -1;
++            entry.prefix_newline = false;
++        }
++        if (entry.no_cells) {
++            entry.complete = true;
++            entry.next_node = null;
 +            return 1;
 +        }
 +
@@ -1066,8 +1123,8 @@ index 000000000..a66f64153
 +        const formatter = PageFormatter.initRange(
 +            &node.data,
 +            .{ .emit = .plain, .unwrap = true, .trim = false },
-+            if (node == entry.start.node) entry.start.x else 0,
-+            if (node == entry.start.node) entry.start.y else 0,
++            if (node == entry.format_start.node) entry.format_start.x else 0,
++            if (node == entry.format_start.node) entry.format_start.y else 0,
 +            if (node == end_inclusive.node) end_inclusive.x else null,
 +            if (node == end_inclusive.node) end_inclusive.y else null,
 +            entry.trailing_state,
@@ -1086,7 +1143,7 @@ index 000000000..a66f64153
 +        // boundary is at column zero, otherwise exclude the final row's own
 +        // separator. Soft wraps contribute no trailing row here.
 +        const rows = if (entry.trailing_state) |state| state.rows else 0;
-+        const newline_count = if (entry.end.x == 0) rows else rows -| 1;
++        const newline_count = if (!entry.end_after_cell and entry.end.x == 0) rows else rows -| 1;
 +        if (entry.output.written().len + newline_count > max_retained_range_bytes) return -2;
 +        entry.output.writer.splatByteAll('\n', newline_count) catch return -1;
 +        entry.complete = true;
@@ -2149,7 +2206,7 @@ index 000000000..a66f64153
 +    ) orelse return -1;
 +    const screen = wrapper.terminal.screens.get(screen_key) orelse return -1;
 +    out[0] = ProvenanceRegistry.absoluteRow(&screen.pages, boundary.pin) orelse return -1;
-+    out[1] = boundary.pin.x;
++    out[1] = if (boundary.after_cell) boundary.pin.node.data.size.cols else boundary.pin.x;
 +    return 2;
 +}
 +

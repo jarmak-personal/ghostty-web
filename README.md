@@ -90,6 +90,7 @@ provenance records the exact retained row and column, can be checked with
 `term.resolveEventProvenance()`, and fails closed after its retained boundary expires. Notification
 records expose the closed `osc-9` or `osc-777` parser source so an embedder can
 preserve source-specific presentation policy without interpreting raw escape sequences.
+An exclusive boundary after a right-margin cell uses the virtual column equal to terminal width.
 
 The Canvas scheduler also honors Ghostty's parser-owned synchronized-output mode (DEC private mode
 2026). Parsing and terminal responses continue while presentation is deferred; completion produces

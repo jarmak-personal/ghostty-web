@@ -361,7 +361,7 @@ export interface TerminalEventProvenance {
   readonly screen: TerminalEventScreen;
   /** Row from the top of the retained screen when the event was emitted. */
   readonly row: number;
-  /** Cell column at the semantic boundary. */
+  /** Cell column at the semantic boundary; may equal screen width after pending wrap. */
   readonly column: number;
 }
 
