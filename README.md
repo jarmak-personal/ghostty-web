@@ -109,6 +109,24 @@ terminal mouse input. Selection remains available through side-effect-free `hasS
 `getSelection()` calls. Hosts can invoke `paste(text)`, `selectAll()`, `clear()`, and `reset()`;
 clear and reset mutate only client-side terminal state and never emit PTY input through `onData`.
 
+Literal search of one terminal's retained normal buffer is incremental and returns immutable,
+inclusive cell ranges. Exact extraction removes soft-wrap boundaries, preserves hard newlines, and
+contains no styling or ANSI data:
+
+```typescript
+const result = await term.searchRetainedBuffer('build failed', { caseSensitive: false });
+const first = result.matches[0];
+if (first) console.log(result.extract(first));
+result.dispose();
+```
+
+`caseSensitive: false` folds ASCII case only; non-ASCII text remains byte-exact while Unicode,
+wide-cell, and grapheme-to-cell mapping remains exact. A new query supersedes the current one.
+Queries are capped at 64 KiB of UTF-8 so a single cross-page match remains bounded.
+`AbortSignal`, `cancelRetainedBufferSearch()`, reset, resize, disposal, scrollback mutation, or any
+primary-screen write invalidates outstanding work and ranges. Output that stays wholly in the
+alternate screen does not invalidate normal-buffer results.
+
 For a comprehensive client <-> server example, refer to the [demo](./demo/index.html#L141).
 
 ## Development

@@ -29,10 +29,10 @@ index 4f8fef88e..ca9fb1d4d 100644
  #include <ghostty/vt/key.h>
 diff --git a/include/ghostty/vt/terminal.h b/include/ghostty/vt/terminal.h
 new file mode 100644
-index 000000000..676273a56
+index 000000000..18faed4f0
 --- /dev/null
 +++ b/include/ghostty/vt/terminal.h
-@@ -0,0 +1,327 @@
+@@ -0,0 +1,375 @@
 +/**
 + * @file terminal.h
 + *
@@ -141,6 +141,54 @@ index 000000000..676273a56
 +
 +/** Write data to terminal (parses VT sequences) */
 +void ghostty_terminal_write(GhosttyTerminal term, const uint8_t* data, size_t len);
++
++/* ============================================================================
++ * Retained normal-buffer search
++ * ========================================================================= */
++
++/** Begin a literal search of the retained primary screen. Returns zero on error. */
++uint32_t ghostty_terminal_retained_search_create(
++    GhosttyTerminal term,
++    const uint8_t* query,
++    size_t query_len,
++    bool case_sensitive
++);
++
++/** Perform one bounded search step: 0=pending, 1=complete, -1=error/stale. */
++int ghostty_terminal_retained_search_step(GhosttyTerminal term, uint32_t search_id);
++
++/** Cancel a search and release all native query/result state. */
++void ghostty_terminal_retained_search_cancel(GhosttyTerminal term, uint32_t search_id);
++
++/** Return the completed search match count, or -1 for stale/invalid state. */
++int ghostty_terminal_retained_search_match_count(GhosttyTerminal term, uint32_t search_id);
++
++/**
++ * Resolve one match to four uint32 values: inclusive start row/column and
++ * inclusive end row/column. Returns 4 on success or -1 when stale.
++ */
++int ghostty_terminal_retained_search_match_range(
++    GhosttyTerminal term,
++    uint32_t search_id,
++    uint32_t match_index,
++    uint32_t* out_buffer,
++    size_t buffer_size
++);
++
++/**
++ * Extract exact plain UTF-8 for a live match range. With buffer_size zero,
++ * returns the required byte length. Returns -1 when stale or too small.
++ */
++int ghostty_terminal_retained_search_match_text(
++    GhosttyTerminal term,
++    uint32_t search_id,
++    uint32_t match_index,
++    uint8_t* out_buffer,
++    size_t buffer_size
++);
++
++/** Generation changed by any write that may have affected primary cells. */
++uint32_t ghostty_terminal_get_primary_screen_generation(GhosttyTerminal term);
 +
 +/* ============================================================================
 + * Structured terminal events
@@ -361,10 +409,10 @@ index 000000000..676273a56
 +
 +#endif /* GHOSTTY_VT_TERMINAL_H */
 diff --git a/src/lib_vt.zig b/src/lib_vt.zig
-index 426660621..62212c7dc 100644
+index 426660621..c11296358 100644
 --- a/src/lib_vt.zig
 +++ b/src/lib_vt.zig
-@@ -143,6 +143,54 @@ comptime {
+@@ -143,6 +143,61 @@ comptime {
          @export(&c.sgr_unknown_partial, .{ .name = "ghostty_sgr_unknown_partial" });
          @export(&c.sgr_attribute_tag, .{ .name = "ghostty_sgr_attribute_tag" });
          @export(&c.sgr_attribute_value, .{ .name = "ghostty_sgr_attribute_value" });
@@ -374,6 +422,13 @@ index 426660621..62212c7dc 100644
 +        @export(&c.terminal_free, .{ .name = "ghostty_terminal_free" });
 +        @export(&c.terminal_resize, .{ .name = "ghostty_terminal_resize" });
 +        @export(&c.terminal_write, .{ .name = "ghostty_terminal_write" });
++        @export(&c.terminal_retained_search_create, .{ .name = "ghostty_terminal_retained_search_create" });
++        @export(&c.terminal_retained_search_step, .{ .name = "ghostty_terminal_retained_search_step" });
++        @export(&c.terminal_retained_search_cancel, .{ .name = "ghostty_terminal_retained_search_cancel" });
++        @export(&c.terminal_retained_search_match_count, .{ .name = "ghostty_terminal_retained_search_match_count" });
++        @export(&c.terminal_retained_search_match_range, .{ .name = "ghostty_terminal_retained_search_match_range" });
++        @export(&c.terminal_retained_search_match_text, .{ .name = "ghostty_terminal_retained_search_match_text" });
++        @export(&c.terminal_get_primary_screen_generation, .{ .name = "ghostty_terminal_get_primary_screen_generation" });
 +
 +        // Structured terminal events
 +        @export(&c.terminal_peek_event_size, .{ .name = "ghostty_terminal_peek_event_size" });
@@ -454,7 +509,7 @@ index ea8ca1445..75a72480b 100644
      }
 
 diff --git a/src/terminal/c/main.zig b/src/terminal/c/main.zig
-index bc92597f5..3c1d6fa7d 100644
+index bc92597f5..68345072c 100644
 --- a/src/terminal/c/main.zig
 +++ b/src/terminal/c/main.zig
 @@ -4,6 +4,7 @@ pub const key_event = @import("key_event.zig");
@@ -465,7 +520,7 @@ index bc92597f5..3c1d6fa7d 100644
 
  // The full C API, unexported.
  pub const osc_new = osc.new;
-@@ -52,6 +53,55 @@ pub const key_encoder_encode = key_encode.encode;
+@@ -52,6 +53,62 @@ pub const key_encoder_encode = key_encode.encode;
 
  pub const paste_is_safe = paste.is_safe;
 
@@ -475,6 +530,13 @@ index bc92597f5..3c1d6fa7d 100644
 +pub const terminal_free = terminal.free;
 +pub const terminal_resize = terminal.resize;
 +pub const terminal_write = terminal.write;
++pub const terminal_retained_search_create = terminal.retainedSearchCreate;
++pub const terminal_retained_search_step = terminal.retainedSearchStep;
++pub const terminal_retained_search_cancel = terminal.retainedSearchCancel;
++pub const terminal_retained_search_match_count = terminal.retainedSearchMatchCount;
++pub const terminal_retained_search_match_range = terminal.retainedSearchMatchRange;
++pub const terminal_retained_search_match_text = terminal.retainedSearchMatchText;
++pub const terminal_get_primary_screen_generation = terminal.getPrimaryScreenGeneration;
 +
 +// Structured terminal events
 +pub const terminal_peek_event_size = terminal.peekEventSize;
@@ -521,7 +583,7 @@ index bc92597f5..3c1d6fa7d 100644
  test {
      _ = color;
      _ = osc;
-@@ -59,6 +107,7 @@ test {
+@@ -59,6 +116,7 @@ test {
      _ = key_encode;
      _ = paste;
      _ = sgr;
@@ -531,10 +593,10 @@ index bc92597f5..3c1d6fa7d 100644
      _ = @import("../../lib/allocator.zig");
 diff --git a/src/terminal/c/terminal.zig b/src/terminal/c/terminal.zig
 new file mode 100644
-index 000000000..56761c93d
+index 000000000..6671d46be
 --- /dev/null
 +++ b/src/terminal/c/terminal.zig
-@@ -0,0 +1,1526 @@
+@@ -0,0 +1,1834 @@
 +//! C API wrapper for Terminal
 +//!
 +//! This provides a minimal, high-performance interface to Ghostty's Terminal
@@ -568,13 +630,17 @@ index 000000000..56761c93d
 +const osc_color = @import("../osc/parsers/color.zig");
 +const PageList = @import("../PageList.zig");
 +const ScreenSet = @import("../ScreenSet.zig");
++const Selection = @import("../Selection.zig");
 +const pagepkg = @import("../page.zig");
++const ScreenSearch = @import("../search/screen.zig").ScreenSearch;
++const tripwire = @import("../../tripwire.zig");
 +
 +const log = std.log.scoped(.terminal_c);
 +
 +/// Maximum bytes retained for either an in-progress allocating OSC payload or
 +/// unread structured event records. This keeps untrusted PTY output bounded.
 +const max_event_bytes = 64 * 1024;
++const max_search_query_bytes = 64 * 1024;
 +
 +/// Versioned wire tags consumed by the TypeScript wrapper. The wire format is
 +/// internal to this compatibility ABI; public consumers receive typed records.
@@ -761,6 +827,183 @@ index 000000000..56761c93d
 +    }
 +};
 +
++/// Search sessions retain Ghostty's cell-aware match metadata, never terminal
++/// text. Page serials make range resolution fail closed after page reuse,
++/// eviction, or reset.
++const retained_search_create_tw = tripwire.module(enum {
++    registry_insert,
++}, Allocator.Error);
++
++const RetainedSearchRegistry = struct {
++    const Entry = struct {
++        search: ScreenSearch,
++        phase: enum { search, index, complete } = .search,
++        index_node: ?*PageList.List.Node = null,
++        index_row: u32 = 0,
++        node_rows: std.AutoHashMapUnmanaged(*PageList.List.Node, NodeRows) = .empty,
++
++        fn deinit(self: *Entry, alloc: Allocator) void {
++            self.search.deinit();
++            self.node_rows.deinit(alloc);
++        }
++    };
++
++    const NodeRows = struct {
++        serial: u64,
++        row: u32,
++    };
++
++    entries: std.AutoHashMapUnmanaged(u32, Entry) = .empty,
++    next_id: u32 = 1,
++
++    fn deinit(self: *RetainedSearchRegistry, alloc: Allocator) void {
++        var it = self.entries.valueIterator();
++        while (it.next()) |entry| entry.deinit(alloc);
++        self.entries.deinit(alloc);
++        self.* = .{};
++    }
++
++    fn clear(self: *RetainedSearchRegistry, alloc: Allocator) void {
++        var it = self.entries.valueIterator();
++        while (it.next()) |entry| entry.deinit(alloc);
++        self.entries.clearRetainingCapacity();
++    }
++
++    fn create(
++        self: *RetainedSearchRegistry,
++        alloc: Allocator,
++        terminal: *Terminal,
++        query: []const u8,
++        case_sensitive: bool,
++    ) ?u32 {
++        if (query.len == 0 or query.len > max_search_query_bytes) return null;
++        const primary = terminal.screens.get(.primary) orelse return null;
++        var search = ScreenSearch.initWithCaseSensitivity(
++            alloc,
++            primary,
++            query,
++            if (case_sensitive) .sensitive else .ascii_insensitive,
++        ) catch return null;
++
++        var id = self.next_id;
++        while (id == 0 or self.entries.contains(id)) id +%= 1;
++        self.next_id = id +% 1;
++        if (self.next_id == 0) self.next_id = 1;
++        const inserted = inserted: {
++            retained_search_create_tw.check(.registry_insert) catch break :inserted false;
++            self.entries.put(alloc, id, .{ .search = search }) catch break :inserted false;
++            break :inserted true;
++        };
++        if (!inserted) {
++            search.deinit();
++            return null;
++        }
++        return id;
++    }
++
++    fn remove(self: *RetainedSearchRegistry, alloc: Allocator, id: u32) void {
++        if (self.entries.fetchRemove(id)) |removed| {
++            var entry = removed.value;
++            entry.deinit(alloc);
++        }
++    }
++
++    /// One call performs at most one core tick, one page feed, or indexes one
++    /// retained page for constant-time range materialization.
++    fn step(self: *RetainedSearchRegistry, alloc: Allocator, id: u32) c_int {
++        const entry = self.entries.getPtr(id) orelse return -1;
++        switch (entry.phase) {
++            .search => entry.search.tick() catch |err| switch (err) {
++                error.FeedRequired => {
++                    entry.search.feed() catch return -1;
++                    return 0;
++                },
++                error.SearchComplete => {
++                    entry.phase = .index;
++                    entry.index_node = entry.search.screen.pages.pages.first;
++                    return 0;
++                },
++                error.OutOfMemory => return -1,
++            },
++            .index => {
++                const node = entry.index_node orelse {
++                    entry.phase = .complete;
++                    return 1;
++                };
++                entry.node_rows.put(alloc, node, .{
++                    .serial = node.serial,
++                    .row = entry.index_row,
++                }) catch return -1;
++                entry.index_row = std.math.add(
++                    u32,
++                    entry.index_row,
++                    node.data.size.rows,
++                ) catch return -1;
++                entry.index_node = node.next;
++                return 0;
++            },
++            .complete => return 1,
++        }
++        return 0;
++    }
++
++    fn matchCount(self: *const RetainedSearchRegistry, id: u32) ?usize {
++        const entry = self.entries.getPtr(id) orelse return null;
++        if (entry.phase != .complete) return null;
++        return entry.search.matchesLen();
++    }
++
++    fn matchAt(self: *const RetainedSearchRegistry, id: u32, index: usize) ?*const @import("../highlight.zig").Flattened {
++        const entry = self.entries.getPtr(id) orelse return null;
++        if (entry.phase != .complete) return null;
++        const history = entry.search.history_results.items;
++        if (index < history.len) return &history[history.len - index - 1];
++        const active_index = index - history.len;
++        const active = entry.search.active_results.items;
++        if (active_index >= active.len) return null;
++        return &active[active_index];
++    }
++
++    fn validatedPins(
++        self: *const RetainedSearchRegistry,
++        id: u32,
++        index: usize,
++    ) ?struct {
++        screen: *@import("../Screen.zig"),
++        start: PageList.Pin,
++        end: PageList.Pin,
++        start_row: u32,
++        end_row: u32,
++    } {
++        const entry = self.entries.getPtr(id) orelse return null;
++        const highlight = self.matchAt(id, index) orelse return null;
++        const chunks = highlight.chunks.slice();
++        if (chunks.len == 0) return null;
++
++        const nodes = chunks.items(.node);
++        const serials = chunks.items(.serial);
++        const starts = chunks.items(.start);
++        const ends = chunks.items(.end);
++        for (nodes, serials, starts, ends) |node, serial, start, end| {
++            const indexed = entry.node_rows.get(node) orelse return null;
++            if (indexed.serial != serial or start >= end or end > node.data.size.rows) return null;
++        }
++
++        const start = highlight.startPin();
++        const end = highlight.endPin();
++        if (start.x >= start.node.data.size.cols or end.x >= end.node.data.size.cols) return null;
++        const start_page = entry.node_rows.get(start.node) orelse return null;
++        const end_page = entry.node_rows.get(end.node) orelse return null;
++        return .{
++            .screen = entry.search.screen,
++            .start = start,
++            .end = end,
++            .start_row = std.math.add(u32, start_page.row, start.y) catch return null,
++            .end_row = std.math.add(u32, end_page.row, end.y) catch return null,
++        };
++    }
++};
++
 +/// Response handler that processes VT sequences and queues responses.
 +/// This extends the readonly stream handler to also handle queries.
 +const ResponseHandler = struct {
@@ -770,6 +1013,7 @@ index 000000000..56761c93d
 +    events: *EventQueue,
 +    provenance: *ProvenanceRegistry,
 +    synchronized_output_generation: *u32,
++    primary_screen_generation: *u32,
 +
 +    pub fn init(
 +        alloc: Allocator,
@@ -778,6 +1022,7 @@ index 000000000..56761c93d
 +        events: *EventQueue,
 +        provenance: *ProvenanceRegistry,
 +        synchronized_output_generation: *u32,
++        primary_screen_generation: *u32,
 +    ) ResponseHandler {
 +        return .{
 +            .alloc = alloc,
@@ -786,6 +1031,7 @@ index 000000000..56761c93d
 +            .events = events,
 +            .provenance = provenance,
 +            .synchronized_output_generation = synchronized_output_generation,
++            .primary_screen_generation = primary_screen_generation,
 +        };
 +    }
 +
@@ -798,6 +1044,11 @@ index 000000000..56761c93d
 +        comptime action: Action.Tag,
 +        value: Action.Value(action),
 +    ) !void {
++        const primary_before = self.terminal.screens.active_key == .primary;
++        defer if (primary_before or self.terminal.screens.active_key == .primary) {
++            self.primary_screen_generation.* +%= 1;
++            if (self.primary_screen_generation.* == 0) self.primary_screen_generation.* = 1;
++        };
 +        switch (action) {
 +            // Device status reports - these need responses
 +            .device_status => try self.handleDeviceStatus(value.request),
@@ -1196,8 +1447,12 @@ index 000000000..56761c93d
 +    /// Ordered host-facing events and semantic row provenance.
 +    events: EventQueue,
 +    provenance: ProvenanceRegistry,
++    retained_searches: RetainedSearchRegistry,
 +    /// Incremented for every parsed synchronized-output enable action.
 +    synchronized_output_generation: u32 = 0,
++    /// Incremented when a VT action runs while primary is active, or switches
++    /// to/from primary, so alternate-only writes remain distinguishable.
++    primary_screen_generation: u32 = 0,
 +    /// Track alternate screen state to detect screen switches
 +    last_screen_is_alternate: bool = false,
 +};
@@ -1314,7 +1569,9 @@ index 000000000..56761c93d
 +    wrapper.response_buffer = .{};
 +    wrapper.events = .{};
 +    wrapper.provenance = .{};
++    wrapper.retained_searches = .{};
 +    wrapper.synchronized_output_generation = 0;
++    wrapper.primary_screen_generation = 0;
 +    wrapper.render_state = RenderState.empty;
 +    wrapper.last_screen_is_alternate = false;
 +    wrapper.osc_allocator = std.heap.FixedBufferAllocator.init(&wrapper.osc_storage);
@@ -1329,6 +1586,7 @@ index 000000000..56761c93d
 +        &wrapper.events,
 +        &wrapper.provenance,
 +        &wrapper.synchronized_output_generation,
++        &wrapper.primary_screen_generation,
 +    );
 +    wrapper.stream = ResponseStream.initAlloc(wrapper.osc_allocator.allocator(), handler);
 +
@@ -1351,6 +1609,7 @@ index 000000000..56761c93d
 +    wrapper.response_buffer.deinit(alloc);
 +    wrapper.events.deinit(alloc);
 +    wrapper.provenance.clear(&wrapper.terminal);
++    wrapper.retained_searches.deinit(alloc);
 +    wrapper.render_state.deinit(alloc);
 +    wrapper.terminal.deinit(alloc);
 +    alloc.destroy(wrapper);
@@ -1358,6 +1617,7 @@ index 000000000..56761c93d
 +
 +pub fn resize(ptr: ?*anyopaque, cols: c_int, rows: c_int) callconv(.c) void {
 +    const wrapper: *TerminalWrapper = @ptrCast(@alignCast(ptr orelse return));
++    wrapper.retained_searches.clear(wrapper.alloc);
 +    wrapper.terminal.resize(wrapper.alloc, @intCast(cols), @intCast(rows)) catch return;
 +    // Match native Termio: resize is allowed to end synchronization so the
 +    // new geometry cannot remain hidden behind an abandoned update.
@@ -1366,7 +1626,96 @@ index 000000000..56761c93d
 +
 +pub fn write(ptr: ?*anyopaque, data: [*]const u8, len: usize) callconv(.c) void {
 +    const wrapper: *TerminalWrapper = @ptrCast(@alignCast(ptr orelse return));
++    const generation = wrapper.primary_screen_generation;
++    defer if (wrapper.primary_screen_generation != generation) {
++        wrapper.retained_searches.clear(wrapper.alloc);
++    };
 +    wrapper.stream.nextSlice(data[0..len]) catch return;
++}
++
++// ============================================================================
++// Retained normal-buffer search API
++// ============================================================================
++
++pub fn retainedSearchCreate(
++    ptr: ?*anyopaque,
++    query: [*]const u8,
++    query_len: usize,
++    case_sensitive: bool,
++) callconv(.c) u32 {
++    const wrapper: *TerminalWrapper = @ptrCast(@alignCast(ptr orelse return 0));
++    return wrapper.retained_searches.create(
++        wrapper.alloc,
++        &wrapper.terminal,
++        query[0..query_len],
++        case_sensitive,
++    ) orelse 0;
++}
++
++/// Return 0 while pending, 1 when complete, or -1 on invalid state/error.
++pub fn retainedSearchStep(ptr: ?*anyopaque, search_id: u32) callconv(.c) c_int {
++    const wrapper: *TerminalWrapper = @ptrCast(@alignCast(ptr orelse return -1));
++    return wrapper.retained_searches.step(wrapper.alloc, search_id);
++}
++
++pub fn retainedSearchCancel(ptr: ?*anyopaque, search_id: u32) callconv(.c) void {
++    const wrapper: *TerminalWrapper = @ptrCast(@alignCast(ptr orelse return));
++    wrapper.retained_searches.remove(wrapper.alloc, search_id);
++}
++
++pub fn retainedSearchMatchCount(ptr: ?*anyopaque, search_id: u32) callconv(.c) c_int {
++    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return -1));
++    const count = wrapper.retained_searches.matchCount(search_id) orelse return -1;
++    return std.math.cast(c_int, count) orelse -1;
++}
++
++/// Write inclusive start/end row and column.
++pub fn retainedSearchMatchRange(
++    ptr: ?*anyopaque,
++    search_id: u32,
++    match_index: u32,
++    out: [*]u32,
++    out_len: usize,
++) callconv(.c) c_int {
++    if (out_len < 4) return -1;
++    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return -1));
++    const resolved = wrapper.retained_searches.validatedPins(search_id, match_index) orelse return -1;
++    out[0] = resolved.start_row;
++    out[1] = resolved.start.x;
++    out[2] = resolved.end_row;
++    out[3] = resolved.end.x;
++    return 4;
++}
++
++/// Return the required byte length when `out_len` is zero, otherwise copy the
++/// exact plain UTF-8 text for the inclusive live range.
++pub fn retainedSearchMatchText(
++    ptr: ?*anyopaque,
++    search_id: u32,
++    match_index: u32,
++    out: ?[*]u8,
++    out_len: usize,
++) callconv(.c) c_int {
++    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return -1));
++    const resolved = wrapper.retained_searches.validatedPins(search_id, match_index) orelse return -1;
++
++    const text = resolved.screen.selectionString(wrapper.alloc, .{
++        .sel = Selection.init(resolved.start, resolved.end, false),
++        .trim = false,
++    }) catch return -1;
++    defer wrapper.alloc.free(text);
++    const len = std.math.cast(c_int, text.len) orelse return -1;
++    if (out_len == 0) return len;
++    const dest = out orelse return -1;
++    if (out_len < text.len) return -1;
++    @memcpy(dest[0..text.len], text);
++    return len;
++}
++
++/// Monotonic-with-wrap generation for writes that may affect primary cells.
++pub fn getPrimaryScreenGeneration(ptr: ?*anyopaque) callconv(.c) u32 {
++    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return 0));
++    return wrapper.primary_screen_generation;
 +}
 +
 +// ============================================================================
@@ -2061,6 +2410,94 @@ index 000000000..56761c93d
 +    try std.testing.expectEqual(@as(u32, 'l'), cells[3].codepoint);
 +    try std.testing.expectEqual(@as(u32, 'o'), cells[4].codepoint);
 +}
++
++test "retained search create releases state when registry insertion fails" {
++    const alloc = std.testing.allocator;
++    var terminal = try Terminal.init(alloc, .{
++        .cols = 10,
++        .rows = 2,
++        .max_scrollback = 8,
++    });
++    defer terminal.deinit(alloc);
++
++    var registry: RetainedSearchRegistry = .{};
++    defer registry.deinit(alloc);
++
++    retained_search_create_tw.errorAlways(.registry_insert, error.OutOfMemory);
++    defer retained_search_create_tw.reset();
++    try std.testing.expectEqual(
++        @as(?u32, null),
++        registry.create(alloc, &terminal, "needle", true),
++    );
++    try retained_search_create_tw.end(.reset);
++}
+diff --git a/src/terminal/formatter.zig b/src/terminal/formatter.zig
+index 062e3969a..c233b092b 100644
+--- a/src/terminal/formatter.zig
++++ b/src/terminal/formatter.zig
+@@ -289,7 +289,7 @@ pub const TerminalFormatter = struct {
+                 m.map.appendNTimes(
+                     m.alloc,
+                     self.terminal.screens.active.pages.getTopLeft(.screen),
+-                    discarding.count,
++                    @intCast(discarding.count),
+                 ) catch return error.WriteFailed;
+             }
+         }
+@@ -327,7 +327,7 @@ pub const TerminalFormatter = struct {
+                 m.map.appendNTimes(
+                     m.alloc,
+                     self.terminal.screens.active.pages.getTopLeft(.screen),
+-                    discarding.count,
++                    @intCast(discarding.count),
+                 ) catch return error.WriteFailed;
+             }
+         }
+@@ -411,7 +411,7 @@ pub const TerminalFormatter = struct {
+                             .y = last.y,
+                         };
+                     } else self.terminal.screens.active.pages.getTopLeft(.screen),
+-                    discarding.count,
++                    @intCast(discarding.count),
+                 ) catch return error.WriteFailed;
+             }
+         }
+@@ -684,7 +684,7 @@ pub const ScreenFormatter = struct {
+                         .y = last.y,
+                     };
+                 } else self.screen.pages.getTopLeft(.screen),
+-                discarding.count,
++                @intCast(discarding.count),
+             ) catch return error.WriteFailed;
+         }
+     }
+@@ -1230,7 +1230,7 @@ pub const PageFormatter = struct {
+                             &discarding.writer,
+                             &style,
+                         );
+-                        for (0..discarding.count) |_| map.map.append(map.alloc, .{
++                        for (0..@as(usize, @intCast(discarding.count))) |_| map.map.append(map.alloc, .{
+                             .x = x,
+                             .y = y,
+                         }) catch return error.WriteFailed;
+@@ -1287,7 +1287,7 @@ pub const PageFormatter = struct {
+                             &discarding.writer,
+                             uri,
+                         );
+-                        for (0..discarding.count) |_| map.map.append(map.alloc, .{
++                        for (0..@as(usize, @intCast(discarding.count))) |_| map.map.append(map.alloc, .{
+                             .x = x,
+                             .y = y,
+                         }) catch return error.WriteFailed;
+@@ -1305,7 +1305,7 @@ pub const PageFormatter = struct {
+                         if (self.point_map) |*map| {
+                             var discarding: std.Io.Writer.Discarding = .init(&.{});
+                             try self.writeCell(tag, &discarding.writer, cell);
+-                            for (0..discarding.count) |_| map.map.append(map.alloc, .{
++                            for (0..@as(usize, @intCast(discarding.count))) |_| map.map.append(map.alloc, .{
+                                 .x = x,
+                                 .y = y,
+                             }) catch return error.WriteFailed;
 diff --git a/src/terminal/osc.zig b/src/terminal/osc.zig
 index 0086e48bc..6757628e1 100644
 --- a/src/terminal/osc.zig
@@ -2182,6 +2619,298 @@ index 2332866ac..dcfa15f57 100644
              if (t.modes.get(.reverse_colors)) {
                  self.colors.background = fg;
                  self.colors.foreground = bg;
+diff --git a/src/terminal/search/active.zig b/src/terminal/search/active.zig
+index 236f4c7a6..37331505d 100644
+--- a/src/terminal/search/active.zig
++++ b/src/terminal/search/active.zig
+@@ -23,11 +23,24 @@ pub const ActiveSearch = struct {
+     pub fn init(
+         alloc: Allocator,
+         needle: []const u8,
++    ) Allocator.Error!ActiveSearch {
++        return initWithCaseSensitivity(alloc, needle, .ascii_insensitive);
++    }
++
++    pub fn initWithCaseSensitivity(
++        alloc: Allocator,
++        needle: []const u8,
++        case_sensitivity: SlidingWindow.CaseSensitivity,
+     ) Allocator.Error!ActiveSearch {
+         // We just do a forward search since the active area is usually
+         // pretty small so search results are instant anyways. This avoids
+         // a small amount of work to reverse things.
+-        var window: SlidingWindow = try .init(alloc, .forward, needle);
++        var window: SlidingWindow = try .initWithCaseSensitivity(
++            alloc,
++            .forward,
++            needle,
++            case_sensitivity,
++        );
+         errdefer window.deinit();
+         return .{ .window = window };
+     }
+diff --git a/src/terminal/search/pagelist.zig b/src/terminal/search/pagelist.zig
+index 4bfd241e7..ae5955f15 100644
+--- a/src/terminal/search/pagelist.zig
++++ b/src/terminal/search/pagelist.zig
+@@ -49,6 +49,22 @@ pub const PageListSearch = struct {
+         needle: []const u8,
+         list: *PageList,
+         start: *PageList.List.Node,
++    ) Allocator.Error!PageListSearch {
++        return initWithCaseSensitivity(
++            alloc,
++            needle,
++            list,
++            start,
++            .ascii_insensitive,
++        );
++    }
++
++    pub fn initWithCaseSensitivity(
++        alloc: Allocator,
++        needle: []const u8,
++        list: *PageList,
++        start: *PageList.List.Node,
++        case_sensitivity: SlidingWindow.CaseSensitivity,
+     ) Allocator.Error!PageListSearch {
+         // We put a tracked pin into the node that we're starting from.
+         // By using a tracked pin, we can keep our pagelist references safe
+@@ -62,7 +78,12 @@ pub const PageListSearch = struct {
+         errdefer list.untrackPin(pin);
+
+         // Create our sliding window we'll use for searching.
+-        var window: SlidingWindow = try .init(alloc, .reverse, needle);
++        var window: SlidingWindow = try .initWithCaseSensitivity(
++            alloc,
++            .reverse,
++            needle,
++            case_sensitivity,
++        );
+         errdefer window.deinit();
+
+         // We always feed our initial page data into the window, because
+diff --git a/src/terminal/search/screen.zig b/src/terminal/search/screen.zig
+index 74828d879..f7ccec00e 100644
+--- a/src/terminal/search/screen.zig
++++ b/src/terminal/search/screen.zig
+@@ -38,6 +38,8 @@ const reloadActive_tw = tripwire.module(enum {
+ /// nasty UX where going to alt screen (e.g. neovim) and then back would
+ /// restart the full scrollback search.
+ pub const ScreenSearch = struct {
++    pub const CaseSensitivity = SlidingWindow.CaseSensitivity;
++
+     /// The screen being searched.
+     screen: *Screen,
+
+@@ -137,12 +139,30 @@ pub const ScreenSearch = struct {
+         alloc: Allocator,
+         screen: *Screen,
+         needle_unowned: []const u8,
++    ) Allocator.Error!ScreenSearch {
++        return initWithCaseSensitivity(
++            alloc,
++            screen,
++            needle_unowned,
++            .ascii_insensitive,
++        );
++    }
++
++    pub fn initWithCaseSensitivity(
++        alloc: Allocator,
++        screen: *Screen,
++        needle_unowned: []const u8,
++        case_sensitivity: CaseSensitivity,
+     ) Allocator.Error!ScreenSearch {
+         var result: ScreenSearch = .{
+             .screen = screen,
+             .rows = screen.pages.rows,
+             .cols = screen.pages.cols,
+-            .active = try .init(alloc, needle_unowned),
++            .active = try .initWithCaseSensitivity(
++                alloc,
++                needle_unowned,
++                case_sensitivity,
++            ),
+             .history = null,
+             .state = .active,
+             .active_results = .empty,
+@@ -268,10 +288,11 @@ pub const ScreenSearch = struct {
+             self.screen.pages.cols != self.cols)
+         {
+             // Reinit
+-            const new: ScreenSearch = try .init(
++            const new: ScreenSearch = try .initWithCaseSensitivity(
+                 self.allocator(),
+                 self.screen,
+                 self.needle(),
++                self.active.window.case_sensitivity,
+             );
+
+             // Deinit/reinit
+@@ -445,11 +466,12 @@ pub const ScreenSearch = struct {
+                 // No history search yet, but we now have history. So let's
+                 // initialize.
+
+-                var search: PageListSearch = try .init(
++                var search: PageListSearch = try .initWithCaseSensitivity(
+                     alloc,
+                     self.needle(),
+                     list,
+                     history_node,
++                    self.active.window.case_sensitivity,
+                 );
+                 errdefer search.deinit();
+
+@@ -475,10 +497,11 @@ pub const ScreenSearch = struct {
+             // collect all the results into a new list. We ASSUME that
+             // reloadActive is being called frequently enough that there isn't
+             // a massive amount of history to search here.
+-            var window: SlidingWindow = try .init(
++            var window: SlidingWindow = try .initWithCaseSensitivity(
+                 alloc,
+                 .forward,
+                 self.needle(),
++                self.active.window.case_sensitivity,
+             );
+             defer window.deinit();
+             while (true) {
+diff --git a/src/terminal/search/sliding_window.zig b/src/terminal/search/sliding_window.zig
+index c3c29e085..0c6762f2c 100644
+--- a/src/terminal/search/sliding_window.zig
++++ b/src/terminal/search/sliding_window.zig
+@@ -36,6 +36,13 @@ const FlattenedHighlight = terminal.highlight.Flattened;
+ /// pages become invalid, the caller should clear the sliding window and
+ /// start over.
+ pub const SlidingWindow = struct {
++    /// Literal byte matching mode. Unicode input remains byte-exact in both
++    /// modes; insensitive matching folds ASCII bytes only.
++    pub const CaseSensitivity = enum {
++        sensitive,
++        ascii_insensitive,
++    };
++
+     /// The allocator to use for all the data within this window. We
+     /// store this rather than passing it around because its already
+     /// part of multiple elements (eg. Meta's CellMap) and we want to
+@@ -78,6 +85,9 @@ pub const SlidingWindow = struct {
+     /// concurrently from that point).
+     direction: Direction,
+
++    /// Whether literal byte matching folds ASCII case.
++    case_sensitivity: CaseSensitivity,
++
+     /// A buffer to store the overlap search data. This is used to search
+     /// overlaps between pages where the match starts on one page and
+     /// ends on another. The length is always `needle.len * 2`.
+@@ -100,6 +110,20 @@ pub const SlidingWindow = struct {
+         alloc: Allocator,
+         direction: Direction,
+         needle_unowned: []const u8,
++    ) Allocator.Error!SlidingWindow {
++        return initWithCaseSensitivity(
++            alloc,
++            direction,
++            needle_unowned,
++            .ascii_insensitive,
++        );
++    }
++
++    pub fn initWithCaseSensitivity(
++        alloc: Allocator,
++        direction: Direction,
++        needle_unowned: []const u8,
++        case_sensitivity: CaseSensitivity,
+     ) Allocator.Error!SlidingWindow {
+         var data = try DataBuf.init(alloc, 0);
+         errdefer data.deinit(alloc);
+@@ -124,10 +148,18 @@ pub const SlidingWindow = struct {
+             .chunk_buf = .empty,
+             .needle = needle,
+             .direction = direction,
++            .case_sensitivity = case_sensitivity,
+             .overlap_buf = overlap_buf,
+         };
+     }
+
++    fn indexOf(self: *const SlidingWindow, haystack: []const u8) ?usize {
++        return switch (self.case_sensitivity) {
++            .sensitive => std.mem.indexOf(u8, haystack, self.needle),
++            .ascii_insensitive => std.ascii.indexOfIgnoreCase(haystack, self.needle),
++        };
++    }
++
+     pub fn deinit(self: *SlidingWindow) void {
+         self.alloc.free(self.overlap_buf);
+         self.alloc.free(self.needle);
+@@ -176,7 +208,7 @@ pub const SlidingWindow = struct {
+         };
+
+         // Search the first slice for the needle.
+-        if (std.ascii.indexOfIgnoreCase(slices[0], self.needle)) |idx| {
++        if (self.indexOf(slices[0])) |idx| {
+             return self.highlight(
+                 idx,
+                 self.needle.len,
+@@ -202,10 +234,7 @@ pub const SlidingWindow = struct {
+             @memcpy(self.overlap_buf[prefix.len..overlap_len], suffix);
+
+             // Search the overlap
+-            const idx = std.ascii.indexOfIgnoreCase(
+-                self.overlap_buf[0..overlap_len],
+-                self.needle,
+-            ) orelse break :overlap;
++            const idx = self.indexOf(self.overlap_buf[0..overlap_len]) orelse break :overlap;
+
+             // We found a match in the overlap buffer. We need to map the
+             // index back to the data buffer in order to get our selection.
+@@ -216,7 +245,7 @@ pub const SlidingWindow = struct {
+         }
+
+         // Search the last slice for the needle.
+-        if (std.ascii.indexOfIgnoreCase(slices[1], self.needle)) |idx| {
++        if (self.indexOf(slices[1])) |idx| {
+             return self.highlight(
+                 slices[0].len + idx,
+                 self.needle.len,
+@@ -732,6 +761,37 @@ test "SlidingWindow single append case insensitive ASCII" {
+     try testing.expect(w.next() == null);
+ }
+
++test "SlidingWindow single append case sensitive" {
++    const testing = std.testing;
++    const alloc = testing.allocator;
++
++    var w: SlidingWindow = try .initWithCaseSensitivity(
++        alloc,
++        .forward,
++        "Boo!",
++        .sensitive,
++    );
++    defer w.deinit();
++
++    var s = try Screen.init(alloc, .{ .cols = 80, .rows = 24, .max_scrollback = 0 });
++    defer s.deinit();
++    try s.testWriteString("boo! Boo! É é");
++
++    const node: *PageList.List.Node = s.pages.pages.first.?;
++    _ = try w.append(node);
++
++    const sel = w.next().?.untracked();
++    try testing.expectEqual(point.Point{ .active = .{
++        .x = 5,
++        .y = 0,
++    } }, s.pages.pointFromPin(.active, sel.start));
++    try testing.expectEqual(point.Point{ .active = .{
++        .x = 8,
++        .y = 0,
++    } }, s.pages.pointFromPin(.active, sel.end));
++    try testing.expect(w.next() == null);
++}
++
+ test "SlidingWindow single append single char" {
+     const testing = std.testing;
+     const alloc = testing.allocator;
 diff --git a/src/terminal/stream.zig b/src/terminal/stream.zig
 index e89c73e66..6893c9c84 100644
 --- a/src/terminal/stream.zig

@@ -485,6 +485,32 @@ export interface GhosttyWasmExports extends WebAssembly.Exports {
   ghostty_terminal_resize(terminal: TerminalHandle, cols: number, rows: number): void;
   ghostty_terminal_write(terminal: TerminalHandle, dataPtr: number, dataLen: number): void;
 
+  // Retained normal-buffer search
+  ghostty_terminal_retained_search_create(
+    terminal: TerminalHandle,
+    queryPtr: number,
+    queryLen: number,
+    caseSensitive: boolean
+  ): number;
+  ghostty_terminal_retained_search_step(terminal: TerminalHandle, searchId: number): number;
+  ghostty_terminal_retained_search_cancel(terminal: TerminalHandle, searchId: number): void;
+  ghostty_terminal_retained_search_match_count(terminal: TerminalHandle, searchId: number): number;
+  ghostty_terminal_retained_search_match_range(
+    terminal: TerminalHandle,
+    searchId: number,
+    matchIndex: number,
+    bufPtr: number,
+    bufLen: number
+  ): number;
+  ghostty_terminal_retained_search_match_text(
+    terminal: TerminalHandle,
+    searchId: number,
+    matchIndex: number,
+    bufPtr: number,
+    bufLen: number
+  ): number;
+  ghostty_terminal_get_primary_screen_generation(terminal: TerminalHandle): number;
+
   // Structured terminal events
   ghostty_terminal_peek_event_size(terminal: TerminalHandle): number;
   ghostty_terminal_read_event(terminal: TerminalHandle, bufPtr: number, bufLen: number): number;
