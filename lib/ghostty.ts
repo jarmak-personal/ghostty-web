@@ -375,6 +375,108 @@ export class GhosttyTerminal {
   }
 
   // ========================================================================
+  // Retained normal-buffer search
+  // ========================================================================
+
+  createRetainedSearch(query: string, caseSensitive: boolean): number {
+    if (!this.handle || query.length === 0) return 0;
+    const bytes = new TextEncoder().encode(query);
+    if (bytes.length === 0) return 0;
+    const ptr = this.exports.ghostty_wasm_alloc_u8_array(bytes.length);
+    if (ptr === 0) return 0;
+    try {
+      new Uint8Array(this.memory.buffer).set(bytes, ptr);
+      return (
+        this.exports.ghostty_terminal_retained_search_create(
+          this.handle,
+          ptr,
+          bytes.length,
+          caseSensitive
+        ) >>> 0
+      );
+    } finally {
+      this.exports.ghostty_wasm_free_u8_array(ptr, bytes.length);
+    }
+  }
+
+  stepRetainedSearch(searchId: number): number {
+    if (!this.handle || searchId === 0) return -1;
+    return this.exports.ghostty_terminal_retained_search_step(this.handle, searchId);
+  }
+
+  cancelRetainedSearch(searchId: number): void {
+    if (!this.handle || searchId === 0) return;
+    this.exports.ghostty_terminal_retained_search_cancel(this.handle, searchId);
+  }
+
+  getRetainedSearchMatchCount(searchId: number): number {
+    if (!this.handle || searchId === 0) return -1;
+    return this.exports.ghostty_terminal_retained_search_match_count(this.handle, searchId);
+  }
+
+  getRetainedSearchMatchRange(
+    searchId: number,
+    matchIndex: number
+  ): { startRow: number; startColumn: number; endRow: number; endColumn: number } | null {
+    if (!this.handle || searchId === 0) return null;
+    const byteLength = 4 * Uint32Array.BYTES_PER_ELEMENT;
+    const ptr = this.exports.ghostty_wasm_alloc_u8_array(byteLength);
+    if (ptr === 0) return null;
+    try {
+      const count = this.exports.ghostty_terminal_retained_search_match_range(
+        this.handle,
+        searchId,
+        matchIndex,
+        ptr,
+        4
+      );
+      if (count !== 4) return null;
+      const values = new Uint32Array(this.memory.buffer, ptr, 4);
+      return {
+        startRow: values[0],
+        startColumn: values[1],
+        endRow: values[2],
+        endColumn: values[3],
+      };
+    } finally {
+      this.exports.ghostty_wasm_free_u8_array(ptr, byteLength);
+    }
+  }
+
+  getRetainedSearchMatchText(searchId: number, matchIndex: number): string | null {
+    if (!this.handle || searchId === 0) return null;
+    const byteLength = this.exports.ghostty_terminal_retained_search_match_text(
+      this.handle,
+      searchId,
+      matchIndex,
+      0,
+      0
+    );
+    if (byteLength < 0) return null;
+    if (byteLength === 0) return '';
+    const ptr = this.exports.ghostty_wasm_alloc_u8_array(byteLength);
+    if (ptr === 0) return null;
+    try {
+      const written = this.exports.ghostty_terminal_retained_search_match_text(
+        this.handle,
+        searchId,
+        matchIndex,
+        ptr,
+        byteLength
+      );
+      if (written !== byteLength) return null;
+      return new TextDecoder().decode(new Uint8Array(this.memory.buffer, ptr, written).slice());
+    } finally {
+      this.exports.ghostty_wasm_free_u8_array(ptr, byteLength);
+    }
+  }
+
+  getPrimaryScreenGeneration(): number {
+    if (!this.handle) return 0;
+    return this.exports.ghostty_terminal_get_primary_screen_generation(this.handle) >>> 0;
+  }
+
+  // ========================================================================
   // Structured terminal events
   // ========================================================================
 

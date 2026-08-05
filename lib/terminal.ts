@@ -26,6 +26,9 @@ import type {
   IDisposable,
   IEvent,
   IKeyEvent,
+  IRetainedBufferRange,
+  IRetainedBufferSearchOptions,
+  IRetainedBufferSearchResult,
   ITerminalAddon,
   ITerminalCore,
   ITerminalOptions,
@@ -36,6 +39,7 @@ import { encodePaste } from './paste';
 import { OSC8LinkProvider } from './providers/osc8-link-provider';
 import { UrlRegexProvider } from './providers/url-regex-provider';
 import { CanvasRenderer } from './renderer';
+import { RetainedBufferSearchManager } from './retained-buffer-search';
 import { SelectionManager } from './selection-manager';
 import type {
   ILink,
@@ -90,6 +94,7 @@ export class Terminal implements ITerminalCore {
   public renderer?: CanvasRenderer; // Made public for FitAddon
   private inputHandler?: InputHandler;
   private selectionManager?: SelectionManager;
+  private retainedBufferSearch?: RetainedBufferSearchManager;
   private canvas?: HTMLCanvasElement;
 
   // Link detection system
@@ -690,6 +695,7 @@ export class Terminal implements ITerminalCore {
     // This avoids the background-tab regression of using an isResizing flag
     // cleared via requestAnimationFrame (rAF is throttled/paused in background tabs).
     this.cancelRenderLoop();
+    this.retainedBufferSearch?.invalidateAll();
 
     try {
       // Update dimensions
@@ -746,6 +752,8 @@ export class Terminal implements ITerminalCore {
     const newWasmTerm = this.ghostty!.createTerminal(this.cols, this.rows, config);
 
     this.cancelRenderLoop();
+    this.retainedBufferSearch?.dispose();
+    this.retainedBufferSearch = undefined;
     this.resetSynchronizedOutputTracking();
     this.selectionManager?.clearSelection();
     this.resetViewport();
@@ -870,6 +878,31 @@ export class Terminal implements ITerminalCore {
 
   public getSelectionPosition(): IBufferRange | undefined {
     return this.selectionManager?.getSelectionPosition();
+  }
+
+  /**
+   * Search literal text in this terminal's retained normal buffer.
+   * Queries larger than 64 KiB of UTF-8 are rejected.
+   */
+  public searchRetainedBuffer(
+    query: string,
+    options: IRetainedBufferSearchOptions
+  ): Promise<IRetainedBufferSearchResult> {
+    this.assertOpen();
+    if (!this.retainedBufferSearch) {
+      this.retainedBufferSearch = new RetainedBufferSearchManager(() => this.wasmTerm);
+    }
+    return this.retainedBufferSearch.search(query, options);
+  }
+
+  /** Cancel the current retained-buffer query and release its result state. */
+  public cancelRetainedBufferSearch(): void {
+    this.retainedBufferSearch?.cancel();
+  }
+
+  /** Extract a current, same-terminal search range as exact plain text. */
+  public extractRetainedBufferText(range: IRetainedBufferRange): string | undefined {
+    return this.retainedBufferSearch?.extractCurrent(range);
   }
 
   // ==========================================================================
@@ -1154,6 +1187,8 @@ export class Terminal implements ITerminalCore {
     this.resetSynchronizedOutputTracking();
     this.stopPresentationWork(false);
     this.writeQueue.length = 0;
+    this.retainedBufferSearch?.dispose();
+    this.retainedBufferSearch = undefined;
 
     // Dispose addons
     for (const addon of this.addons) {
@@ -1261,7 +1296,11 @@ export class Terminal implements ITerminalCore {
 
   /** Parse once in Ghostty, then immediately reconcile its presentation mode. */
   private writeToWasm(data: string | Uint8Array): boolean {
+    const primaryGeneration = this.wasmTerm!.getPrimaryScreenGeneration();
     this.wasmTerm!.write(data);
+    if (this.wasmTerm!.getPrimaryScreenGeneration() !== primaryGeneration) {
+      this.retainedBufferSearch?.noteWrite();
+    }
     // Snapshot before firing listeners. A listener may write reentrantly, and
     // each write must reconcile against its own core state.
     return this.reconcileSynchronizedOutput();

@@ -98,6 +98,32 @@ export interface IBufferRange {
   end: { x: number; y: number };
 }
 
+/** Inclusive retained normal-buffer cell coordinates. */
+export interface IRetainedBufferRange {
+  readonly start: Readonly<{ row: number; column: number }>;
+  readonly end: Readonly<{ row: number; column: number }>;
+}
+
+export interface IRetainedBufferSearchOptions {
+  /**
+   * Required literal matching policy. `false` folds ASCII case only;
+   * non-ASCII UTF-8 remains byte-exact, matching Ghostty's search semantics.
+   */
+  caseSensitive: boolean;
+  /** Cancels this invocation without publishing partial results. */
+  signal?: AbortSignal;
+}
+
+export interface IRetainedBufferSearchResult extends IDisposable {
+  readonly query: string;
+  readonly caseSensitive: boolean;
+  /** Oldest-to-newest matches with inclusive cell endpoints. */
+  readonly matches: readonly IRetainedBufferRange[];
+
+  /** Extract exact plain Unicode text, or undefined when the range is stale/foreign. */
+  extract(range: IRetainedBufferRange): string | undefined;
+}
+
 /**
  * Keyboard event with key and DOM event
  */
