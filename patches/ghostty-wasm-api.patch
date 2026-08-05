@@ -521,10 +521,10 @@ index bc92597f5..3c1d6fa7d 100644
      _ = @import("../../lib/allocator.zig");
 diff --git a/src/terminal/c/terminal.zig b/src/terminal/c/terminal.zig
 new file mode 100644
-index 000000000..5cf0053d1
+index 000000000..56761c93d
 --- /dev/null
 +++ b/src/terminal/c/terminal.zig
-@@ -0,0 +1,1495 @@
+@@ -0,0 +1,1498 @@
 +//! C API wrapper for Terminal
 +//!
 +//! This provides a minimal, high-performance interface to Ghostty's Terminal
@@ -919,7 +919,10 @@ index 000000000..5cf0053d1
 +            .report_pwd => self.events.append(self.alloc, .{ .tag = .working_directory }, value.url, ""),
 +            .show_desktop_notification => self.events.append(
 +                self.alloc,
-+                .{ .tag = .notification },
++                .{
++                    .tag = .notification,
++                    .action = @intCast(@intFromEnum(value.source)),
++                },
 +                value.title,
 +                value.body,
 +            ),
@@ -2020,6 +2023,71 @@ index 000000000..5cf0053d1
 +    try std.testing.expectEqual(@as(u32, 'l'), cells[3].codepoint);
 +    try std.testing.expectEqual(@as(u32, 'o'), cells[4].codepoint);
 +}
+diff --git a/src/terminal/osc.zig b/src/terminal/osc.zig
+index 0086e48bc..6757628e1 100644
+--- a/src/terminal/osc.zig
++++ b/src/terminal/osc.zig
+@@ -93,6 +93,7 @@ pub const Command = union(Key) {
+
+     /// Show a desktop notification (OSC 9 or OSC 777)
+     show_desktop_notification: struct {
++        source: NotificationSource,
+         title: [:0]const u8,
+         body: [:0]const u8,
+     },
+@@ -164,6 +165,12 @@ pub const Command = union(Key) {
+
+     pub const KittyClipboardProtocol = parsers.kitty_clipboard_protocol.OSC;
+
++    /// Closed parser-owned origin for desktop notification requests.
++    pub const NotificationSource = enum {
++        osc_9,
++        osc_777,
++    };
++
+     pub const Key = LibEnum(
+         if (build_options.c_abi) .c else .zig,
+         // NOTE: Order matters, see LibEnum documentation.
+diff --git a/src/terminal/osc/parsers/osc9.zig b/src/terminal/osc/parsers/osc9.zig
+index f636813d9..cdd912d91 100644
+--- a/src/terminal/osc/parsers/osc9.zig
++++ b/src/terminal/osc/parsers/osc9.zig
+@@ -277,6 +277,7 @@ pub fn parse(parser: *Parser, _: ?u8) ?*Command {
+     const data = writer.buffered();
+     parser.command = .{
+         .show_desktop_notification = .{
++            .source = .osc_9,
+             .title = "",
+             .body = data[0 .. data.len - 1 :0],
+         },
+@@ -294,6 +295,7 @@ test "OSC 9: show desktop notification" {
+
+     const cmd = p.end('\x1b').?.*;
+     try testing.expect(cmd == .show_desktop_notification);
++    try testing.expectEqual(.osc_9, cmd.show_desktop_notification.source);
+     try testing.expectEqualStrings("", cmd.show_desktop_notification.title);
+     try testing.expectEqualStrings("Hello world", cmd.show_desktop_notification.body);
+ }
+diff --git a/src/terminal/osc/parsers/rxvt_extension.zig b/src/terminal/osc/parsers/rxvt_extension.zig
+index 94a0961d2..2aa4ba037 100644
+--- a/src/terminal/osc/parsers/rxvt_extension.zig
++++ b/src/terminal/osc/parsers/rxvt_extension.zig
+@@ -37,6 +37,7 @@ pub fn parse(parser: *Parser, _: ?u8) ?*Command {
+     const body = data[t + 1 .. data.len - 1 :0];
+     parser.command = .{
+         .show_desktop_notification = .{
++            .source = .osc_777,
+             .title = title,
+             .body = body,
+         },
+@@ -54,6 +55,7 @@ test "OSC: OSC 777 show desktop notification with title" {
+
+     const cmd = p.end('\x1b').?.*;
+     try testing.expect(cmd == .show_desktop_notification);
++    try testing.expectEqual(.osc_777, cmd.show_desktop_notification.source);
+     try testing.expectEqualStrings(cmd.show_desktop_notification.title, "Title");
+     try testing.expectEqualStrings(cmd.show_desktop_notification.body, "Body");
+ }
 diff --git a/src/terminal/osc/parsers/semantic_prompt.zig b/src/terminal/osc/parsers/semantic_prompt.zig
 index d3a117515..494807f73 100644
 --- a/src/terminal/osc/parsers/semantic_prompt.zig
@@ -2076,3 +2144,23 @@ index 2332866ac..dcfa15f57 100644
              if (t.modes.get(.reverse_colors)) {
                  self.colors.background = fg;
                  self.colors.foreground = bg;
+diff --git a/src/terminal/stream.zig b/src/terminal/stream.zig
+index e89c73e66..6893c9c84 100644
+--- a/src/terminal/stream.zig
++++ b/src/terminal/stream.zig
+@@ -333,6 +333,7 @@ pub const Action = union(Key) {
+     };
+
+     pub const ShowDesktopNotification = struct {
++        source: osc.Command.NotificationSource,
+         title: []const u8,
+         body: []const u8,
+
+@@ -2021,6 +2022,7 @@ pub fn Stream(comptime Handler: type) type {
+
+                 .show_desktop_notification => |v| {
+                     try self.handler.vt(.show_desktop_notification, .{
++                        .source = v.source,
+                         .title = v.title,
+                         .body = v.body,
+                     });

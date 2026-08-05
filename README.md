@@ -87,7 +87,8 @@ Event families cover title, working directory, bell, notification and progress r
 markers, palette operations, and clipboard requests. Clipboard and notification events are requests
 only; ghostty-web does not grant clipboard or platform-notification authority. Semantic marker
 provenance can be checked with `term.resolveEventProvenance()` and fails closed after its retained row
-expires.
+expires. Notification records expose the closed `osc-9` or `osc-777` parser source so an embedder can
+preserve source-specific presentation policy without interpreting raw escape sequences.
 
 For a comprehensive client <-> server example, refer to the [demo](./demo/index.html#L141).
 

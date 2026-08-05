@@ -1,6 +1,7 @@
 import type {
   RGB,
   TerminalEvent,
+  TerminalNotificationSource,
   TerminalPaletteRequest,
   TerminalPaletteTarget,
   TerminalProgressState,
@@ -28,6 +29,8 @@ const progressStates: readonly TerminalProgressState[] = [
   'indeterminate',
   'pause',
 ];
+
+const notificationSources: readonly TerminalNotificationSource[] = ['osc-9', 'osc-777'];
 
 const specialColorNames = ['bold', 'underline', 'blink', 'reverse', 'italic'] as const;
 const dynamicColorNames = new Map<number, TerminalPaletteTarget & { kind: 'dynamic' }>([
@@ -113,8 +116,10 @@ export function decodeTerminalEventRecord(record: Uint8Array): TerminalEvent | n
       return { type: 'working-directory', uri: dataA };
     case 3:
       return { type: 'bell' };
-    case 4:
-      return { type: 'notification', title: dataA, body: dataB };
+    case 4: {
+      const source = notificationSources[action];
+      return source ? { type: 'notification', source, title: dataA, body: dataB } : null;
+    }
     case 5: {
       const state = progressStates[action];
       if (!state || value < -1 || value > 100) return null;
