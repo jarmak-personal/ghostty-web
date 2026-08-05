@@ -355,12 +355,14 @@ export interface KeyEvent {
 
 export type TerminalEventScreen = 'normal' | 'alternate';
 
-/** Opaque, terminal-owned reference to a retained semantic marker row. */
+/** Opaque, terminal-owned reference to an exact retained buffer boundary. */
 export interface TerminalEventProvenance {
-  id: number;
-  screen: TerminalEventScreen;
+  readonly id: number;
+  readonly screen: TerminalEventScreen;
   /** Row from the top of the retained screen when the event was emitted. */
-  row: number;
+  readonly row: number;
+  /** Cell column at the semantic boundary. */
+  readonly column: number;
 }
 
 export type TerminalSemanticAction =
@@ -510,6 +512,26 @@ export interface GhosttyWasmExports extends WebAssembly.Exports {
     bufLen: number
   ): number;
   ghostty_terminal_get_primary_screen_generation(terminal: TerminalHandle): number;
+  ghostty_terminal_get_alternate_screen_generation(terminal: TerminalHandle): number;
+  ghostty_terminal_capture_retained_buffer_boundary(
+    terminal: TerminalHandle,
+    bufPtr: number,
+    bufLen: number
+  ): number;
+  ghostty_terminal_retained_range_create(
+    terminal: TerminalHandle,
+    startId: number,
+    endId: number,
+    alternate: boolean
+  ): number;
+  ghostty_terminal_retained_range_step(terminal: TerminalHandle, rangeId: number): number;
+  ghostty_terminal_retained_range_cancel(terminal: TerminalHandle, rangeId: number): void;
+  ghostty_terminal_retained_range_text(
+    terminal: TerminalHandle,
+    rangeId: number,
+    bufPtr: number,
+    bufLen: number
+  ): number;
 
   // Structured terminal events
   ghostty_terminal_peek_event_size(terminal: TerminalHandle): number;
@@ -518,6 +540,13 @@ export interface GhosttyWasmExports extends WebAssembly.Exports {
     terminal: TerminalHandle,
     provenanceId: number,
     alternate: boolean
+  ): number;
+  ghostty_terminal_resolve_event_boundary(
+    terminal: TerminalHandle,
+    provenanceId: number,
+    alternate: boolean,
+    bufPtr: number,
+    bufLen: number
   ): number;
 
   // RenderState API - high-performance rendering (ONE call gets ALL data)

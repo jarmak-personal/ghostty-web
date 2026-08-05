@@ -120,6 +120,11 @@ export interface IRetainedBufferSearchOptions {
   signal?: AbortSignal;
 }
 
+export interface IRetainedBufferExtractionOptions {
+  /** Cancels this invocation without publishing partial text. */
+  signal?: AbortSignal;
+}
+
 export interface IRetainedBufferSearchResult extends IDisposable {
   readonly query: string;
   readonly caseSensitive: boolean;
