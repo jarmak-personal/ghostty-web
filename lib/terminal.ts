@@ -185,6 +185,7 @@ export class Terminal implements ITerminalCore {
       convertEol: options.convertEol ?? false,
       disableStdin: options.disableStdin ?? false,
       disableContextMenu: options.disableContextMenu ?? false,
+      resolveClipboardFilePaste: options.resolveClipboardFilePaste,
       smoothScrollDuration: options.smoothScrollDuration ?? 100, // Default: 100ms smooth scroll
     };
 
@@ -511,7 +512,8 @@ export class Terminal implements ITerminalCore {
         () => ({
           kittyFlags: this.wasmTerm?.getKittyKeyboardFlags() ?? 0,
           modifyOtherKeysState2: this.wasmTerm?.hasModifyOtherKeysState2() ?? false,
-        })
+        }),
+        this.options.resolveClipboardFilePaste
       );
 
       // Create selection manager (pass textarea for context menu positioning)

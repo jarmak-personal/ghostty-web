@@ -221,6 +221,7 @@ export class InputHandler {
   private onCopyCallback?: () => boolean;
   private mouseConfig?: MouseTrackingConfig;
   private getKeyboardProtocolStateCallback?: () => KeyboardProtocolState;
+  private resolveClipboardFilePasteCallback?: (file: File) => string | undefined;
   private keydownListener: ((e: KeyboardEvent) => void) | null = null;
   private keypressListener: ((e: KeyboardEvent) => void) | null = null;
   private pasteListener: ((e: ClipboardEvent) => void) | null = null;
@@ -259,6 +260,7 @@ export class InputHandler {
    * @param inputElement - Optional input element for beforeinput events
    * @param mouseConfig - Optional mouse tracking configuration
    * @param getKeyboardProtocolState - Optional callback for negotiated keyboard protocol state
+   * @param resolveClipboardFilePaste - Optional capability that maps one clipboard File to paste text
    */
   constructor(
     ghostty: Ghostty,
@@ -271,7 +273,8 @@ export class InputHandler {
     onCopy?: () => boolean,
     inputElement?: HTMLElement,
     mouseConfig?: MouseTrackingConfig,
-    getKeyboardProtocolState?: () => KeyboardProtocolState
+    getKeyboardProtocolState?: () => KeyboardProtocolState,
+    resolveClipboardFilePaste?: (file: File) => string | undefined
   ) {
     this.encoder = ghostty.createKeyEncoder();
     this.container = container;
@@ -284,6 +287,7 @@ export class InputHandler {
     this.onCopyCallback = onCopy;
     this.mouseConfig = mouseConfig;
     this.getKeyboardProtocolStateCallback = getKeyboardProtocolState;
+    this.resolveClipboardFilePasteCallback = resolveClipboardFilePaste;
 
     // Attach event listeners
     this.attach();
@@ -643,8 +647,21 @@ export class InputHandler {
       return;
     }
 
-    // Get text from clipboard
-    const text = clipboardData.getData('text/plain');
+    // Plain text always wins. Chromium represents an OS-copied file as a
+    // FileList, while intentionally withholding its native path from the Web
+    // File API. A capable embedder may resolve exactly one such File to the
+    // terminal text that this existing paste owner will encode.
+    let text = clipboardData.getData('text/plain');
+    if (!text && clipboardData.files.length === 1 && this.resolveClipboardFilePasteCallback) {
+      const file = clipboardData.files.item(0);
+      if (file) {
+        try {
+          text = this.resolveClipboardFilePasteCallback(file) ?? '';
+        } catch {
+          console.warn('Clipboard file paste resolver failed');
+        }
+      }
+    }
     if (!text) {
       console.warn('No text in clipboard');
       return;

@@ -25,6 +25,7 @@ interface MockClipboardEvent {
   clipboardData: {
     getData: (format: string) => string;
     setData: (format: string, data: string) => void;
+    files: FileList;
   } | null;
   preventDefault: () => void;
   stopPropagation: () => void;
@@ -66,21 +67,30 @@ function createKeyEvent(
 }
 
 // Helper to create mock clipboard event
-function createClipboardEvent(text: string | null): MockClipboardEvent {
+function createClipboardEvent(
+  text: string | null,
+  files: readonly File[] = []
+): MockClipboardEvent {
   const data = new Map<string, string>();
   if (text !== null) {
     data.set('text/plain', text);
   }
+  const fileList = {
+    length: files.length,
+    item: (index: number) => files[index] ?? null,
+    ...files,
+  } as unknown as FileList;
 
   return {
     type: 'paste',
     clipboardData:
-      text !== null
+      text !== null || files.length > 0
         ? {
             getData: (format: string) => data.get(format) || '',
             setData: (format: string, value: string) => {
               data.set(format, value);
             },
+            files: fileList,
           }
         : null,
     preventDefault: mock(() => {}),
@@ -1132,6 +1142,31 @@ describe('InputHandler', () => {
   });
 
   describe('Clipboard Operations', () => {
+    function createFilePasteHandler(
+      resolveClipboardFilePaste: (file: File) => string | undefined,
+      options: {
+        bracketed?: boolean;
+        inputElement?: ReturnType<typeof createMockContainer>;
+      } = {}
+    ): InputHandler {
+      return new InputHandler(
+        ghostty,
+        container as any,
+        (data) => dataReceived.push(data),
+        () => {
+          bellCalled = true;
+        },
+        undefined,
+        undefined,
+        options.bracketed ? (mode) => mode === 2004 : undefined,
+        undefined,
+        options.inputElement as any,
+        undefined,
+        undefined,
+        resolveClipboardFilePaste
+      );
+    }
+
     test('handles paste event', () => {
       const handler = new InputHandler(
         ghostty,
@@ -1164,6 +1199,82 @@ describe('InputHandler', () => {
       container.dispatchEvent(createClipboardEvent('safe\x03command\x1b[201~'));
 
       expect(dataReceived).toEqual(['safe command [201~']);
+    });
+
+    test('resolves one clipboard file through the embedder paste capability', () => {
+      const file = { name: 'requirements.txt' } as File;
+      const resolveClipboardFilePaste = mock((received: File) => {
+        expect(received).toBe(file);
+        return '/home/user/project/requirements.txt';
+      });
+      const handler = createFilePasteHandler(resolveClipboardFilePaste);
+
+      container.dispatchEvent(createClipboardEvent('', [file]));
+
+      expect(resolveClipboardFilePaste).toHaveBeenCalledTimes(1);
+      expect(dataReceived).toEqual(['/home/user/project/requirements.txt']);
+      handler.dispose();
+    });
+
+    test('prefers clipboard text without consulting the file capability', () => {
+      const resolveClipboardFilePaste = mock(() => '/wrong/file/path');
+      const handler = createFilePasteHandler(resolveClipboardFilePaste);
+
+      container.dispatchEvent(
+        createClipboardEvent('ordinary text', [{ name: 'requirements.txt' } as File])
+      );
+
+      expect(resolveClipboardFilePaste).not.toHaveBeenCalled();
+      expect(dataReceived).toEqual(['ordinary text']);
+      handler.dispose();
+    });
+
+    test('does not resolve zero or multiple clipboard files', () => {
+      const resolveClipboardFilePaste = mock(() => '/wrong/file/path');
+      const handler = createFilePasteHandler(resolveClipboardFilePaste);
+
+      container.dispatchEvent(createClipboardEvent(''));
+      container.dispatchEvent(
+        createClipboardEvent('', [{ name: 'one.txt' } as File, { name: 'two.txt' } as File])
+      );
+
+      expect(resolveClipboardFilePaste).not.toHaveBeenCalled();
+      expect(dataReceived).toEqual([]);
+      handler.dispose();
+    });
+
+    test('does not paste an unresolved clipboard file', () => {
+      const resolveClipboardFilePaste = mock(() => undefined);
+      const handler = createFilePasteHandler(resolveClipboardFilePaste);
+
+      container.dispatchEvent(createClipboardEvent('', [{ name: 'requirements.txt' } as File]));
+
+      expect(resolveClipboardFilePaste).toHaveBeenCalledTimes(1);
+      expect(dataReceived).toEqual([]);
+      handler.dispose();
+    });
+
+    test('sanitizes resolved file text inside bracketed paste markers', () => {
+      const handler = createFilePasteHandler(() => '/home/user/safe\x03name', {
+        bracketed: true,
+      });
+
+      container.dispatchEvent(createClipboardEvent('', [{ name: 'safe-name' } as File]));
+
+      expect(dataReceived).toEqual(['\x1b[200~/home/user/safe name\x1b[201~']);
+      handler.dispose();
+    });
+
+    test('deduplicates resolved file paste from beforeinput', () => {
+      const inputElement = createMockContainer();
+      const resolved = '/home/user/project/requirements.txt';
+      const handler = createFilePasteHandler(() => resolved, { inputElement });
+
+      container.dispatchEvent(createClipboardEvent('', [{ name: 'requirements.txt' } as File]));
+      inputElement.dispatchEvent(createBeforeInputEvent('insertFromPaste', resolved));
+
+      expect(dataReceived).toEqual([resolved]);
+      handler.dispose();
     });
 
     test('handles beforeinput insertFromPaste with data', () => {
