@@ -37,19 +37,19 @@ function installAnimationFrameHarness(): {
 }
 
 function installTimeoutHarness(): {
-  callbacks: Map<number, TimerHandler>;
+  callbacks: Map<number, { handler: TimerHandler; delay: number }>;
   runOnly: () => void;
   restore: () => void;
 } {
   const originalSet = window.setTimeout;
   const originalClear = window.clearTimeout;
-  const callbacks = new Map<number, TimerHandler>();
+  const callbacks = new Map<number, { handler: TimerHandler; delay: number }>();
   let nextTimer = 100_000;
 
   window.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
-    if (timeout !== 1000) return originalSet(handler, timeout, ...args);
+    if ((timeout ?? 0) === 0) return originalSet(handler, timeout, ...args);
     const id = nextTimer++;
-    callbacks.set(id, handler);
+    callbacks.set(id, { handler, delay: timeout ?? 0 });
     return id;
   }) as typeof window.setTimeout;
   window.clearTimeout = ((id: number) => {
@@ -59,11 +59,12 @@ function installTimeoutHarness(): {
   return {
     callbacks,
     runOnly: () => {
-      const only = callbacks.entries().next().value as [number, TimerHandler] | undefined;
+      const only = callbacks.entries().next().value as
+        [number, { handler: TimerHandler; delay: number }] | undefined;
       if (!only || callbacks.size !== 1) throw new Error('Expected exactly one pending timeout');
       callbacks.delete(only[0]);
-      if (typeof only[1] !== 'function') throw new Error('Expected a timeout callback');
-      only[1]();
+      if (typeof only[1].handler !== 'function') throw new Error('Expected a timeout callback');
+      only[1].handler();
     },
     restore: () => {
       window.setTimeout = originalSet;
@@ -138,6 +139,7 @@ describe('synchronized output', () => {
 
       expect(frames.callbacks.size).toBe(0);
       expect(timers.callbacks.size).toBe(1);
+      expect([...timers.callbacks.values()].map(({ delay }) => delay)).toEqual([1000]);
       expect(lineText(terminal.wasmTerm?.getLine(0) ?? null)).toContain('first second');
       expect(responses).toContain('\x1b[1;13R');
       expect(terminal.getRenderStats()).toMatchObject({
@@ -182,6 +184,7 @@ describe('synchronized output', () => {
       terminal.write('\x1b[?2026hheld');
       expect(frames.callbacks.size).toBe(0);
       const firstTimer = [...timers.callbacks.keys()];
+      expect([...timers.callbacks.values()].map(({ delay }) => delay)).toEqual([1000]);
 
       terminal.write('plain bytes');
       terminal.write('\x1b[?2026x');
@@ -190,6 +193,7 @@ describe('synchronized output', () => {
       terminal.write('\x1b[?2026h');
       expect(timers.callbacks.size).toBe(1);
       expect([...timers.callbacks.keys()]).not.toEqual(firstTimer);
+      expect([...timers.callbacks.values()].map(({ delay }) => delay)).toEqual([1000]);
     } finally {
       terminal.dispose();
       container.remove();
@@ -211,6 +215,7 @@ describe('synchronized output', () => {
       const before = terminal.getRenderStats();
 
       terminal.write('\x1b[?2026habandoned');
+      expect([...timers.callbacks.values()].map(({ delay }) => delay)).toEqual([1000]);
       timers.runOnly();
 
       expect(terminal.wasmTerm?.isSynchronizedOutput()).toBe(false);

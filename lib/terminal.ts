@@ -1309,13 +1309,11 @@ export class Terminal implements ITerminalCore {
   /**
    * Flush any writes that were queued during resize
    */
-  private flushWriteQueue(): boolean {
-    let synchronizationCompleted = false;
+  private flushWriteQueue(): void {
     while (this.writeQueue.length > 0) {
       const data = this.writeQueue.shift()!;
-      synchronizationCompleted = this.writeToWasm(data) || synchronizationCompleted;
+      this.writeToWasm(data);
     }
-    return synchronizationCompleted;
   }
 
   /** Schedule one coalesced presentation frame. */
