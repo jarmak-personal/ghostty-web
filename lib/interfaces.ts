@@ -26,6 +26,16 @@ export interface ITerminalOptions {
    * this option is enabled.
    */
   disableContextMenu?: boolean;
+  /**
+   * Resolve one browser-provided clipboard file to terminal paste text.
+   *
+   * Browsers intentionally expose copied files as File objects without a
+   * native path. Embedders with an explicit capability may supply the text to
+   * paste; ghostty-web continues to own sanitization, bracketed paste, and
+   * duplicate-event suppression. The resolver is consulted only when plain
+   * text is absent and exactly one clipboard file is present.
+   */
+  resolveClipboardFilePaste?: (file: File) => string | undefined;
 
   // Scrolling options
   smoothScrollDuration?: number; // Duration in ms for smooth scroll animation (default: 100, 0 = instant)
