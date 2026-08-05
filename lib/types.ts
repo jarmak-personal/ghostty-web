@@ -350,6 +350,74 @@ export interface KeyEvent {
 }
 
 // ============================================================================
+// Structured Terminal Event Types
+// ============================================================================
+
+export type TerminalEventScreen = 'normal' | 'alternate';
+
+/** Opaque, terminal-owned reference to a retained semantic marker row. */
+export interface TerminalEventProvenance {
+  id: number;
+  screen: TerminalEventScreen;
+  /** Row from the top of the retained screen when the event was emitted. */
+  row: number;
+}
+
+export type TerminalSemanticAction =
+  | 'fresh-line'
+  | 'fresh-line-new-prompt'
+  | 'new-command'
+  | 'prompt-start'
+  | 'end-prompt-start-input'
+  | 'end-prompt-start-input-terminate-eol'
+  | 'end-input-start-output'
+  | 'end-command';
+
+export type TerminalProgressState = 'remove' | 'set' | 'error' | 'indeterminate' | 'pause';
+
+export type TerminalPaletteTarget =
+  | { kind: 'palette'; index: number }
+  | { kind: 'special'; name: 'bold' | 'underline' | 'blink' | 'reverse' | 'italic' }
+  | {
+      kind: 'dynamic';
+      name:
+        | 'foreground'
+        | 'background'
+        | 'cursor'
+        | 'pointer-foreground'
+        | 'pointer-background'
+        | 'tektronix-foreground'
+        | 'tektronix-background'
+        | 'highlight-background'
+        | 'tektronix-cursor'
+        | 'highlight-foreground';
+    };
+
+export type TerminalPaletteRequest =
+  | { type: 'set'; target: TerminalPaletteTarget; color: RGB }
+  | { type: 'query'; target: TerminalPaletteTarget }
+  | { type: 'reset'; target: TerminalPaletteTarget }
+  | { type: 'reset-palette' }
+  | { type: 'reset-special' };
+
+/** Typed requests emitted directly from Ghostty parser actions. */
+export type TerminalEvent =
+  | { type: 'title'; title: string }
+  | { type: 'working-directory'; uri: string }
+  | { type: 'bell' }
+  | { type: 'notification'; title: string; body: string }
+  | { type: 'progress'; state: TerminalProgressState; progress?: number }
+  | {
+      type: 'semantic';
+      action: TerminalSemanticAction;
+      options: string;
+      provenance: TerminalEventProvenance;
+    }
+  | { type: 'palette'; operation: number; request: TerminalPaletteRequest }
+  | { type: 'clipboard'; operation: 'read'; selection: string }
+  | { type: 'clipboard'; operation: 'write'; selection: string; data: string };
+
+// ============================================================================
 // WASM Exports Interface
 // ============================================================================
 
@@ -413,6 +481,15 @@ export interface GhosttyWasmExports extends WebAssembly.Exports {
   ghostty_terminal_free(terminal: TerminalHandle): void;
   ghostty_terminal_resize(terminal: TerminalHandle, cols: number, rows: number): void;
   ghostty_terminal_write(terminal: TerminalHandle, dataPtr: number, dataLen: number): void;
+
+  // Structured terminal events
+  ghostty_terminal_peek_event_size(terminal: TerminalHandle): number;
+  ghostty_terminal_read_event(terminal: TerminalHandle, bufPtr: number, bufLen: number): number;
+  ghostty_terminal_resolve_event_provenance(
+    terminal: TerminalHandle,
+    provenanceId: number,
+    alternate: boolean
+  ): number;
 
   // RenderState API - high-performance rendering (ONE call gets ALL data)
   ghostty_render_state_update(terminal: TerminalHandle): number; // 0=none, 1=partial, 2=full

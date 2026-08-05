@@ -73,6 +73,22 @@ term.onData((data) => websocket.send(data));
 websocket.onmessage = (e) => term.write(e.data);
 ```
 
+The hvir compatibility artifact also exposes typed events sourced directly from Ghostty's parser:
+
+```typescript
+term.onTerminalEvent((event) => {
+  if (event.type === 'working-directory') {
+    console.log(event.uri); // Untrusted application-provided value
+  }
+});
+```
+
+Event families cover title, working directory, bell, notification and progress requests, semantic
+markers, palette operations, and clipboard requests. Clipboard and notification events are requests
+only; ghostty-web does not grant clipboard or platform-notification authority. Semantic marker
+provenance can be checked with `term.resolveEventProvenance()` and fails closed after its retained row
+expires.
+
 For a comprehensive client <-> server example, refer to the [demo](./demo/index.html#L141).
 
 ## Development
