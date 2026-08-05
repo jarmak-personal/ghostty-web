@@ -100,6 +100,13 @@ export type {
   ILinkProvider,
   KeyEvent,
   RGB,
+  TerminalEvent,
+  TerminalEventProvenance,
+  TerminalEventScreen,
   TerminalHandle,
+  TerminalPaletteRequest,
+  TerminalPaletteTarget,
+  TerminalProgressState,
+  TerminalSemanticAction,
 } from './types';
 export { Key, KeyAction, Mods } from './types';

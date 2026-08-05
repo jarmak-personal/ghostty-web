@@ -90,6 +90,7 @@ function createSchedulerHarness(): Terminal & {
     titleChangeEmitter: disposable,
     scrollEmitter: { fire: (viewportY: number) => scrollEvents.push(viewportY), dispose: () => {} },
     renderEmitter: disposable,
+    terminalEventEmitter: disposable,
     renderCalls,
     cursorResetCount: 0,
     rendererPauseStates,

@@ -29,10 +29,10 @@ index 4f8fef88e..ca9fb1d4d 100644
  #include <ghostty/vt/key.h>
 diff --git a/include/ghostty/vt/terminal.h b/include/ghostty/vt/terminal.h
 new file mode 100644
-index 000000000..6251bf694
+index 000000000..676273a56
 --- /dev/null
 +++ b/include/ghostty/vt/terminal.h
-@@ -0,0 +1,291 @@
+@@ -0,0 +1,321 @@
 +/**
 + * @file terminal.h
 + *
@@ -141,6 +141,36 @@ index 000000000..6251bf694
 +
 +/** Write data to terminal (parses VT sequences) */
 +void ghostty_terminal_write(GhosttyTerminal term, const uint8_t* data, size_t len);
++
++/* ============================================================================
++ * Structured terminal events
++ * ========================================================================= */
++
++/**
++ * Return the size of the next versioned event record, or zero when empty.
++ * Records are delivered in parser order and retained bytes are capped at 64 KiB.
++ */
++int ghostty_terminal_peek_event_size(GhosttyTerminal term);
++
++/**
++ * Copy and consume the next event record.
++ * Returns bytes written, zero when empty, or -1 when the buffer is too small.
++ */
++int ghostty_terminal_read_event(
++    GhosttyTerminal term,
++    uint8_t* out_buffer,
++    size_t buffer_size
++);
++
++/**
++ * Resolve semantic provenance to its current retained row.
++ * Returns -1 after eviction, screen removal, reset, or terminal destruction.
++ */
++int ghostty_terminal_resolve_event_provenance(
++    GhosttyTerminal term,
++    uint32_t provenance_id,
++    bool alternate
++);
 +
 +/* ============================================================================
 + * RenderState API - High-performance rendering
@@ -325,10 +355,10 @@ index 000000000..6251bf694
 +
 +#endif /* GHOSTTY_VT_TERMINAL_H */
 diff --git a/src/lib_vt.zig b/src/lib_vt.zig
-index 426660621..c3de6c2b5 100644
+index 426660621..62212c7dc 100644
 --- a/src/lib_vt.zig
 +++ b/src/lib_vt.zig
-@@ -143,6 +143,47 @@ comptime {
+@@ -143,6 +143,52 @@ comptime {
          @export(&c.sgr_unknown_partial, .{ .name = "ghostty_sgr_unknown_partial" });
          @export(&c.sgr_attribute_tag, .{ .name = "ghostty_sgr_attribute_tag" });
          @export(&c.sgr_attribute_value, .{ .name = "ghostty_sgr_attribute_value" });
@@ -338,6 +368,11 @@ index 426660621..c3de6c2b5 100644
 +        @export(&c.terminal_free, .{ .name = "ghostty_terminal_free" });
 +        @export(&c.terminal_resize, .{ .name = "ghostty_terminal_resize" });
 +        @export(&c.terminal_write, .{ .name = "ghostty_terminal_write" });
++
++        // Structured terminal events
++        @export(&c.terminal_peek_event_size, .{ .name = "ghostty_terminal_peek_event_size" });
++        @export(&c.terminal_read_event, .{ .name = "ghostty_terminal_read_event" });
++        @export(&c.terminal_resolve_event_provenance, .{ .name = "ghostty_terminal_resolve_event_provenance" });
 +
 +        // RenderState API - high-performance rendering
 +        @export(&c.render_state_update, .{ .name = "ghostty_render_state_update" });
@@ -411,7 +446,7 @@ index ea8ca1445..75a72480b 100644
      }
 
 diff --git a/src/terminal/c/main.zig b/src/terminal/c/main.zig
-index bc92597f5..39f6c5239 100644
+index bc92597f5..3c1d6fa7d 100644
 --- a/src/terminal/c/main.zig
 +++ b/src/terminal/c/main.zig
 @@ -4,6 +4,7 @@ pub const key_event = @import("key_event.zig");
@@ -422,7 +457,7 @@ index bc92597f5..39f6c5239 100644
 
  // The full C API, unexported.
  pub const osc_new = osc.new;
-@@ -52,6 +53,48 @@ pub const key_encoder_encode = key_encode.encode;
+@@ -52,6 +53,53 @@ pub const key_encoder_encode = key_encode.encode;
 
  pub const paste_is_safe = paste.is_safe;
 
@@ -432,6 +467,11 @@ index bc92597f5..39f6c5239 100644
 +pub const terminal_free = terminal.free;
 +pub const terminal_resize = terminal.resize;
 +pub const terminal_write = terminal.write;
++
++// Structured terminal events
++pub const terminal_peek_event_size = terminal.peekEventSize;
++pub const terminal_read_event = terminal.readEvent;
++pub const terminal_resolve_event_provenance = terminal.resolveEventProvenance;
 +
 +// RenderState API - high-performance rendering
 +pub const render_state_update = terminal.renderStateUpdate;
@@ -471,7 +511,7 @@ index bc92597f5..39f6c5239 100644
  test {
      _ = color;
      _ = osc;
-@@ -59,6 +102,7 @@ test {
+@@ -59,6 +107,7 @@ test {
      _ = key_encode;
      _ = paste;
      _ = sgr;
@@ -481,10 +521,10 @@ index bc92597f5..39f6c5239 100644
      _ = @import("../../lib/allocator.zig");
 diff --git a/src/terminal/c/terminal.zig b/src/terminal/c/terminal.zig
 new file mode 100644
-index 000000000..7013e2870
+index 000000000..5cf0053d1
 --- /dev/null
 +++ b/src/terminal/c/terminal.zig
-@@ -0,0 +1,1134 @@
+@@ -0,0 +1,1495 @@
 +//! C API wrapper for Terminal
 +//!
 +//! This provides a minimal, high-performance interface to Ghostty's Terminal
@@ -515,8 +555,201 @@ index 000000000..7013e2870
 +const point = @import("../point.zig");
 +const Style = @import("../style.zig").Style;
 +const device_status = @import("../device_status.zig");
++const osc_color = @import("../osc/parsers/color.zig");
++const PageList = @import("../PageList.zig");
++const ScreenSet = @import("../ScreenSet.zig");
++const pagepkg = @import("../page.zig");
 +
 +const log = std.log.scoped(.terminal_c);
++
++/// Maximum bytes retained for either an in-progress allocating OSC payload or
++/// unread structured event records. This keeps untrusted PTY output bounded.
++const max_event_bytes = 64 * 1024;
++
++/// Versioned wire tags consumed by the TypeScript wrapper. The wire format is
++/// internal to this compatibility ABI; public consumers receive typed records.
++const EventTag = enum(u8) {
++    title = 1,
++    working_directory = 2,
++    bell = 3,
++    notification = 4,
++    progress = 5,
++    semantic = 6,
++    palette = 7,
++    clipboard = 8,
++};
++
++/// Fixed little-endian WASM event header followed by data_a then data_b.
++const EventHeader = extern struct {
++    version: u8 = 1,
++    tag: EventTag,
++    action: u8 = 0,
++    flags: u8 = 0,
++    row: u32 = 0,
++    provenance_id: u32 = 0,
++    reserved: u32 = 0,
++    value: i32 = 0,
++    target: i32 = 0,
++    color_value: u32 = 0,
++    data_a_len: u32 = 0,
++    data_b_len: u32 = 0,
++};
++
++comptime {
++    std.debug.assert(@sizeOf(EventHeader) == 36);
++}
++
++const EventQueue = struct {
++    buffer: std.ArrayList(u8) = .{},
++    read_offset: usize = 0,
++
++    fn deinit(self: *EventQueue, alloc: Allocator) void {
++        self.buffer.deinit(alloc);
++        self.* = .{};
++    }
++
++    fn clearRetainingCapacity(self: *EventQueue) void {
++        self.buffer.clearRetainingCapacity();
++        self.read_offset = 0;
++    }
++
++    fn pendingBytes(self: *const EventQueue) usize {
++        return self.buffer.items.len - self.read_offset;
++    }
++
++    fn compact(self: *EventQueue) void {
++        if (self.read_offset == 0) return;
++        const remaining = self.pendingBytes();
++        std.mem.copyForwards(
++            u8,
++            self.buffer.items[0..remaining],
++            self.buffer.items[self.read_offset..],
++        );
++        self.buffer.items.len = remaining;
++        self.read_offset = 0;
++    }
++
++    fn append(
++        self: *EventQueue,
++        alloc: Allocator,
++        header_: EventHeader,
++        data_a: []const u8,
++        data_b: []const u8,
++    ) void {
++        const record_len = @sizeOf(EventHeader) + data_a.len + data_b.len;
++        if (record_len > max_event_bytes) return;
++
++        if (self.pendingBytes() + record_len > max_event_bytes and self.read_offset > 0) {
++            self.compact();
++        }
++        if (self.pendingBytes() + record_len > max_event_bytes) return;
++
++        var header = header_;
++        header.data_a_len = @intCast(data_a.len);
++        header.data_b_len = @intCast(data_b.len);
++        self.buffer.ensureUnusedCapacity(alloc, record_len) catch return;
++        self.buffer.appendSliceAssumeCapacity(std.mem.asBytes(&header));
++        self.buffer.appendSliceAssumeCapacity(data_a);
++        self.buffer.appendSliceAssumeCapacity(data_b);
++    }
++
++    fn peekSize(self: *const EventQueue) usize {
++        if (self.pendingBytes() < @sizeOf(EventHeader)) return 0;
++        const header: *align(1) const EventHeader = @ptrCast(
++            self.buffer.items[self.read_offset..][0..@sizeOf(EventHeader)].ptr,
++        );
++        const size = @sizeOf(EventHeader) + header.data_a_len + header.data_b_len;
++        if (size > self.pendingBytes() or size > max_event_bytes) return 0;
++        return size;
++    }
++
++    fn read(self: *EventQueue, out: [*]u8, out_len: usize) c_int {
++        const size = self.peekSize();
++        if (size == 0) return 0;
++        if (out_len < size) return -1;
++        @memcpy(out[0..size], self.buffer.items[self.read_offset..][0..size]);
++        self.read_offset += size;
++        if (self.read_offset == self.buffer.items.len) self.clearRetainingCapacity();
++        return @intCast(size);
++    }
++};
++
++const max_provenance_entries = 256;
++
++const ProvenanceRegistry = struct {
++    const Entry = struct {
++        id: u32,
++        screen: ScreenSet.Key,
++        pin: *PageList.Pin,
++        row: *pagepkg.Row,
++    };
++
++    entries: [max_provenance_entries]?Entry = [_]?Entry{null} ** max_provenance_entries,
++    next_slot: usize = 0,
++    next_id: u32 = 1,
++
++    fn clear(self: *ProvenanceRegistry, terminal: *Terminal) void {
++        for (&self.entries) |*entry| {
++            if (entry.*) |existing| {
++                if (terminal.screens.get(existing.screen)) |screen| {
++                    screen.pages.untrackPin(existing.pin);
++                }
++                entry.* = null;
++            }
++        }
++        self.next_slot = 0;
++    }
++
++    fn register(self: *ProvenanceRegistry, terminal: *Terminal) ?struct { id: u32, row: u32 } {
++        const screen_key = terminal.screens.active_key;
++        const pages = &terminal.screens.active.pages;
++        const tracked = pages.trackPin(terminal.screens.active.cursor.page_pin.*) catch return null;
++
++        const slot = self.next_slot;
++        self.next_slot = (self.next_slot + 1) % max_provenance_entries;
++        if (self.entries[slot]) |existing| {
++            if (terminal.screens.get(existing.screen)) |screen| {
++                screen.pages.untrackPin(existing.pin);
++            }
++        }
++
++        const id = self.next_id;
++        self.next_id +%= 1;
++        if (self.next_id == 0) self.next_id = 1;
++        self.entries[slot] = .{
++            .id = id,
++            .screen = screen_key,
++            .pin = tracked,
++            .row = tracked.rowAndCell().row,
++        };
++
++        return .{ .id = id, .row = absoluteRow(pages, tracked) orelse 0 };
++    }
++
++    fn resolve(self: *const ProvenanceRegistry, terminal: *const Terminal, id: u32, screen_key: ScreenSet.Key) ?u32 {
++        for (self.entries) |entry| {
++            const existing = entry orelse continue;
++            if (existing.id != id or existing.screen != screen_key or existing.pin.garbage) continue;
++            const screen = terminal.screens.get(screen_key) orelse return null;
++            if (existing.pin.rowAndCell().row != existing.row) return null;
++            return absoluteRow(&screen.pages, existing.pin);
++        }
++        return null;
++    }
++
++    fn absoluteRow(pages: *const PageList, pin: *const PageList.Pin) ?u32 {
++        var row: usize = 0;
++        var node = pages.pages.first;
++        while (node) |current| : (node = current.next) {
++            if (current == pin.node) {
++                if (pin.y >= current.data.size.rows) return null;
++                return std.math.cast(u32, row + pin.y);
++            }
++            row += current.data.size.rows;
++        }
++        return null;
++    }
++};
 +
 +/// Response handler that processes VT sequences and queues responses.
 +/// This extends the readonly stream handler to also handle queries.
@@ -524,12 +757,22 @@ index 000000000..7013e2870
 +    alloc: Allocator,
 +    terminal: *Terminal,
 +    response_buffer: *std.ArrayList(u8),
++    events: *EventQueue,
++    provenance: *ProvenanceRegistry,
 +
-+    pub fn init(alloc: Allocator, terminal: *Terminal, response_buffer: *std.ArrayList(u8)) ResponseHandler {
++    pub fn init(
++        alloc: Allocator,
++        terminal: *Terminal,
++        response_buffer: *std.ArrayList(u8),
++        events: *EventQueue,
++        provenance: *ProvenanceRegistry,
++    ) ResponseHandler {
 +        return .{
 +            .alloc = alloc,
 +            .terminal = terminal,
 +            .response_buffer = response_buffer,
++            .events = events,
++            .provenance = provenance,
 +        };
 +    }
 +
@@ -651,14 +894,45 @@ index 000000000..7013e2870
 +            },
 +            .active_status_display => self.terminal.status_display = value,
 +            .decaln => try self.terminal.decaln(),
-+            .full_reset => self.terminal.fullReset(),
++            .full_reset => {
++                self.events.clearRetainingCapacity();
++                self.provenance.clear(self.terminal);
++                self.terminal.fullReset();
++            },
 +            .start_hyperlink => try self.terminal.screens.active.startHyperlink(value.uri, value.id),
 +            .end_hyperlink => self.terminal.screens.active.endHyperlink(),
-+            .semantic_prompt => try self.terminal.semanticPrompt(value),
++            .semantic_prompt => {
++                try self.terminal.semanticPrompt(value);
++                self.queueSemantic(value);
++            },
 +            .mouse_shape => self.terminal.mouse_shape = value,
-+            .color_operation => try self.colorOperation(value.op, &value.requests),
++            .color_operation => {
++                try self.colorOperation(value.op, &value.requests);
++                self.queueColorOperation(value.op, &value.requests);
++            },
 +            .kitty_color_report => try self.kittyColorOperation(value),
 +            .kitty_keyboard_query => try self.queryKittyKeyboard(),
++
++            // Structured, host-owned terminal events.
++            .bell => self.events.append(self.alloc, .{ .tag = .bell }, "", ""),
++            .window_title => self.events.append(self.alloc, .{ .tag = .title }, value.title, ""),
++            .report_pwd => self.events.append(self.alloc, .{ .tag = .working_directory }, value.url, ""),
++            .show_desktop_notification => self.events.append(
++                self.alloc,
++                .{ .tag = .notification },
++                value.title,
++                value.body,
++            ),
++            .progress_report => self.events.append(self.alloc, .{
++                .tag = .progress,
++                .action = @intCast(@intFromEnum(value.state)),
++                .value = if (value.progress) |progress| progress else -1,
++            }, "", ""),
++            .clipboard_contents => self.events.append(self.alloc, .{
++                .tag = .clipboard,
++                .action = if (std.mem.eql(u8, value.data, "?")) 0 else 1,
++                .value = value.kind,
++            }, if (std.mem.eql(u8, value.data, "?")) "" else value.data, ""),
 +
 +            // Actions that require no response and have no terminal effect
 +            .dcs_hook,
@@ -667,17 +941,11 @@ index 000000000..7013e2870
 +            .apc_start,
 +            .apc_end,
 +            .apc_put,
-+            .bell,
 +            .enquiry,
 +            .request_mode,
 +            .request_mode_unknown,
 +            .size_report,
 +            .xtversion,
-+            .window_title,
-+            .report_pwd,
-+            .show_desktop_notification,
-+            .progress_report,
-+            .clipboard_contents,
 +            .title_push,
 +            .title_pop,
 +            => {},
@@ -784,6 +1052,97 @@ index 000000000..7013e2870
 +        }
 +    }
 +
++    fn queueSemantic(self: *ResponseHandler, command: Action.SemanticPrompt) void {
++        const provenance = self.provenance.register(self.terminal) orelse return;
++        self.events.append(self.alloc, .{
++            .tag = .semantic,
++            .action = @intCast(@intFromEnum(command.action)),
++            .flags = if (self.terminal.screens.active_key == .alternate) 1 else 0,
++            .row = provenance.row,
++            .provenance_id = provenance.id,
++        }, command.options_unvalidated, "");
++    }
++
++    fn queueColorOperation(
++        self: *ResponseHandler,
++        op: osc_color.Operation,
++        requests: *const osc_color.List,
++    ) void {
++        var it = requests.constIterator(0);
++        while (it.next()) |request| {
++            var header: EventHeader = .{
++                .tag = .palette,
++                .value = colorOperationNumber(op),
++            };
++            switch (request.*) {
++                .set => |set| {
++                    header.action = 0;
++                    setColorTarget(&header, set.target);
++                    header.color_value = (@as(u32, set.color.r) << 16) |
++                        (@as(u32, set.color.g) << 8) |
++                        set.color.b;
++                },
++                .query => |target| {
++                    header.action = 1;
++                    setColorTarget(&header, target);
++                },
++                .reset => |target| {
++                    header.action = 2;
++                    setColorTarget(&header, target);
++                },
++                .reset_palette => header.action = 3,
++                .reset_special => header.action = 4,
++            }
++            self.events.append(self.alloc, header, "", "");
++        }
++    }
++
++    fn setColorTarget(header: *EventHeader, target: osc_color.Target) void {
++        switch (target) {
++            .palette => |index| {
++                header.flags = 1;
++                header.target = index;
++            },
++            .special => |special| {
++                header.flags = 2;
++                header.target = @intFromEnum(special);
++            },
++            .dynamic => |dynamic| {
++                header.flags = 3;
++                header.target = @intFromEnum(dynamic);
++            },
++        }
++    }
++
++    fn colorOperationNumber(op: osc_color.Operation) i32 {
++        return switch (op) {
++            .osc_4 => 4,
++            .osc_5 => 5,
++            .osc_10 => 10,
++            .osc_11 => 11,
++            .osc_12 => 12,
++            .osc_13 => 13,
++            .osc_14 => 14,
++            .osc_15 => 15,
++            .osc_16 => 16,
++            .osc_17 => 17,
++            .osc_18 => 18,
++            .osc_19 => 19,
++            .osc_104 => 104,
++            .osc_105 => 105,
++            .osc_110 => 110,
++            .osc_111 => 111,
++            .osc_112 => 112,
++            .osc_113 => 113,
++            .osc_114 => 114,
++            .osc_115 => 115,
++            .osc_116 => 116,
++            .osc_117 => 117,
++            .osc_118 => 118,
++            .osc_119 => 119,
++        };
++    }
++
 +    fn colorOperation(self: *ResponseHandler, op: anytype, requests: anytype) !void {
 +        _ = self;
 +        _ = op;
@@ -805,11 +1164,16 @@ index 000000000..7013e2870
 +const TerminalWrapper = struct {
 +    alloc: Allocator,
 +    terminal: Terminal,
-+    handler: ResponseHandler,
 +    stream: ResponseStream,
 +    render_state: RenderState,
 +    /// Response buffer for DSR and other query responses
 +    response_buffer: std.ArrayList(u8),
++    /// Bounded parser storage used only by OSC families that require allocation.
++    osc_storage: [max_event_bytes]u8,
++    osc_allocator: std.heap.FixedBufferAllocator,
++    /// Ordered host-facing events and semantic row provenance.
++    events: EventQueue,
++    provenance: ProvenanceRegistry,
 +    /// Track alternate screen state to detect screen switches
 +    last_screen_is_alternate: bool = false,
 +};
@@ -922,23 +1286,25 @@ index 000000000..7013e2870
 +        return null;
 +    };
 +
-+    // Initialize response buffer
++    wrapper.alloc = alloc;
 +    wrapper.response_buffer = .{};
++    wrapper.events = .{};
++    wrapper.provenance = .{};
++    wrapper.render_state = RenderState.empty;
++    wrapper.last_screen_is_alternate = false;
++    wrapper.osc_allocator = std.heap.FixedBufferAllocator.init(&wrapper.osc_storage);
 +
-+    // Initialize handler with references to terminal and response buffer
-+    wrapper.handler = ResponseHandler.init(alloc, &wrapper.terminal, &wrapper.response_buffer);
-+
-+    // Initialize stream with the handler
-+    wrapper.stream = ResponseStream.init(wrapper.handler);
-+
-+    wrapper.* = .{
-+        .alloc = alloc,
-+        .terminal = wrapper.terminal,
-+        .handler = wrapper.handler,
-+        .stream = wrapper.stream,
-+        .render_state = RenderState.empty,
-+        .response_buffer = wrapper.response_buffer,
-+    };
++    // The parser allocator is intentionally bounded because PTY output is
++    // untrusted. Oversized allocating OSC sequences become invalid and are
++    // discarded by Ghostty's parser.
++    const handler = ResponseHandler.init(
++        alloc,
++        &wrapper.terminal,
++        &wrapper.response_buffer,
++        &wrapper.events,
++        &wrapper.provenance,
++    );
++    wrapper.stream = ResponseStream.initAlloc(wrapper.osc_allocator.allocator(), handler);
 +
 +    // NOTE: linefeed mode must be FALSE to match native terminal behavior
 +    // When true, LF does automatic CR which breaks apps like nvim
@@ -957,6 +1323,8 @@ index 000000000..7013e2870
 +    const alloc = wrapper.alloc;
 +    wrapper.stream.deinit();
 +    wrapper.response_buffer.deinit(alloc);
++    wrapper.events.deinit(alloc);
++    wrapper.provenance.clear(&wrapper.terminal);
 +    wrapper.render_state.deinit(alloc);
 +    wrapper.terminal.deinit(alloc);
 +    alloc.destroy(wrapper);
@@ -970,6 +1338,39 @@ index 000000000..7013e2870
 +pub fn write(ptr: ?*anyopaque, data: [*]const u8, len: usize) callconv(.c) void {
 +    const wrapper: *TerminalWrapper = @ptrCast(@alignCast(ptr orelse return));
 +    wrapper.stream.nextSlice(data[0..len]) catch return;
++}
++
++// ============================================================================
++// Structured terminal event API
++// ============================================================================
++
++/// Return the byte size of the next complete event record, or zero if empty.
++pub fn peekEventSize(ptr: ?*anyopaque) callconv(.c) c_int {
++    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return 0));
++    return @intCast(wrapper.events.peekSize());
++}
++
++/// Copy and consume one complete event record. Returns -1 for a short buffer.
++pub fn readEvent(
++    ptr: ?*anyopaque,
++    out: [*]u8,
++    out_len: usize,
++) callconv(.c) c_int {
++    const wrapper: *TerminalWrapper = @ptrCast(@alignCast(ptr orelse return 0));
++    return wrapper.events.read(out, out_len);
++}
++
++/// Resolve a semantic provenance token to its current retained row.
++/// Returns -1 when the screen, row, token, or owning terminal state expired.
++pub fn resolveEventProvenance(
++    ptr: ?*anyopaque,
++    provenance_id: u32,
++    alternate: bool,
++) callconv(.c) c_int {
++    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return -1));
++    const screen: ScreenSet.Key = if (alternate) .alternate else .primary;
++    const row = wrapper.provenance.resolve(&wrapper.terminal, provenance_id, screen) orelse return -1;
++    return std.math.cast(c_int, row) orelse -1;
 +}
 +
 +// ============================================================================

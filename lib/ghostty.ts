@@ -6,6 +6,7 @@
  * snapshot of all render data in a single update call.
  */
 
+import { decodeTerminalEventRecord, MAX_TERMINAL_EVENT_BYTES } from './terminal-events';
 import {
   CellFlags,
   type Cursor,
@@ -20,6 +21,8 @@ import {
   type RenderStateColors,
   type RenderStateCursor,
   type RGB,
+  type TerminalEvent,
+  type TerminalEventProvenance,
   type TerminalHandle,
 } from './types';
 
@@ -34,6 +37,8 @@ export {
   type RenderStateColors,
   type RenderStateCursor,
   type RGB,
+  type TerminalEvent,
+  type TerminalEventProvenance,
 };
 
 /**
@@ -357,11 +362,55 @@ export class GhosttyTerminal {
   }
 
   free(): void {
+    if (!this.handle) return;
     if (this.viewportBufferPtr) {
       this.exports.ghostty_wasm_free_u8_array(this.viewportBufferPtr, this.viewportBufferSize);
       this.viewportBufferPtr = 0;
     }
     this.exports.ghostty_terminal_free(this.handle);
+    this.handle = 0;
+  }
+
+  // ========================================================================
+  // Structured terminal events
+  // ========================================================================
+
+  /** Drain all complete parser events currently queued by Ghostty. */
+  readEvents(): TerminalEvent[] {
+    const events: TerminalEvent[] = [];
+    while (this.handle) {
+      const recordSize = this.exports.ghostty_terminal_peek_event_size(this.handle);
+      if (recordSize === 0) break;
+      if (recordSize < 0 || recordSize > MAX_TERMINAL_EVENT_BYTES) break;
+
+      const recordPtr = this.exports.ghostty_wasm_alloc_u8_array(recordSize);
+      if (recordPtr === 0) break;
+      try {
+        const bytesRead = this.exports.ghostty_terminal_read_event(
+          this.handle,
+          recordPtr,
+          recordSize
+        );
+        if (bytesRead !== recordSize) break;
+        const record = new Uint8Array(this.memory.buffer, recordPtr, bytesRead).slice();
+        const event = decodeTerminalEventRecord(record);
+        if (event) events.push(event);
+      } finally {
+        this.exports.ghostty_wasm_free_u8_array(recordPtr, recordSize);
+      }
+    }
+    return events;
+  }
+
+  /** Resolve a semantic marker to its current retained row, or null after expiry. */
+  resolveEventProvenance(provenance: TerminalEventProvenance): number | null {
+    if (!this.handle || provenance.id <= 0) return null;
+    const row = this.exports.ghostty_terminal_resolve_event_provenance(
+      this.handle,
+      provenance.id,
+      provenance.screen === 'alternate'
+    );
+    return row < 0 ? null : row;
   }
 
   // ==========================================================================
