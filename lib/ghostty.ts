@@ -11,6 +11,7 @@ import {
   CellFlags,
   type Cursor,
   DirtyState,
+  GHOSTTY_COLOR_CONFIG_SIZE,
   GHOSTTY_CONFIG_SIZE,
   type GhosttyCell,
   type GhosttyTerminalConfig,
@@ -20,6 +21,7 @@ import {
   type KittyKeyFlags,
   type RenderStateColors,
   type RenderStateCursor,
+  type RenderStateSnapshot,
   type RGB,
   type TerminalEvent,
   type TerminalEventProvenance,
@@ -28,6 +30,47 @@ import {
 
 /** Matches the native retained-search query cap before crossing into WASM. */
 const MAX_RETAINED_SEARCH_QUERY_BYTES = 64 * 1024;
+const FOREGROUND_CONFIGURED = 1 << 0;
+const BACKGROUND_CONFIGURED = 1 << 1;
+const CURSOR_CONFIGURED = 1 << 2;
+const PALETTE_CONFIGURED_SHIFT = 8;
+
+function validatedColor(value: number | undefined, field: string): number {
+  if (value === undefined) return 0;
+  if (!Number.isInteger(value) || value < 0 || value > 0xffffff) {
+    throw new TypeError(`${field} must be an integer from 0x000000 to 0xffffff`);
+  }
+  return value;
+}
+
+/** Write the native color config and return the next byte offset. */
+function writeColorConfig(view: DataView, offset: number, config: GhosttyTerminalConfig): number {
+  if (config.palette && config.palette.length > 16) {
+    throw new TypeError('palette must contain at most 16 colors');
+  }
+
+  let mask = 0;
+  if (config.fgColor !== undefined) mask |= FOREGROUND_CONFIGURED;
+  if (config.bgColor !== undefined) mask |= BACKGROUND_CONFIGURED;
+  if (config.cursorColor !== undefined) mask |= CURSOR_CONFIGURED;
+  for (let index = 0; index < 16; index++) {
+    if (config.palette?.[index] !== undefined) mask |= 1 << (PALETTE_CONFIGURED_SHIFT + index);
+  }
+
+  view.setUint32(offset, mask, true);
+  offset += 4;
+  view.setUint32(offset, validatedColor(config.fgColor, 'fgColor'), true);
+  offset += 4;
+  view.setUint32(offset, validatedColor(config.bgColor, 'bgColor'), true);
+  offset += 4;
+  view.setUint32(offset, validatedColor(config.cursorColor, 'cursorColor'), true);
+  offset += 4;
+  for (let index = 0; index < 16; index++) {
+    view.setUint32(offset, validatedColor(config.palette?.[index], `palette[${index}]`), true);
+    offset += 4;
+  }
+  return offset;
+}
 
 // Re-export types for convenience
 export {
@@ -39,6 +82,7 @@ export {
   KeyEncoderOption,
   type RenderStateColors,
   type RenderStateCursor,
+  type RenderStateSnapshot,
   type RGB,
   type TerminalEvent,
   type TerminalEventProvenance,
@@ -310,24 +354,7 @@ export class GhosttyTerminal {
         // scrollback_limit (u32)
         view.setUint32(offset, config.scrollbackLimit ?? 10000, true);
         offset += 4;
-
-        // fg_color (u32)
-        view.setUint32(offset, config.fgColor ?? 0, true);
-        offset += 4;
-
-        // bg_color (u32)
-        view.setUint32(offset, config.bgColor ?? 0, true);
-        offset += 4;
-
-        // cursor_color (u32)
-        view.setUint32(offset, config.cursorColor ?? 0, true);
-        offset += 4;
-
-        // palette[16] (u32 * 16)
-        for (let i = 0; i < 16; i++) {
-          view.setUint32(offset, config.palette?.[i] ?? 0, true);
-          offset += 4;
-        }
+        writeColorConfig(view, offset, config);
 
         this.handle = this.exports.ghostty_terminal_new_with_config(cols, rows, configPtr);
       } finally {
@@ -369,6 +396,19 @@ export class GhosttyTerminal {
     this.exports.ghostty_terminal_resize(this.handle, cols, rows);
     this.invalidateBuffers();
     this.initCellPool();
+  }
+
+  /** Change configured base colors while preserving contents and app overrides. */
+  setColorConfig(config: GhosttyTerminalConfig): boolean {
+    if (!this.handle) return false;
+    const configPtr = this.exports.ghostty_wasm_alloc_u8_array(GHOSTTY_COLOR_CONFIG_SIZE);
+    if (configPtr === 0) return false;
+    try {
+      writeColorConfig(new DataView(this.memory.buffer), configPtr, config);
+      return this.exports.ghostty_terminal_set_color_config(this.handle, configPtr);
+    } finally {
+      this.exports.ghostty_wasm_free_u8_array(configPtr, GHOSTTY_COLOR_CONFIG_SIZE);
+    }
   }
 
   free(): void {
@@ -675,35 +715,56 @@ export class GhosttyTerminal {
     // Call update() to ensure render state is fresh.
     // This is safe to call multiple times - dirty state persists until markClean().
     this.update();
+    return this.readCursor();
+  }
+
+  /** Refresh once and collect every Canvas frame-level presentation value. */
+  getRenderState(): RenderStateSnapshot {
+    const dirty = this.update();
+    return {
+      dirty,
+      cursor: this.readCursor(),
+      colors: this.readColors(),
+      dimensions: this.getDimensions(),
+    };
+  }
+
+  /**
+   * Get effective colors from render state.
+   */
+  getColors(): RenderStateColors {
+    this.update();
+    return this.readColors();
+  }
+
+  private readCursor(): RenderStateCursor {
     return {
       x: this.exports.ghostty_render_state_get_cursor_x(this.handle),
       y: this.exports.ghostty_render_state_get_cursor_y(this.handle),
       viewportX: this.exports.ghostty_render_state_get_cursor_x(this.handle),
       viewportY: this.exports.ghostty_render_state_get_cursor_y(this.handle),
       visible: this.exports.ghostty_render_state_get_cursor_visible(this.handle),
-      blinking: false, // TODO: Add blinking support
-      style: 'block', // TODO: Add style support
+      blinking: false,
+      style: 'block',
     };
   }
 
-  /**
-   * Get default colors from render state
-   */
-  getColors(): RenderStateColors {
+  private readColors(): RenderStateColors {
     const bg = this.exports.ghostty_render_state_get_bg_color(this.handle);
     const fg = this.exports.ghostty_render_state_get_fg_color(this.handle);
+    const cursor = this.exports.ghostty_render_state_get_cursor_color(this.handle);
+    const decode = (value: number): RGB => ({
+      r: (value >> 16) & 0xff,
+      g: (value >> 8) & 0xff,
+      b: value & 0xff,
+    });
     return {
-      background: {
-        r: (bg >> 16) & 0xff,
-        g: (bg >> 8) & 0xff,
-        b: bg & 0xff,
-      },
-      foreground: {
-        r: (fg >> 16) & 0xff,
-        g: (fg >> 8) & 0xff,
-        b: fg & 0xff,
-      },
-      cursor: null, // TODO: Add cursor color support
+      background: decode(bg),
+      foreground: decode(fg),
+      cursor: decode(cursor),
+      palette: Array.from({ length: 16 }, (_, index) =>
+        decode(this.exports.ghostty_render_state_get_palette_color(this.handle, index))
+      ),
     };
   }
 

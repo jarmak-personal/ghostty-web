@@ -51,7 +51,10 @@ function createSchedulerHarness(): Terminal & {
   const rendererPauseStates: boolean[] = [];
   const scrollEvents: number[] = [];
   const renderer = {
-    render: (...args: RenderCall) => renderCalls.push(args),
+    render: (...args: RenderCall) => {
+      renderCalls.push(args);
+      return { y: 0 };
+    },
     getCursorVisible: () => true,
     setRenderPaused: (paused: boolean) => rendererPauseStates.push(paused),
     resetCursorBlink: () => {
@@ -355,7 +358,7 @@ describe('hvir presentation scheduler', () => {
       }) as typeof renderer.resize;
       renderer.render = ((...args: Parameters<typeof renderer.render>) => {
         renderForces.push(args[1]);
-        originalRender.call(renderer, ...args);
+        return originalRender.call(renderer, ...args);
       }) as typeof renderer.render;
 
       terminal.resize(30, 4);

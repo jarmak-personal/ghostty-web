@@ -33,9 +33,11 @@ import type {
   ITerminalAddon,
   ITerminalCore,
   ITerminalOptions,
+  ITheme,
   IUnicodeVersionProvider,
 } from './interfaces';
 import { LinkDetector } from './link-detector';
+import { normalizeTheme, themeToTerminalConfig } from './palette';
 import { encodePaste } from './paste';
 import { OSC8LinkProvider } from './providers/osc8-link-provider';
 import { UrlRegexProvider } from './providers/url-regex-provider';
@@ -188,7 +190,7 @@ export class Terminal implements ITerminalCore {
       rows: options.rows ?? 24,
       cursorBlink: options.cursorBlink ?? false,
       cursorStyle: options.cursorStyle ?? 'block',
-      theme: options.theme ?? {},
+      theme: normalizeTheme(options.theme),
       scrollback: options.scrollback ?? 10000,
       fontSize: options.fontSize ?? 15,
       fontFamily: options.fontFamily ?? 'monospace',
@@ -204,6 +206,14 @@ export class Terminal implements ITerminalCore {
     (this.options as any) = new Proxy(baseOptions, {
       set: (target: any, prop: string, value: any) => {
         const oldValue = target[prop];
+
+        if (prop === 'theme') {
+          const theme = normalizeTheme(value);
+          if (this.isOpen) this.applyTheme(theme);
+          target[prop] = theme;
+          return true;
+        }
+
         target[prop] = value;
 
         // Apply runtime changes if terminal is open
@@ -247,12 +257,6 @@ export class Terminal implements ITerminalCore {
         }
         break;
 
-      case 'theme':
-        if (this.renderer) {
-          console.warn('ghostty-web: theme changes after open() are not yet fully supported');
-        }
-        break;
-
       case 'fontSize':
         if (this.renderer) {
           this.renderer.setFontSize(this.options.fontSize);
@@ -292,76 +296,21 @@ export class Terminal implements ITerminalCore {
     this.requestRender(true);
   }
 
-  /**
-   * Parse a CSS color string to 0xRRGGBB format.
-   * Returns 0 if the color is undefined or invalid.
-   */
-  private parseColorToHex(color?: string): number {
-    if (!color) return 0;
-
-    // Handle hex colors (#RGB, #RRGGBB)
-    if (color.startsWith('#')) {
-      let hex = color.slice(1);
-      if (hex.length === 3) {
-        hex = hex[0] + hex[0] + hex[1] + hex[1] + hex[2] + hex[2];
-      }
-      const value = Number.parseInt(hex, 16);
-      return Number.isNaN(value) ? 0 : value;
+  /** Apply one already-validated theme across native and Canvas ownership. */
+  private applyTheme(theme: Required<ITheme>): void {
+    if (!this.wasmTerm || !this.renderer) return;
+    if (!this.wasmTerm.setColorConfig(themeToTerminalConfig(theme))) {
+      throw new Error('Failed to apply terminal palette');
     }
-
-    // Handle rgb(r, g, b) format
-    const match = color.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
-    if (match) {
-      const r = Number.parseInt(match[1], 10);
-      const g = Number.parseInt(match[2], 10);
-      const b = Number.parseInt(match[3], 10);
-      return (r << 16) | (g << 8) | b;
-    }
-
-    return 0;
+    this.renderer.setTheme(theme);
+    this.requestRender(true);
   }
 
   /**
    * Convert terminal options to WASM terminal config.
    */
-  private buildWasmConfig(): GhosttyTerminalConfig | undefined {
-    const theme = this.options.theme;
-    const scrollback = this.options.scrollback;
-
-    // If no theme and default scrollback, use defaults
-    if (!theme && scrollback === 10000) {
-      return undefined;
-    }
-
-    // Build palette array from theme colors
-    // Order: black, red, green, yellow, blue, magenta, cyan, white,
-    //        brightBlack, brightRed, brightGreen, brightYellow, brightBlue, brightMagenta, brightCyan, brightWhite
-    const palette: number[] = [
-      this.parseColorToHex(theme?.black),
-      this.parseColorToHex(theme?.red),
-      this.parseColorToHex(theme?.green),
-      this.parseColorToHex(theme?.yellow),
-      this.parseColorToHex(theme?.blue),
-      this.parseColorToHex(theme?.magenta),
-      this.parseColorToHex(theme?.cyan),
-      this.parseColorToHex(theme?.white),
-      this.parseColorToHex(theme?.brightBlack),
-      this.parseColorToHex(theme?.brightRed),
-      this.parseColorToHex(theme?.brightGreen),
-      this.parseColorToHex(theme?.brightYellow),
-      this.parseColorToHex(theme?.brightBlue),
-      this.parseColorToHex(theme?.brightMagenta),
-      this.parseColorToHex(theme?.brightCyan),
-      this.parseColorToHex(theme?.brightWhite),
-    ];
-
-    return {
-      scrollbackLimit: scrollback,
-      fgColor: this.parseColorToHex(theme?.foreground),
-      bgColor: this.parseColorToHex(theme?.background),
-      cursorColor: this.parseColorToHex(theme?.cursor),
-      palette,
-    };
+  private buildWasmConfig(): GhosttyTerminalConfig {
+    return themeToTerminalConfig(normalizeTheme(this.options.theme), this.options.scrollback);
   }
 
   // ==========================================================================
@@ -1459,11 +1408,16 @@ export class Terminal implements ITerminalCore {
 
       const forceAll = this.forceFullRender;
       this.forceFullRender = false;
-      this.renderer!.render(this.wasmTerm!, forceAll, this.viewportY, this, this.scrollbarOpacity);
+      const cursor = this.renderer!.render(
+        this.wasmTerm!,
+        forceAll,
+        this.viewportY,
+        this,
+        this.scrollbarOpacity
+      );
       this.renderFrames++;
       if (forceAll) this.fullRenderFrames++;
 
-      const cursor = this.wasmTerm!.getCursor();
       if (cursor.y !== this.lastCursorY) {
         this.lastCursorY = cursor.y;
         this.cursorMoveEmitter.fire();
