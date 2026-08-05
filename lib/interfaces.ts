@@ -27,15 +27,17 @@ export interface ITerminalOptions {
    */
   disableContextMenu?: boolean;
   /**
-   * Resolve one browser-provided clipboard file to terminal paste text.
+   * Resolve one clipboard file paste to terminal text.
    *
-   * Browsers intentionally expose copied files as File objects without a
-   * native path. Embedders with an explicit capability may supply the text to
-   * paste; ghostty-web continues to own sanitization, bracketed paste, and
-   * duplicate-event suppression. The resolver is consulted only when plain
-   * text is absent and exactly one clipboard file is present.
+   * Browsers may expose an OS-copied file as a File object without a native
+   * path, or omit the File object while retaining an embedder-readable native
+   * clipboard format. Embedders with an explicit capability may supply the
+   * text synchronously or asynchronously. ghostty-web continues to own
+   * sanitization, bracketed paste, duplicate-event suppression, and disposal.
+   * The resolver is consulted only when plain text is absent and the browser
+   * reports zero or one clipboard file. Multiple files fail closed.
    */
-  resolveClipboardFilePaste?: (file: File) => string | undefined;
+  resolveClipboardFilePaste?: ClipboardFilePasteResolver;
 
   // Scrolling options
   smoothScrollDuration?: number; // Duration in ms for smooth scroll animation (default: 100, 0 = instant)
@@ -44,6 +46,10 @@ export interface ITerminalOptions {
   // If not provided, uses the module-level instance from init()
   ghostty?: Ghostty;
 }
+
+export type ClipboardFilePasteResolver = (
+  file: File | undefined
+) => string | undefined | Promise<string | undefined>;
 
 export interface ITheme {
   foreground?: string;

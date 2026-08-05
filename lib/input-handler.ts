@@ -14,7 +14,7 @@
  */
 
 import type { Ghostty, KeyEncoder } from './ghostty';
-import type { IKeyEvent } from './interfaces';
+import type { ClipboardFilePasteResolver, IKeyEvent } from './interfaces';
 import { encodePaste } from './paste';
 import { Key, KeyAction, KeyEncoderOption, KittyKeyFlags, Mods } from './types';
 
@@ -221,7 +221,7 @@ export class InputHandler {
   private onCopyCallback?: () => boolean;
   private mouseConfig?: MouseTrackingConfig;
   private getKeyboardProtocolStateCallback?: () => KeyboardProtocolState;
-  private resolveClipboardFilePasteCallback?: (file: File) => string | undefined;
+  private resolveClipboardFilePasteCallback?: ClipboardFilePasteResolver;
   private keydownListener: ((e: KeyboardEvent) => void) | null = null;
   private keypressListener: ((e: KeyboardEvent) => void) | null = null;
   private pasteListener: ((e: ClipboardEvent) => void) | null = null;
@@ -260,7 +260,7 @@ export class InputHandler {
    * @param inputElement - Optional input element for beforeinput events
    * @param mouseConfig - Optional mouse tracking configuration
    * @param getKeyboardProtocolState - Optional callback for negotiated keyboard protocol state
-   * @param resolveClipboardFilePaste - Optional capability that maps one clipboard File to paste text
+   * @param resolveClipboardFilePaste - Optional capability that maps one native clipboard file paste to text
    */
   constructor(
     ghostty: Ghostty,
@@ -274,7 +274,7 @@ export class InputHandler {
     inputElement?: HTMLElement,
     mouseConfig?: MouseTrackingConfig,
     getKeyboardProtocolState?: () => KeyboardProtocolState,
-    resolveClipboardFilePaste?: (file: File) => string | undefined
+    resolveClipboardFilePaste?: ClipboardFilePasteResolver
   ) {
     this.encoder = ghostty.createKeyEncoder();
     this.container = container;
@@ -647,30 +647,52 @@ export class InputHandler {
       return;
     }
 
-    // Plain text always wins. Chromium represents an OS-copied file as a
-    // FileList, while intentionally withholding its native path from the Web
-    // File API. A capable embedder may resolve exactly one such File to the
-    // terminal text that this existing paste owner will encode.
-    let text = clipboardData.getData('text/plain');
-    if (!text && clipboardData.files.length === 1 && this.resolveClipboardFilePasteCallback) {
-      const file = clipboardData.files.item(0);
-      if (file) {
-        try {
-          text = this.resolveClipboardFilePasteCallback(file) ?? '';
-        } catch {
-          console.warn('Clipboard file paste resolver failed');
-        }
-      }
+    // Plain text always wins. Chromium may expose an OS-copied file as one
+    // pathless File, or omit the File while an Electron-style embedder retains
+    // access to a native file-list format. Multiple browser files fail closed.
+    const text = clipboardData.getData('text/plain');
+    if (text) {
+      this.acceptPasteText(text);
+      return;
     }
-    if (!text) {
+
+    if (clipboardData.files.length > 1 || !this.resolveClipboardFilePasteCallback) {
       console.warn('No text in clipboard');
       return;
     }
 
-    if (this.shouldIgnorePasteEvent(text, 'paste')) {
+    const file = clipboardData.files.length === 1 ? clipboardData.files.item(0) : undefined;
+    if (clipboardData.files.length === 1 && !file) {
+      console.warn('No text in clipboard');
       return;
     }
 
+    try {
+      const resolved = this.resolveClipboardFilePasteCallback(file ?? undefined);
+      if (typeof resolved !== 'string' && resolved !== undefined) {
+        void resolved.then(
+          (value) => this.acceptResolvedClipboardFilePaste(value),
+          () => console.warn('Clipboard file paste resolver failed')
+        );
+        return;
+      }
+      this.acceptResolvedClipboardFilePaste(resolved);
+    } catch {
+      console.warn('Clipboard file paste resolver failed');
+    }
+  }
+
+  private acceptResolvedClipboardFilePaste(text: string | undefined): void {
+    if (this.isDisposed) return;
+    if (!text) {
+      console.warn('No text in clipboard');
+      return;
+    }
+    this.acceptPasteText(text);
+  }
+
+  private acceptPasteText(text: string): void {
+    if (this.shouldIgnorePasteEvent(text, 'paste')) return;
     this.emitPasteData(text);
     this.recordPasteData(text, 'paste');
   }

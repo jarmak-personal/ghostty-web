@@ -5,6 +5,7 @@
 import { beforeEach, describe, expect, mock, test } from 'bun:test';
 import { Ghostty } from './ghostty';
 import { InputHandler } from './input-handler';
+import type { ClipboardFilePasteResolver } from './interfaces';
 import { Key, KeyAction, KittyKeyFlags, Mods } from './types';
 
 // Mock DOM types for testing
@@ -1143,7 +1144,7 @@ describe('InputHandler', () => {
 
   describe('Clipboard Operations', () => {
     function createFilePasteHandler(
-      resolveClipboardFilePaste: (file: File) => string | undefined,
+      resolveClipboardFilePaste: ClipboardFilePasteResolver,
       options: {
         bracketed?: boolean;
         inputElement?: ReturnType<typeof createMockContainer>;
@@ -1216,6 +1217,22 @@ describe('InputHandler', () => {
       handler.dispose();
     });
 
+    test('resolves a native clipboard file paste when Chromium exposes no File', async () => {
+      const resolved = '/home/user/project/requirements.txt';
+      const resolveClipboardFilePaste = mock(async (file: File | undefined) => {
+        expect(file).toBeUndefined();
+        return resolved;
+      });
+      const handler = createFilePasteHandler(resolveClipboardFilePaste);
+
+      container.dispatchEvent(createClipboardEvent(''));
+      await Promise.resolve();
+
+      expect(resolveClipboardFilePaste).toHaveBeenCalledTimes(1);
+      expect(dataReceived).toEqual([resolved]);
+      handler.dispose();
+    });
+
     test('prefers clipboard text without consulting the file capability', () => {
       const resolveClipboardFilePaste = mock(() => '/wrong/file/path');
       const handler = createFilePasteHandler(resolveClipboardFilePaste);
@@ -1229,16 +1246,18 @@ describe('InputHandler', () => {
       handler.dispose();
     });
 
-    test('does not resolve zero or multiple clipboard files', () => {
+    test('consults the native resolver for zero files but rejects multiple files', () => {
       const resolveClipboardFilePaste = mock(() => '/wrong/file/path');
       const handler = createFilePasteHandler(resolveClipboardFilePaste);
 
       container.dispatchEvent(createClipboardEvent(''));
+      expect(resolveClipboardFilePaste).toHaveBeenCalledTimes(1);
+      dataReceived.length = 0;
       container.dispatchEvent(
         createClipboardEvent('', [{ name: 'one.txt' } as File, { name: 'two.txt' } as File])
       );
 
-      expect(resolveClipboardFilePaste).not.toHaveBeenCalled();
+      expect(resolveClipboardFilePaste).toHaveBeenCalledTimes(1);
       expect(dataReceived).toEqual([]);
       handler.dispose();
     });
@@ -1252,6 +1271,23 @@ describe('InputHandler', () => {
       expect(resolveClipboardFilePaste).toHaveBeenCalledTimes(1);
       expect(dataReceived).toEqual([]);
       handler.dispose();
+    });
+
+    test('drops an asynchronous file-paste result after disposal', async () => {
+      let resolvePaste!: (value: string) => void;
+      const handler = createFilePasteHandler(
+        () =>
+          new Promise<string>((resolve) => {
+            resolvePaste = resolve;
+          })
+      );
+
+      container.dispatchEvent(createClipboardEvent(''));
+      handler.dispose();
+      resolvePaste('/home/user/project/requirements.txt');
+      await Promise.resolve();
+
+      expect(dataReceived).toEqual([]);
     });
 
     test('sanitizes resolved file text inside bracketed paste markers', () => {
