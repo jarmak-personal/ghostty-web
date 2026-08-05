@@ -29,10 +29,10 @@ index 4f8fef88e..ca9fb1d4d 100644
  #include <ghostty/vt/key.h>
 diff --git a/include/ghostty/vt/terminal.h b/include/ghostty/vt/terminal.h
 new file mode 100644
-index 000000000..18faed4f0
+index 000000000..c5bcf2a41
 --- /dev/null
 +++ b/include/ghostty/vt/terminal.h
-@@ -0,0 +1,375 @@
+@@ -0,0 +1,416 @@
 +/**
 + * @file terminal.h
 + *
@@ -190,6 +190,38 @@ index 000000000..18faed4f0
 +/** Generation changed by any write that may have affected primary cells. */
 +uint32_t ghostty_terminal_get_primary_screen_generation(GhosttyTerminal term);
 +
++/** Generation changed by any write that may have affected alternate cells. */
++uint32_t ghostty_terminal_get_alternate_screen_generation(GhosttyTerminal term);
++
++/** Capture id, screen flag, retained row, and column for the active cursor. */
++int ghostty_terminal_capture_retained_buffer_boundary(
++    GhosttyTerminal term,
++    uint32_t* out_buffer,
++    size_t buffer_size
++);
++
++/** Begin exact [start,end) extraction between retained same-screen tokens. */
++uint32_t ghostty_terminal_retained_range_create(
++    GhosttyTerminal term,
++    uint32_t start_id,
++    uint32_t end_id,
++    bool alternate
++);
++
++/** Perform one page-bounded step: 0=pending, 1=complete, -1=stale, -2=too large. */
++int ghostty_terminal_retained_range_step(GhosttyTerminal term, uint32_t range_id);
++
++/** Cancel extraction and release all native pins and transient text. */
++void ghostty_terminal_retained_range_cancel(GhosttyTerminal term, uint32_t range_id);
++
++/** Query/copy the complete all-or-nothing exact UTF-8 extraction result. */
++int ghostty_terminal_retained_range_text(
++    GhosttyTerminal term,
++    uint32_t range_id,
++    uint8_t* out_buffer,
++    size_t buffer_size
++);
++
 +/* ============================================================================
 + * Structured terminal events
 + * ========================================================================= */
@@ -218,6 +250,15 @@ index 000000000..18faed4f0
 +    GhosttyTerminal term,
 +    uint32_t provenance_id,
 +    bool alternate
++);
++
++/** Resolve a semantic provenance token to retained row and column. */
++int ghostty_terminal_resolve_event_boundary(
++    GhosttyTerminal term,
++    uint32_t provenance_id,
++    bool alternate,
++    uint32_t* out_buffer,
++    size_t buffer_size
 +);
 +
 +/* ============================================================================
@@ -409,10 +450,10 @@ index 000000000..18faed4f0
 +
 +#endif /* GHOSTTY_VT_TERMINAL_H */
 diff --git a/src/lib_vt.zig b/src/lib_vt.zig
-index 426660621..c11296358 100644
+index 426660621..630bd7ea5 100644
 --- a/src/lib_vt.zig
 +++ b/src/lib_vt.zig
-@@ -143,6 +143,61 @@ comptime {
+@@ -143,6 +143,68 @@ comptime {
          @export(&c.sgr_unknown_partial, .{ .name = "ghostty_sgr_unknown_partial" });
          @export(&c.sgr_attribute_tag, .{ .name = "ghostty_sgr_attribute_tag" });
          @export(&c.sgr_attribute_value, .{ .name = "ghostty_sgr_attribute_value" });
@@ -429,11 +470,18 @@ index 426660621..c11296358 100644
 +        @export(&c.terminal_retained_search_match_range, .{ .name = "ghostty_terminal_retained_search_match_range" });
 +        @export(&c.terminal_retained_search_match_text, .{ .name = "ghostty_terminal_retained_search_match_text" });
 +        @export(&c.terminal_get_primary_screen_generation, .{ .name = "ghostty_terminal_get_primary_screen_generation" });
++        @export(&c.terminal_get_alternate_screen_generation, .{ .name = "ghostty_terminal_get_alternate_screen_generation" });
++        @export(&c.terminal_capture_retained_buffer_boundary, .{ .name = "ghostty_terminal_capture_retained_buffer_boundary" });
++        @export(&c.terminal_retained_range_create, .{ .name = "ghostty_terminal_retained_range_create" });
++        @export(&c.terminal_retained_range_step, .{ .name = "ghostty_terminal_retained_range_step" });
++        @export(&c.terminal_retained_range_cancel, .{ .name = "ghostty_terminal_retained_range_cancel" });
++        @export(&c.terminal_retained_range_text, .{ .name = "ghostty_terminal_retained_range_text" });
 +
 +        // Structured terminal events
 +        @export(&c.terminal_peek_event_size, .{ .name = "ghostty_terminal_peek_event_size" });
 +        @export(&c.terminal_read_event, .{ .name = "ghostty_terminal_read_event" });
 +        @export(&c.terminal_resolve_event_provenance, .{ .name = "ghostty_terminal_resolve_event_provenance" });
++        @export(&c.terminal_resolve_event_boundary, .{ .name = "ghostty_terminal_resolve_event_boundary" });
 +
 +        // RenderState API - high-performance rendering
 +        @export(&c.render_state_update, .{ .name = "ghostty_render_state_update" });
@@ -509,7 +557,7 @@ index ea8ca1445..75a72480b 100644
      }
 
 diff --git a/src/terminal/c/main.zig b/src/terminal/c/main.zig
-index bc92597f5..68345072c 100644
+index bc92597f5..b56a70e25 100644
 --- a/src/terminal/c/main.zig
 +++ b/src/terminal/c/main.zig
 @@ -4,6 +4,7 @@ pub const key_event = @import("key_event.zig");
@@ -520,7 +568,7 @@ index bc92597f5..68345072c 100644
 
  // The full C API, unexported.
  pub const osc_new = osc.new;
-@@ -52,6 +53,62 @@ pub const key_encoder_encode = key_encode.encode;
+@@ -52,6 +53,69 @@ pub const key_encoder_encode = key_encode.encode;
 
  pub const paste_is_safe = paste.is_safe;
 
@@ -537,11 +585,18 @@ index bc92597f5..68345072c 100644
 +pub const terminal_retained_search_match_range = terminal.retainedSearchMatchRange;
 +pub const terminal_retained_search_match_text = terminal.retainedSearchMatchText;
 +pub const terminal_get_primary_screen_generation = terminal.getPrimaryScreenGeneration;
++pub const terminal_get_alternate_screen_generation = terminal.getAlternateScreenGeneration;
++pub const terminal_capture_retained_buffer_boundary = terminal.captureRetainedBufferBoundary;
++pub const terminal_retained_range_create = terminal.retainedRangeCreate;
++pub const terminal_retained_range_step = terminal.retainedRangeStep;
++pub const terminal_retained_range_cancel = terminal.retainedRangeCancel;
++pub const terminal_retained_range_text = terminal.retainedRangeText;
 +
 +// Structured terminal events
 +pub const terminal_peek_event_size = terminal.peekEventSize;
 +pub const terminal_read_event = terminal.readEvent;
 +pub const terminal_resolve_event_provenance = terminal.resolveEventProvenance;
++pub const terminal_resolve_event_boundary = terminal.resolveEventBoundary;
 +
 +// RenderState API - high-performance rendering
 +pub const render_state_update = terminal.renderStateUpdate;
@@ -583,7 +638,7 @@ index bc92597f5..68345072c 100644
  test {
      _ = color;
      _ = osc;
-@@ -59,6 +116,7 @@ test {
+@@ -59,6 +123,7 @@ test {
      _ = key_encode;
      _ = paste;
      _ = sgr;
@@ -593,10 +648,10 @@ index bc92597f5..68345072c 100644
      _ = @import("../../lib/allocator.zig");
 diff --git a/src/terminal/c/terminal.zig b/src/terminal/c/terminal.zig
 new file mode 100644
-index 000000000..6671d46be
+index 000000000..8cf057133
 --- /dev/null
 +++ b/src/terminal/c/terminal.zig
-@@ -0,0 +1,1834 @@
+@@ -0,0 +1,2276 @@
 +//! C API wrapper for Terminal
 +//!
 +//! This provides a minimal, high-performance interface to Ghostty's Terminal
@@ -633,6 +688,7 @@ index 000000000..6671d46be
 +const Selection = @import("../Selection.zig");
 +const pagepkg = @import("../page.zig");
 +const ScreenSearch = @import("../search/screen.zig").ScreenSearch;
++const PageFormatter = @import("../formatter.zig").PageFormatter;
 +const tripwire = @import("../../tripwire.zig");
 +
 +const log = std.log.scoped(.terminal_c);
@@ -641,6 +697,9 @@ index 000000000..6671d46be
 +/// unread structured event records. This keeps untrusted PTY output bounded.
 +const max_event_bytes = 64 * 1024;
 +const max_search_query_bytes = 64 * 1024;
++const max_retained_range_bytes = 4 * 1024 * 1024;
++const primary_screen_touched: u8 = 1;
++const alternate_screen_touched: u8 = 2;
 +
 +/// Versioned wire tags consumed by the TypeScript wrapper. The wire format is
 +/// internal to this compatibility ABI; public consumers receive typed records.
@@ -758,6 +817,8 @@ index 000000000..6671d46be
 +        screen: ScreenSet.Key,
 +        pin: *PageList.Pin,
 +        row: *pagepkg.Row,
++        serial: u64,
++        after_cell: bool,
 +    };
 +
 +    entries: [max_provenance_entries]?Entry = [_]?Entry{null} ** max_provenance_entries,
@@ -776,9 +837,17 @@ index 000000000..6671d46be
 +        self.next_slot = 0;
 +    }
 +
-+    fn register(self: *ProvenanceRegistry, terminal: *Terminal) ?struct { id: u32, row: u32 } {
++    const Boundary = struct {
++        id: u32,
++        screen: ScreenSet.Key,
++        row: u32,
++        column: u32,
++    };
++
++    fn register(self: *ProvenanceRegistry, terminal: *Terminal) ?Boundary {
 +        const screen_key = terminal.screens.active_key;
 +        const pages = &terminal.screens.active.pages;
++        const after_cell = terminal.screens.active.cursor.pending_wrap;
 +        const tracked = pages.trackPin(terminal.screens.active.cursor.page_pin.*) catch return null;
 +
 +        const slot = self.next_slot;
@@ -797,18 +866,39 @@ index 000000000..6671d46be
 +            .screen = screen_key,
 +            .pin = tracked,
 +            .row = tracked.rowAndCell().row,
++            .serial = tracked.node.serial,
++            .after_cell = after_cell,
 +        };
 +
-+        return .{ .id = id, .row = absoluteRow(pages, tracked) orelse 0 };
++        return .{
++            .id = id,
++            .screen = screen_key,
++            .row = @intCast(pages.total_rows - pages.rows + terminal.screens.active.cursor.y),
++            .column = if (after_cell) tracked.node.data.size.cols else tracked.x,
++        };
 +    }
 +
 +    fn resolve(self: *const ProvenanceRegistry, terminal: *const Terminal, id: u32, screen_key: ScreenSet.Key) ?u32 {
++        const existing = self.resolvePin(terminal, id, screen_key) orelse return null;
++        const screen = terminal.screens.get(screen_key) orelse return null;
++        return absoluteRow(&screen.pages, existing.pin);
++    }
++
++    fn resolvePin(
++        self: *const ProvenanceRegistry,
++        terminal: *const Terminal,
++        id: u32,
++        screen_key: ScreenSet.Key,
++    ) ?Entry {
 +        for (self.entries) |entry| {
 +            const existing = entry orelse continue;
 +            if (existing.id != id or existing.screen != screen_key or existing.pin.garbage) continue;
-+            const screen = terminal.screens.get(screen_key) orelse return null;
++            _ = terminal.screens.get(screen_key) orelse return null;
++            if (existing.pin.node.serial != existing.serial or
++                existing.pin.y >= existing.pin.node.data.size.rows or
++                existing.pin.x >= existing.pin.node.data.size.cols) return null;
 +            if (existing.pin.rowAndCell().row != existing.row) return null;
-+            return absoluteRow(&screen.pages, existing.pin);
++            return existing;
 +        }
 +        return null;
 +    }
@@ -824,6 +914,237 @@ index 000000000..6671d46be
 +            row += current.data.size.rows;
 +        }
 +        return null;
++    }
++};
++
++/// Exact retained text ranges own tracked copies of their boundary pins and
++/// advance formatting by at most one Ghostty page per step.
++const RetainedRangeRegistry = struct {
++    const Entry = struct {
++        id: u32,
++        screen: ScreenSet.Key,
++        start: *PageList.Pin,
++        end: *PageList.Pin,
++        start_row: *pagepkg.Row,
++        end_row: *pagepkg.Row,
++        start_serial: u64,
++        end_serial: u64,
++        start_after_cell: bool,
++        end_after_cell: bool,
++        format_start: PageList.Pin,
++        format_start_serial: u64,
++        next_node: ?*PageList.List.Node,
++        next_serial: u64,
++        trailing_state: ?PageFormatter.TrailingState = null,
++        output: std.Io.Writer.Allocating,
++        prefix_newline: bool = false,
++        no_cells: bool = false,
++        complete: bool = false,
++        active: bool = true,
++
++        fn invalidate(self: *Entry, terminal: *Terminal) void {
++            if (!self.active) return;
++            if (terminal.screens.get(self.screen)) |screen| {
++                screen.pages.untrackPin(self.start);
++                screen.pages.untrackPin(self.end);
++            }
++            self.output.deinit();
++            self.active = false;
++        }
++
++        fn deinit(self: *Entry, terminal: *Terminal) void {
++            self.invalidate(terminal);
++        }
++    };
++
++    entry: ?Entry = null,
++    next_id: u32 = 1,
++
++    fn deinit(self: *RetainedRangeRegistry, terminal: *Terminal) void {
++        if (self.entry) |*entry| entry.deinit(terminal);
++        self.* = .{};
++    }
++
++    fn clear(self: *RetainedRangeRegistry, terminal: *Terminal) void {
++        if (self.entry) |*entry| entry.deinit(terminal);
++        self.entry = null;
++    }
++
++    fn invalidateScreen(self: *RetainedRangeRegistry, terminal: *Terminal, key: ScreenSet.Key) void {
++        const entry = if (self.entry) |*entry| entry else return;
++        if (entry.screen == key) entry.invalidate(terminal);
++    }
++
++    fn create(
++        self: *RetainedRangeRegistry,
++        alloc: Allocator,
++        terminal: *Terminal,
++        provenance: *const ProvenanceRegistry,
++        start_id: u32,
++        end_id: u32,
++        screen_key: ScreenSet.Key,
++    ) ?u32 {
++        const start_source = provenance.resolvePin(terminal, start_id, screen_key) orelse return null;
++        const end_source = provenance.resolvePin(terminal, end_id, screen_key) orelse return null;
++        const empty = boundaryEql(start_source, end_source);
++        // Do not use Pin.before across nodes here: creation must stay O(1).
++        // Cross-page ordering is discovered one next pointer per step below.
++        if (start_source.pin.node == end_source.pin.node and
++            !empty and
++            !boundaryBefore(start_source, end_source)) return null;
++
++        const screen = terminal.screens.get(screen_key) orelse return null;
++        const start = screen.pages.trackPin(start_source.pin.*) catch return null;
++        const end = screen.pages.trackPin(end_source.pin.*) catch {
++            screen.pages.untrackPin(start);
++            return null;
++        };
++        const format_start = if (start_source.after_cell and !empty) format_start: {
++            var next = start.down(1) orelse {
++                screen.pages.untrackPin(start);
++                screen.pages.untrackPin(end);
++                return null;
++            };
++            next.x = 0;
++            break :format_start next;
++        } else
++            start.*;
++
++        const id = self.next_id;
++        self.next_id = id +% 1;
++        if (self.next_id == 0) self.next_id = 1;
++
++        const entry: Entry = .{
++            .id = id,
++            .screen = screen_key,
++            .start = start,
++            .end = end,
++            .start_row = start.rowAndCell().row,
++            .end_row = end.rowAndCell().row,
++            .start_serial = start.node.serial,
++            .end_serial = end.node.serial,
++            .start_after_cell = start_source.after_cell,
++            .end_after_cell = end_source.after_cell,
++            .format_start = format_start,
++            .format_start_serial = format_start.node.serial,
++            .next_node = format_start.node,
++            .next_serial = format_start.node.serial,
++            .output = .init(alloc),
++            .prefix_newline = start_source.after_cell and
++                !empty and
++                !start.rowAndCell().row.wrap,
++            .no_cells = !empty and
++                !end_source.after_cell and
++                format_start.eql(end.*),
++        };
++        self.clear(terminal);
++        self.entry = entry;
++        return id;
++    }
++
++    fn boundaryEql(a: ProvenanceRegistry.Entry, b: ProvenanceRegistry.Entry) bool {
++        return a.pin.eql(b.pin.*) and a.after_cell == b.after_cell;
++    }
++
++    fn boundaryBefore(a: ProvenanceRegistry.Entry, b: ProvenanceRegistry.Entry) bool {
++        if (a.pin.node != b.pin.node) return false;
++        if (a.pin.y < b.pin.y) return true;
++        if (a.pin.y > b.pin.y) return false;
++        const a_x: usize = @as(usize, a.pin.x) + @intFromBool(a.after_cell);
++        const b_x: usize = @as(usize, b.pin.x) + @intFromBool(b.after_cell);
++        return a_x < b_x;
++    }
++
++    fn remove(self: *RetainedRangeRegistry, terminal: *Terminal, id: u32) void {
++        const entry = if (self.entry) |*entry| entry else return;
++        if (entry.id != id) return;
++        entry.deinit(terminal);
++        self.entry = null;
++    }
++
++    fn validatedEnd(self: *const RetainedRangeRegistry, terminal: *const Terminal, entry: *const Entry) ?PageList.Pin {
++        _ = self;
++        if (!entry.active or entry.start.garbage or entry.end.garbage) return null;
++        _ = terminal.screens.get(entry.screen) orelse return null;
++        if (entry.start.node.serial != entry.start_serial or
++            entry.end.node.serial != entry.end_serial or
++            entry.format_start.node.serial != entry.format_start_serial or
++            entry.start.y >= entry.start.node.data.size.rows or
++            entry.end.y >= entry.end.node.data.size.rows or
++            entry.start.x >= entry.start.node.data.size.cols or
++            entry.end.x >= entry.end.node.data.size.cols) return null;
++        if (entry.start.rowAndCell().row != entry.start_row or entry.end.rowAndCell().row != entry.end_row) return null;
++        if (entry.start.eql(entry.end.*) and
++            entry.start_after_cell == entry.end_after_cell) return entry.end.*;
++
++        if (entry.end_after_cell) return entry.end.*;
++        if (entry.end.x > 0) return entry.end.left(1);
++        var previous = entry.end.up(1) orelse return null;
++        previous.x = previous.node.data.size.cols - 1;
++        return previous;
++    }
++
++    /// Return 0 while pending, 1 on completion, -1 when stale, and -2 when
++    /// exact text exceeds the fixed public result ceiling.
++    fn step(self: *RetainedRangeRegistry, terminal: *Terminal, id: u32) c_int {
++        const entry = if (self.entry) |*entry| entry else return -1;
++        if (entry.id != id) return -1;
++        const end_inclusive = self.validatedEnd(terminal, entry) orelse return -1;
++        if (entry.complete) return 1;
++        if (entry.start.eql(entry.end.*) and
++            entry.start_after_cell == entry.end_after_cell) {
++            entry.complete = true;
++            return 1;
++        }
++
++        if (entry.prefix_newline) {
++            entry.output.writer.writeByte('\n') catch return -1;
++            entry.prefix_newline = false;
++        }
++        if (entry.no_cells) {
++            entry.complete = true;
++            entry.next_node = null;
++            return 1;
++        }
++
++        const node = entry.next_node orelse return -1;
++        if (node.serial != entry.next_serial) return -1;
++        const formatter = PageFormatter.initRange(
++            &node.data,
++            .{ .emit = .plain, .unwrap = true, .trim = false },
++            if (node == entry.format_start.node) entry.format_start.x else 0,
++            if (node == entry.format_start.node) entry.format_start.y else 0,
++            if (node == end_inclusive.node) end_inclusive.x else null,
++            if (node == end_inclusive.node) end_inclusive.y else null,
++            entry.trailing_state,
++        );
++        entry.trailing_state = formatter.formatWithState(&entry.output.writer) catch return -1;
++        if (entry.output.written().len > max_retained_range_bytes) return -2;
++
++        if (node != end_inclusive.node) {
++            entry.next_node = node.next orelse return -1;
++            entry.next_serial = entry.next_node.?.serial;
++            return 0;
++        }
++
++        // PageFormatter intentionally withholds trailing blank rows. Flush
++        // only separators inside [start,end): all of them when the exclusive
++        // boundary is at column zero, otherwise exclude the final row's own
++        // separator. Soft wraps contribute no trailing row here.
++        const rows = if (entry.trailing_state) |state| state.rows else 0;
++        const newline_count = if (!entry.end_after_cell and entry.end.x == 0) rows else rows -| 1;
++        if (entry.output.written().len + newline_count > max_retained_range_bytes) return -2;
++        entry.output.writer.splatByteAll('\n', newline_count) catch return -1;
++        entry.complete = true;
++        entry.next_node = null;
++        return 1;
++    }
++
++    fn text(self: *RetainedRangeRegistry, id: u32) ?[]const u8 {
++        const entry = if (self.entry) |*entry| entry else return null;
++        if (entry.id != id) return null;
++        if (!entry.active or !entry.complete) return null;
++        return entry.output.written();
 +    }
 +};
 +
@@ -1012,8 +1333,9 @@ index 000000000..6671d46be
 +    response_buffer: *std.ArrayList(u8),
 +    events: *EventQueue,
 +    provenance: *ProvenanceRegistry,
++    retained_ranges: *RetainedRangeRegistry,
 +    synchronized_output_generation: *u32,
-+    primary_screen_generation: *u32,
++    write_screen_mask: *u8,
 +
 +    pub fn init(
 +        alloc: Allocator,
@@ -1021,8 +1343,9 @@ index 000000000..6671d46be
 +        response_buffer: *std.ArrayList(u8),
 +        events: *EventQueue,
 +        provenance: *ProvenanceRegistry,
++        retained_ranges: *RetainedRangeRegistry,
 +        synchronized_output_generation: *u32,
-+        primary_screen_generation: *u32,
++        write_screen_mask: *u8,
 +    ) ResponseHandler {
 +        return .{
 +            .alloc = alloc,
@@ -1030,8 +1353,9 @@ index 000000000..6671d46be
 +            .response_buffer = response_buffer,
 +            .events = events,
 +            .provenance = provenance,
++            .retained_ranges = retained_ranges,
 +            .synchronized_output_generation = synchronized_output_generation,
-+            .primary_screen_generation = primary_screen_generation,
++            .write_screen_mask = write_screen_mask,
 +        };
 +    }
 +
@@ -1039,16 +1363,18 @@ index 000000000..6671d46be
 +        _ = self;
 +    }
 +
++    noinline fn noteActiveScreen(self: *ResponseHandler) void {
++        self.write_screen_mask.* |= if (self.terminal.screens.active_key == .primary)
++            primary_screen_touched
++        else
++            alternate_screen_touched;
++    }
++
 +    pub fn vt(
 +        self: *ResponseHandler,
 +        comptime action: Action.Tag,
 +        value: Action.Value(action),
 +    ) !void {
-+        const primary_before = self.terminal.screens.active_key == .primary;
-+        defer if (primary_before or self.terminal.screens.active_key == .primary) {
-+            self.primary_screen_generation.* +%= 1;
-+            if (self.primary_screen_generation.* == 0) self.primary_screen_generation.* = 1;
-+        };
 +        switch (action) {
 +            // Device status reports - these need responses
 +            .device_status => try self.handleDeviceStatus(value.request),
@@ -1160,8 +1486,10 @@ index 000000000..6671d46be
 +            .decaln => try self.terminal.decaln(),
 +            .full_reset => {
 +                self.events.clearRetainingCapacity();
++                self.retained_ranges.clear(self.terminal);
 +                self.provenance.clear(self.terminal);
 +                self.terminal.fullReset();
++                self.noteActiveScreen();
 +            },
 +            .start_hyperlink => try self.terminal.screens.active.startHyperlink(value.uri, value.id),
 +            .end_hyperlink => self.terminal.screens.active.endHyperlink(),
@@ -1308,9 +1636,18 @@ index 000000000..6671d46be
 +                self.terminal.scrolling_region.left = 0;
 +                self.terminal.scrolling_region.right = self.terminal.cols - 1;
 +            },
-+            .alt_screen_legacy => try self.terminal.switchScreenMode(.@"47", enabled),
-+            .alt_screen => try self.terminal.switchScreenMode(.@"1047", enabled),
-+            .alt_screen_save_cursor_clear_enter => try self.terminal.switchScreenMode(.@"1049", enabled),
++            .alt_screen_legacy => {
++                try self.terminal.switchScreenMode(.@"47", enabled);
++                self.noteActiveScreen();
++            },
++            .alt_screen => {
++                try self.terminal.switchScreenMode(.@"1047", enabled);
++                self.noteActiveScreen();
++            },
++            .alt_screen_save_cursor_clear_enter => {
++                try self.terminal.switchScreenMode(.@"1049", enabled);
++                self.noteActiveScreen();
++            },
 +            .save_cursor => if (enabled) {
 +                self.terminal.saveCursor();
 +            } else {
@@ -1333,6 +1670,7 @@ index 000000000..6671d46be
 +            .flags = if (self.terminal.screens.active_key == .alternate) 1 else 0,
 +            .row = provenance.row,
 +            .provenance_id = provenance.id,
++            .reserved = provenance.column,
 +        }, command.options_unvalidated, "");
 +    }
 +
@@ -1448,11 +1786,17 @@ index 000000000..6671d46be
 +    events: EventQueue,
 +    provenance: ProvenanceRegistry,
 +    retained_searches: RetainedSearchRegistry,
++    retained_ranges: RetainedRangeRegistry,
 +    /// Incremented for every parsed synchronized-output enable action.
 +    synchronized_output_generation: u32 = 0,
-+    /// Incremented when a VT action runs while primary is active, or switches
-+    /// to/from primary, so alternate-only writes remain distinguishable.
++    /// Incremented once after each non-empty write that touches primary, so
++    /// alternate-only writes remain distinguishable.
 +    primary_screen_generation: u32 = 0,
++    /// Incremented once after each non-empty write that touches alternate, so
++    /// primary-only writes remain distinguishable.
++    alternate_screen_generation: u32 = 0,
++    /// Screens reached while parsing the current write call.
++    write_screen_mask: u8 = 0,
 +    /// Track alternate screen state to detect screen switches
 +    last_screen_is_alternate: bool = false,
 +};
@@ -1570,8 +1914,11 @@ index 000000000..6671d46be
 +    wrapper.events = .{};
 +    wrapper.provenance = .{};
 +    wrapper.retained_searches = .{};
++    wrapper.retained_ranges = .{};
 +    wrapper.synchronized_output_generation = 0;
 +    wrapper.primary_screen_generation = 0;
++    wrapper.alternate_screen_generation = 0;
++    wrapper.write_screen_mask = 0;
 +    wrapper.render_state = RenderState.empty;
 +    wrapper.last_screen_is_alternate = false;
 +    wrapper.osc_allocator = std.heap.FixedBufferAllocator.init(&wrapper.osc_storage);
@@ -1585,8 +1932,9 @@ index 000000000..6671d46be
 +        &wrapper.response_buffer,
 +        &wrapper.events,
 +        &wrapper.provenance,
++        &wrapper.retained_ranges,
 +        &wrapper.synchronized_output_generation,
-+        &wrapper.primary_screen_generation,
++        &wrapper.write_screen_mask,
 +    );
 +    wrapper.stream = ResponseStream.initAlloc(wrapper.osc_allocator.allocator(), handler);
 +
@@ -1608,6 +1956,7 @@ index 000000000..6671d46be
 +    wrapper.stream.deinit();
 +    wrapper.response_buffer.deinit(alloc);
 +    wrapper.events.deinit(alloc);
++    wrapper.retained_ranges.deinit(&wrapper.terminal);
 +    wrapper.provenance.clear(&wrapper.terminal);
 +    wrapper.retained_searches.deinit(alloc);
 +    wrapper.render_state.deinit(alloc);
@@ -1617,7 +1966,9 @@ index 000000000..6671d46be
 +
 +pub fn resize(ptr: ?*anyopaque, cols: c_int, rows: c_int) callconv(.c) void {
 +    const wrapper: *TerminalWrapper = @ptrCast(@alignCast(ptr orelse return));
++    wrapper.retained_ranges.clear(&wrapper.terminal);
 +    wrapper.retained_searches.clear(wrapper.alloc);
++    wrapper.provenance.clear(&wrapper.terminal);
 +    wrapper.terminal.resize(wrapper.alloc, @intCast(cols), @intCast(rows)) catch return;
 +    // Match native Termio: resize is allowed to end synchronization so the
 +    // new geometry cannot remain hidden behind an abandoned update.
@@ -1626,10 +1977,26 @@ index 000000000..6671d46be
 +
 +pub fn write(ptr: ?*anyopaque, data: [*]const u8, len: usize) callconv(.c) void {
 +    const wrapper: *TerminalWrapper = @ptrCast(@alignCast(ptr orelse return));
-+    const generation = wrapper.primary_screen_generation;
-+    defer if (wrapper.primary_screen_generation != generation) {
-+        wrapper.retained_searches.clear(wrapper.alloc);
-+    };
++    if (len == 0) return;
++    wrapper.write_screen_mask = if (wrapper.terminal.screens.active_key == .primary)
++        primary_screen_touched
++    else
++        alternate_screen_touched;
++    defer {
++        const touched = wrapper.write_screen_mask;
++        wrapper.write_screen_mask = 0;
++        if (touched & primary_screen_touched != 0) {
++            wrapper.primary_screen_generation +%= 1;
++            if (wrapper.primary_screen_generation == 0) wrapper.primary_screen_generation = 1;
++            wrapper.retained_searches.clear(wrapper.alloc);
++            wrapper.retained_ranges.invalidateScreen(&wrapper.terminal, .primary);
++        }
++        if (touched & alternate_screen_touched != 0) {
++            wrapper.alternate_screen_generation +%= 1;
++            if (wrapper.alternate_screen_generation == 0) wrapper.alternate_screen_generation = 1;
++            wrapper.retained_ranges.invalidateScreen(&wrapper.terminal, .alternate);
++        }
++    }
 +    wrapper.stream.nextSlice(data[0..len]) catch return;
 +}
 +
@@ -1718,6 +2085,81 @@ index 000000000..6671d46be
 +    return wrapper.primary_screen_generation;
 +}
 +
++/// Monotonic-with-wrap generation for writes that may affect alternate cells.
++pub fn getAlternateScreenGeneration(ptr: ?*anyopaque) callconv(.c) u32 {
++    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return 0));
++    return wrapper.alternate_screen_generation;
++}
++
++// ============================================================================
++// Retained semantic-boundary extraction API
++// ============================================================================
++
++/// Capture the active cursor as id, screen flag, retained row, and column.
++pub fn captureRetainedBufferBoundary(
++    ptr: ?*anyopaque,
++    out: [*]u32,
++    out_len: usize,
++) callconv(.c) c_int {
++    if (out_len < 4) return -1;
++    const wrapper: *TerminalWrapper = @ptrCast(@alignCast(ptr orelse return -1));
++    const boundary = wrapper.provenance.register(&wrapper.terminal) orelse return -1;
++    out[0] = boundary.id;
++    out[1] = if (boundary.screen == .alternate) 1 else 0;
++    out[2] = boundary.row;
++    out[3] = boundary.column;
++    return 4;
++}
++
++/// Create a same-screen [start,end) extraction from authenticated native ids.
++pub fn retainedRangeCreate(
++    ptr: ?*anyopaque,
++    start_id: u32,
++    end_id: u32,
++    alternate: bool,
++) callconv(.c) u32 {
++    const wrapper: *TerminalWrapper = @ptrCast(@alignCast(ptr orelse return 0));
++    const screen: ScreenSet.Key = if (alternate) .alternate else .primary;
++    return wrapper.retained_ranges.create(
++        wrapper.alloc,
++        &wrapper.terminal,
++        &wrapper.provenance,
++        start_id,
++        end_id,
++        screen,
++    ) orelse 0;
++}
++
++pub fn retainedRangeStep(ptr: ?*anyopaque, range_id: u32) callconv(.c) c_int {
++    const wrapper: *TerminalWrapper = @ptrCast(@alignCast(ptr orelse return -1));
++    const result = wrapper.retained_ranges.step(&wrapper.terminal, range_id);
++    if (result < 0) wrapper.retained_ranges.remove(&wrapper.terminal, range_id);
++    return result;
++}
++
++pub fn retainedRangeCancel(ptr: ?*anyopaque, range_id: u32) callconv(.c) void {
++    const wrapper: *TerminalWrapper = @ptrCast(@alignCast(ptr orelse return));
++    wrapper.retained_ranges.remove(&wrapper.terminal, range_id);
++}
++
++/// Return required bytes when out_len is zero, otherwise copy the complete
++/// all-or-nothing UTF-8 result.
++pub fn retainedRangeText(
++    ptr: ?*anyopaque,
++    range_id: u32,
++    out: ?[*]u8,
++    out_len: usize,
++) callconv(.c) c_int {
++    const wrapper: *TerminalWrapper = @ptrCast(@alignCast(ptr orelse return -1));
++    const value = wrapper.retained_ranges.text(range_id) orelse return -1;
++    const len = std.math.cast(c_int, value.len) orelse return -1;
++    if (out_len == 0) return len;
++    const dest = out orelse return -1;
++    if (out_len < value.len) return -1;
++    @memcpy(dest[0..value.len], value);
++    return len;
++}
++
 +// ============================================================================
 +// Structured terminal event API
 +// ============================================================================
@@ -1749,6 +2191,28 @@ index 000000000..6671d46be
 +    const screen: ScreenSet.Key = if (alternate) .alternate else .primary;
 +    const row = wrapper.provenance.resolve(&wrapper.terminal, provenance_id, screen) orelse return -1;
 +    return std.math.cast(c_int, row) orelse -1;
++}
++
++/// Resolve retained row and column for a semantic provenance token.
++pub fn resolveEventBoundary(
++    ptr: ?*anyopaque,
++    provenance_id: u32,
++    alternate: bool,
++    out: [*]u32,
++    out_len: usize,
++) callconv(.c) c_int {
++    if (out_len < 2) return -1;
++    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return -1));
++    const screen_key: ScreenSet.Key = if (alternate) .alternate else .primary;
++    const boundary = wrapper.provenance.resolvePin(
++        &wrapper.terminal,
++        provenance_id,
++        screen_key,
++    ) orelse return -1;
++    const screen = wrapper.terminal.screens.get(screen_key) orelse return -1;
++    out[0] = ProvenanceRegistry.absoluteRow(&screen.pages, boundary.pin) orelse return -1;
++    out[1] = if (boundary.after_cell) boundary.pin.node.data.size.cols else boundary.pin.x;
++    return 2;
 +}
 +
 +/// Monotonic-with-wrap generation for parsed synchronized-output enable actions.
@@ -2431,8 +2895,41 @@ index 000000000..6671d46be
 +    );
 +    try retained_search_create_tw.end(.reset);
 +}
++
++test "retained range terminal statuses release native state immediately" {
++    const term = new(10, 2);
++    defer free(term);
++    try std.testing.expect(term != null);
++
++    var start: [4]u32 = undefined;
++    try std.testing.expectEqual(
++        @as(c_int, 4),
++        captureRetainedBufferBoundary(term, &start, start.len),
++    );
++    write(term, "x", 1);
++    var end: [4]u32 = undefined;
++    try std.testing.expectEqual(
++        @as(c_int, 4),
++        captureRetainedBufferBoundary(term, &end, end.len),
++    );
++
++    const wrapper: *TerminalWrapper = @ptrCast(@alignCast(term.?));
++    const stale_id = retainedRangeCreate(term, start[0], end[0], false);
++    try std.testing.expect(stale_id != 0);
++    wrapper.retained_ranges.invalidateScreen(&wrapper.terminal, .primary);
++    try std.testing.expectEqual(@as(c_int, -1), retainedRangeStep(term, stale_id));
++    try std.testing.expect(wrapper.retained_ranges.entry == null);
++
++    const large_id = retainedRangeCreate(term, start[0], end[0], false);
++    try std.testing.expect(large_id != 0);
++    const large = &wrapper.retained_ranges.entry.?;
++    try large.output.ensureTotalCapacity(max_retained_range_bytes + 1);
++    large.output.writer.end = max_retained_range_bytes + 1;
++    try std.testing.expectEqual(@as(c_int, -2), retainedRangeStep(term, large_id));
++    try std.testing.expect(wrapper.retained_ranges.entry == null);
++}
 diff --git a/src/terminal/formatter.zig b/src/terminal/formatter.zig
-index 062e3969a..c233b092b 100644
+index 062e3969a..7ada25876 100644
 --- a/src/terminal/formatter.zig
 +++ b/src/terminal/formatter.zig
 @@ -289,7 +289,7 @@ pub const TerminalFormatter = struct {
@@ -2471,7 +2968,35 @@ index 062e3969a..c233b092b 100644
              ) catch return error.WriteFailed;
          }
      }
-@@ -1230,7 +1230,7 @@ pub const PageFormatter = struct {
+@@ -865,6 +865,27 @@ pub const PageFormatter = struct {
+         };
+     }
+
++    /// Initialize a formatter for one bounded page chunk. This is used by
++    /// retained-range consumers that deliberately yield between pages while
++    /// preserving soft-wrap and trailing-row state.
++    pub fn initRange(
++        page: *const Page,
++        opts: Options,
++        start_x: size.CellCountInt,
++        start_y: size.CellCountInt,
++        end_x: ?size.CellCountInt,
++        end_y: ?size.CellCountInt,
++        trailing_state: ?TrailingState,
++    ) PageFormatter {
++        var result: PageFormatter = .init(page, opts);
++        result.start_x = start_x;
++        result.start_y = start_y;
++        result.end_x = end_x;
++        result.end_y = end_y;
++        result.trailing_state = trailing_state;
++        return result;
++    }
++
+     pub fn format(
+         self: PageFormatter,
+         writer: *std.Io.Writer,
+@@ -1230,7 +1251,7 @@ pub const PageFormatter = struct {
                              &discarding.writer,
                              &style,
                          );
@@ -2480,7 +3005,7 @@ index 062e3969a..c233b092b 100644
                              .x = x,
                              .y = y,
                          }) catch return error.WriteFailed;
-@@ -1287,7 +1287,7 @@ pub const PageFormatter = struct {
+@@ -1287,7 +1308,7 @@ pub const PageFormatter = struct {
                              &discarding.writer,
                              uri,
                          );
@@ -2489,7 +3014,7 @@ index 062e3969a..c233b092b 100644
                              .x = x,
                              .y = y,
                          }) catch return error.WriteFailed;
-@@ -1305,7 +1305,7 @@ pub const PageFormatter = struct {
+@@ -1305,7 +1326,7 @@ pub const PageFormatter = struct {
                          if (self.point_map) |*map| {
                              var discarding: std.Io.Writer.Discarding = .init(&.{});
                              try self.writeCell(tag, &discarding.writer, cell);

@@ -26,6 +26,7 @@ import type {
   IDisposable,
   IEvent,
   IKeyEvent,
+  IRetainedBufferExtractionOptions,
   IRetainedBufferRange,
   IRetainedBufferSearchOptions,
   IRetainedBufferSearchResult,
@@ -39,6 +40,10 @@ import { encodePaste } from './paste';
 import { OSC8LinkProvider } from './providers/osc8-link-provider';
 import { UrlRegexProvider } from './providers/url-regex-provider';
 import { CanvasRenderer } from './renderer';
+import {
+  RetainedBufferExtractionError,
+  RetainedBufferExtractionManager,
+} from './retained-buffer-extraction';
 import { RetainedBufferSearchManager } from './retained-buffer-search';
 import { SelectionManager } from './selection-manager';
 import type {
@@ -95,6 +100,7 @@ export class Terminal implements ITerminalCore {
   private inputHandler?: InputHandler;
   private selectionManager?: SelectionManager;
   private retainedBufferSearch?: RetainedBufferSearchManager;
+  private retainedBufferExtraction?: RetainedBufferExtractionManager;
   private canvas?: HTMLCanvasElement;
 
   // Link detection system
@@ -696,6 +702,7 @@ export class Terminal implements ITerminalCore {
     // cleared via requestAnimationFrame (rAF is throttled/paused in background tabs).
     this.cancelRenderLoop();
     this.retainedBufferSearch?.invalidateAll();
+    this.retainedBufferExtraction?.invalidateAll();
 
     try {
       // Update dimensions
@@ -754,6 +761,8 @@ export class Terminal implements ITerminalCore {
     this.cancelRenderLoop();
     this.retainedBufferSearch?.dispose();
     this.retainedBufferSearch = undefined;
+    this.retainedBufferExtraction?.dispose();
+    this.retainedBufferExtraction = undefined;
     this.resetSynchronizedOutputTracking();
     this.selectionManager?.clearSelection();
     this.resetViewport();
@@ -903,6 +912,37 @@ export class Terminal implements ITerminalCore {
   /** Extract a current, same-terminal search range as exact plain text. */
   public extractRetainedBufferText(range: IRetainedBufferRange): string | undefined {
     return this.retainedBufferSearch?.extractCurrent(range);
+  }
+
+  /** Capture an opaque, parser-owned boundary at the active cursor. */
+  public captureRetainedBufferBoundary(): TerminalEventProvenance {
+    this.assertOpen();
+    const boundary = this.wasmTerm!.captureRetainedBufferBoundary();
+    if (!boundary) {
+      throw new RetainedBufferExtractionError(
+        'failed',
+        'Unable to capture retained-buffer boundary'
+      );
+    }
+    return boundary;
+  }
+
+  /** Extract exact plain text for the half-open same-screen range [start,end). */
+  public extractRetainedBufferRange(
+    start: TerminalEventProvenance,
+    end: TerminalEventProvenance,
+    options: IRetainedBufferExtractionOptions = {}
+  ): Promise<string> {
+    this.assertOpen();
+    if (!this.retainedBufferExtraction) {
+      this.retainedBufferExtraction = new RetainedBufferExtractionManager(() => this.wasmTerm);
+    }
+    return this.retainedBufferExtraction.extract(start, end, options);
+  }
+
+  /** Cancel the current exact retained-range extraction. */
+  public cancelRetainedBufferExtraction(): void {
+    this.retainedBufferExtraction?.cancel();
   }
 
   // ==========================================================================
@@ -1189,6 +1229,8 @@ export class Terminal implements ITerminalCore {
     this.writeQueue.length = 0;
     this.retainedBufferSearch?.dispose();
     this.retainedBufferSearch = undefined;
+    this.retainedBufferExtraction?.dispose();
+    this.retainedBufferExtraction = undefined;
 
     // Dispose addons
     for (const addon of this.addons) {
@@ -1297,9 +1339,14 @@ export class Terminal implements ITerminalCore {
   /** Parse once in Ghostty, then immediately reconcile its presentation mode. */
   private writeToWasm(data: string | Uint8Array): boolean {
     const primaryGeneration = this.wasmTerm!.getPrimaryScreenGeneration();
+    const alternateGeneration = this.wasmTerm!.getAlternateScreenGeneration();
     this.wasmTerm!.write(data);
     if (this.wasmTerm!.getPrimaryScreenGeneration() !== primaryGeneration) {
       this.retainedBufferSearch?.noteWrite();
+      this.retainedBufferExtraction?.noteWrite('normal');
+    }
+    if (this.wasmTerm!.getAlternateScreenGeneration() !== alternateGeneration) {
+      this.retainedBufferExtraction?.noteWrite('alternate');
     }
     // Snapshot before firing listeners. A listener may write reentrantly, and
     // each write must reconcile against its own core state.
@@ -2101,10 +2148,10 @@ export class Terminal implements ITerminalCore {
   /** Resolve semantic provenance against the current retained Ghostty screen. */
   resolveEventProvenance(
     provenance: TerminalEventProvenance
-  ): { screen: TerminalEventScreen; row: number } | null {
+  ): { screen: TerminalEventScreen; row: number; column: number } | null {
     if (this.isDisposed || !this.wasmTerm) return null;
-    const row = this.wasmTerm.resolveEventProvenance(provenance);
-    return row === null ? null : { screen: provenance.screen, row };
+    const boundary = this.wasmTerm.resolveEventBoundary(provenance);
+    return boundary === null ? null : { screen: provenance.screen, ...boundary };
   }
 
   // ============================================================================

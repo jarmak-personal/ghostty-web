@@ -86,9 +86,11 @@ term.onTerminalEvent((event) => {
 Event families cover title, working directory, bell, notification and progress requests, semantic
 markers, palette operations, and clipboard requests. Clipboard and notification events are requests
 only; ghostty-web does not grant clipboard or platform-notification authority. Semantic marker
-provenance can be checked with `term.resolveEventProvenance()` and fails closed after its retained row
-expires. Notification records expose the closed `osc-9` or `osc-777` parser source so an embedder can
+provenance records the exact retained row and column, can be checked with
+`term.resolveEventProvenance()`, and fails closed after its retained boundary expires. Notification
+records expose the closed `osc-9` or `osc-777` parser source so an embedder can
 preserve source-specific presentation policy without interpreting raw escape sequences.
+An exclusive boundary after a right-margin cell uses the virtual column equal to terminal width.
 
 The Canvas scheduler also honors Ghostty's parser-owned synchronized-output mode (DEC private mode
 2026). Parsing and terminal responses continue while presentation is deferred; completion produces
@@ -126,6 +128,23 @@ Queries are capped at 64 KiB of UTF-8 so a single cross-page match remains bound
 `AbortSignal`, `cancelRetainedBufferSearch()`, reset, resize, disposal, scrollback mutation, or any
 primary-screen write invalidates outstanding work and ranges. Output that stays wholly in the
 alternate screen does not invalidate normal-buffer results.
+
+Semantic provenance can also delimit exact, half-open `[start,end)` text regions without changing
+the visible selection. Use an emitted semantic token for a closed endpoint, or capture the current
+cursor as the exclusive end of an open region:
+
+```typescript
+const outputStart = semanticEvent.provenance;
+const currentEnd = term.captureRetainedBufferBoundary();
+const output = await term.extractRetainedBufferRange(outputStart, currentEnd, { signal });
+```
+
+Extraction is scheduled one retained Ghostty page at a time, unwraps soft wraps, preserves hard
+newlines and explicit space cells, and returns either all plain UTF-8 text or a typed
+`RetainedBufferExtractionError`. Results are capped at 4 MiB. Boundaries are opaque and
+terminal-owned: forged, foreign, cross-screen, evicted, reversed, reset, resized, or disposed
+boundaries fail closed. A write invalidates only in-flight extraction for the screen it affects;
+`cancelRetainedBufferExtraction()` and `AbortSignal` explicitly release pending work.
 
 For a comprehensive client <-> server example, refer to the [demo](./demo/index.html#L141).
 

@@ -74,6 +74,7 @@ export type {
   IDisposable,
   IEvent,
   IKeyEvent,
+  IRetainedBufferExtractionOptions,
   IRetainedBufferRange,
   IRetainedBufferSearchOptions,
   IRetainedBufferSearchResult,
@@ -90,6 +91,10 @@ export { UrlRegexProvider } from './providers/url-regex-provider';
 export type { FontMetrics, IRenderable, RendererOptions } from './renderer';
 // Low-level components (for custom integrations)
 export { CanvasRenderer } from './renderer';
+export {
+  RetainedBufferExtractionError,
+  type RetainedBufferExtractionErrorCode,
+} from './retained-buffer-extraction';
 export type { SelectionCoordinates } from './selection-manager';
 export { SelectionManager } from './selection-manager';
 export type { TerminalRenderStats } from './terminal';

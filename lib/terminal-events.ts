@@ -96,6 +96,7 @@ export function decodeTerminalEventRecord(record: Uint8Array): TerminalEvent | n
   const flags = view.getUint8(3);
   const row = view.getUint32(4, true);
   const provenanceId = view.getUint32(8, true);
+  const column = view.getUint32(12, true);
   const value = view.getInt32(16, true);
   const target = view.getInt32(20, true);
   const colorValue = view.getUint32(24, true);
@@ -132,11 +133,12 @@ export function decodeTerminalEventRecord(record: Uint8Array): TerminalEvent | n
         type: 'semantic',
         action: semanticAction,
         options: dataA,
-        provenance: {
+        provenance: Object.freeze({
           id: provenanceId,
           screen: flags === 1 ? 'alternate' : 'normal',
           row,
-        },
+          column,
+        }),
       };
     }
     case 7: {

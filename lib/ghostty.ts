@@ -263,6 +263,10 @@ export class KeyEncoder {
  * - No per-row WASM boundary crossings!
  */
 export class GhosttyTerminal {
+  private readonly provenanceIdentities = new WeakMap<
+    TerminalEventProvenance,
+    Readonly<{ id: number; screen: TerminalEventProvenance['screen'] }>
+  >();
   private exports: GhosttyWasmExports;
   private memory: WebAssembly.Memory;
   private handle: TerminalHandle;
@@ -482,6 +486,86 @@ export class GhosttyTerminal {
     return this.exports.ghostty_terminal_get_primary_screen_generation(this.handle) >>> 0;
   }
 
+  getAlternateScreenGeneration(): number {
+    if (!this.handle) return 0;
+    return this.exports.ghostty_terminal_get_alternate_screen_generation(this.handle) >>> 0;
+  }
+
+  captureRetainedBufferBoundary(): TerminalEventProvenance | null {
+    if (!this.handle) return null;
+    const byteLength = 4 * Uint32Array.BYTES_PER_ELEMENT;
+    const ptr = this.exports.ghostty_wasm_alloc_u8_array(byteLength);
+    if (ptr === 0) return null;
+    try {
+      const count = this.exports.ghostty_terminal_capture_retained_buffer_boundary(
+        this.handle,
+        ptr,
+        4
+      );
+      if (count !== 4) return null;
+      const values = new Uint32Array(this.memory.buffer, ptr, 4);
+      const provenance: TerminalEventProvenance = Object.freeze({
+        id: values[0],
+        screen: values[1] === 1 ? 'alternate' : 'normal',
+        row: values[2],
+        column: values[3],
+      });
+      this.rememberProvenance(provenance);
+      return provenance;
+    } finally {
+      this.exports.ghostty_wasm_free_u8_array(ptr, byteLength);
+    }
+  }
+
+  createRetainedRange(start: TerminalEventProvenance, end: TerminalEventProvenance): number {
+    if (!this.handle || start.screen !== end.screen) return 0;
+    if (!this.ownsProvenance(start) || !this.ownsProvenance(end)) return 0;
+    return (
+      this.exports.ghostty_terminal_retained_range_create(
+        this.handle,
+        start.id,
+        end.id,
+        start.screen === 'alternate'
+      ) >>> 0
+    );
+  }
+
+  stepRetainedRange(rangeId: number): number {
+    if (!this.handle || rangeId === 0) return -1;
+    return this.exports.ghostty_terminal_retained_range_step(this.handle, rangeId);
+  }
+
+  cancelRetainedRange(rangeId: number): void {
+    if (!this.handle || rangeId === 0) return;
+    this.exports.ghostty_terminal_retained_range_cancel(this.handle, rangeId);
+  }
+
+  getRetainedRangeText(rangeId: number): string | null {
+    if (!this.handle || rangeId === 0) return null;
+    const byteLength = this.exports.ghostty_terminal_retained_range_text(
+      this.handle,
+      rangeId,
+      0,
+      0
+    );
+    if (byteLength < 0) return null;
+    if (byteLength === 0) return '';
+    const ptr = this.exports.ghostty_wasm_alloc_u8_array(byteLength);
+    if (ptr === 0) return null;
+    try {
+      const written = this.exports.ghostty_terminal_retained_range_text(
+        this.handle,
+        rangeId,
+        ptr,
+        byteLength
+      );
+      if (written !== byteLength) return null;
+      return new TextDecoder().decode(new Uint8Array(this.memory.buffer, ptr, written).slice());
+    } finally {
+      this.exports.ghostty_wasm_free_u8_array(ptr, byteLength);
+    }
+  }
+
   // ========================================================================
   // Structured terminal events
   // ========================================================================
@@ -505,7 +589,10 @@ export class GhosttyTerminal {
         if (bytesRead !== recordSize) break;
         const record = new Uint8Array(this.memory.buffer, recordPtr, bytesRead).slice();
         const event = decodeTerminalEventRecord(record);
-        if (event) events.push(event);
+        if (event) {
+          if (event.type === 'semantic') this.rememberProvenance(event.provenance);
+          events.push(event);
+        }
       } finally {
         this.exports.ghostty_wasm_free_u8_array(recordPtr, recordSize);
       }
@@ -515,13 +602,48 @@ export class GhosttyTerminal {
 
   /** Resolve a semantic marker to its current retained row, or null after expiry. */
   resolveEventProvenance(provenance: TerminalEventProvenance): number | null {
-    if (!this.handle || provenance.id <= 0) return null;
-    const row = this.exports.ghostty_terminal_resolve_event_provenance(
-      this.handle,
-      provenance.id,
-      provenance.screen === 'alternate'
+    return this.resolveEventBoundary(provenance)?.row ?? null;
+  }
+
+  /** Resolve an authenticated semantic marker to exact retained coordinates. */
+  resolveEventBoundary(
+    provenance: TerminalEventProvenance
+  ): { row: number; column: number } | null {
+    if (!this.handle || !this.ownsProvenance(provenance)) return null;
+    const byteLength = 2 * Uint32Array.BYTES_PER_ELEMENT;
+    const ptr = this.exports.ghostty_wasm_alloc_u8_array(byteLength);
+    if (ptr === 0) return null;
+    try {
+      const count = this.exports.ghostty_terminal_resolve_event_boundary(
+        this.handle,
+        provenance.id,
+        provenance.screen === 'alternate',
+        ptr,
+        2
+      );
+      if (count !== 2) return null;
+      const values = new Uint32Array(this.memory.buffer, ptr, 2);
+      return { row: values[0], column: values[1] };
+    } finally {
+      this.exports.ghostty_wasm_free_u8_array(ptr, byteLength);
+    }
+  }
+
+  private rememberProvenance(provenance: TerminalEventProvenance): void {
+    this.provenanceIdentities.set(provenance, {
+      id: provenance.id,
+      screen: provenance.screen,
+    });
+  }
+
+  private ownsProvenance(provenance: TerminalEventProvenance): boolean {
+    const identity = this.provenanceIdentities.get(provenance);
+    return (
+      !!identity &&
+      identity.id === provenance.id &&
+      identity.screen === provenance.screen &&
+      provenance.id > 0
     );
-    return row < 0 ? null : row;
   }
 
   // ==========================================================================
