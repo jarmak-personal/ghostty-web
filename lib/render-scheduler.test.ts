@@ -69,6 +69,10 @@ function createSchedulerHarness(): Terminal & {
     renderFrames: 0,
     fullRenderFrames: 0,
     writeQueue: [],
+    synchronizedOutputActive: false,
+    synchronizedOutputGeneration: 0,
+    synchronizedOutputTimeout: undefined,
+    synchronizedOutputRecoveries: 0,
     animationFrameId: undefined,
     scrollAnimationFrame: undefined,
     scrollAnimationStartTime: undefined,
@@ -117,6 +121,8 @@ describe('hvir presentation scheduler', () => {
         paused: false,
         pendingFrame: true,
         cursorVisible: true,
+        synchronizedOutput: false,
+        synchronizedOutputRecoveries: 0,
       });
 
       frames.runNext();
