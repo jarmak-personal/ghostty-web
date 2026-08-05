@@ -1552,6 +1552,42 @@ describe('Terminal Config', () => {
 });
 
 describe('Terminal Modes', () => {
+  test('encodes control letters from keyboard modes negotiated through VT input', async () => {
+    if (typeof document === 'undefined') return;
+    const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
+    const container = document.createElement('div');
+    term.open(container);
+    const receivedData: string[] = [];
+    term.onData((data) => receivedData.push(data));
+    const pressControl = (letter: string) => {
+      container.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: letter.toLowerCase(),
+          code: `Key${letter.toUpperCase()}`,
+          ctrlKey: true,
+          bubbles: true,
+          cancelable: true,
+        })
+      );
+    };
+
+    pressControl('U');
+    term.write('\x1b[>1u');
+    for (const letter of ['A', 'C', 'U', 'W']) pressControl(letter);
+    term.write('\x1b[<u');
+    pressControl('U');
+
+    expect(receivedData).toEqual([
+      '\x15',
+      '\x1b[97;5u',
+      '\x1b[99;5u',
+      '\x1b[117;5u',
+      '\x1b[119;5u',
+      '\x15',
+    ]);
+    term.dispose();
+  });
+
   test('encodes Shift+Enter from keyboard modes negotiated through VT input', async () => {
     if (typeof document === 'undefined') return;
     const term = await createIsolatedTerminal({ cols: 80, rows: 24 });

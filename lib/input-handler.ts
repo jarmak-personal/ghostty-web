@@ -153,6 +153,36 @@ const KEY_MAP: Record<string, Key> = {
   F24: Key.F24,
 };
 
+const UNSHIFTED_SYMBOLS: Readonly<Record<string, string>> = {
+  Minus: '-',
+  Equal: '=',
+  BracketLeft: '[',
+  BracketRight: ']',
+  Backslash: '\\',
+  Semicolon: ';',
+  Quote: "'",
+  Backquote: '`',
+  Comma: ',',
+  Period: '.',
+  Slash: '/',
+};
+
+/** Match Ghostty's browser example when translating a physical key to its base codepoint. */
+function getUnshiftedCodepoint(event: KeyboardEvent): number {
+  if (event.code.startsWith('Key')) {
+    return event.code.substring(3).toLowerCase().codePointAt(0) ?? 0;
+  }
+  if (event.code.startsWith('Digit')) {
+    return event.code.substring(5).codePointAt(0) ?? 0;
+  }
+  if (event.code === 'Space') return ' '.codePointAt(0) ?? 0;
+
+  const symbol = UNSHIFTED_SYMBOLS[event.code];
+  if (symbol) return symbol.codePointAt(0) ?? 0;
+
+  return event.key.codePointAt(0) ?? 0;
+}
+
 /**
  * InputHandler class
  * Attaches keyboard event listeners to a container and converts
@@ -571,6 +601,7 @@ export class InputHandler {
         key,
         mods,
         utf8,
+        unshiftedCodepoint: getUnshiftedCodepoint(event),
       });
 
       // Convert Uint8Array to string

@@ -475,6 +475,7 @@ export interface GhosttyWasmExports extends WebAssembly.Exports {
   ghostty_key_event_set_action(event: number, action: number): void;
   ghostty_key_event_set_key(event: number, key: number): void;
   ghostty_key_event_set_mods(event: number, mods: number): void;
+  ghostty_key_event_set_unshifted_codepoint(event: number, codepoint: number): void;
   ghostty_key_event_set_utf8(event: number, ptr: number, len: number): void;
 
   // Terminal lifecycle

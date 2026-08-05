@@ -534,6 +534,35 @@ describe('InputHandler', () => {
       expect(dataReceived[0].charCodeAt(0)).toBe(0x1a);
     });
 
+    test('encodes control letters while Kitty disambiguation is negotiated', () => {
+      const handler = new InputHandler(
+        ghostty,
+        container as any,
+        (data) => dataReceived.push(data),
+        () => {
+          bellCalled = true;
+        },
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        () => ({
+          kittyFlags: KittyKeyFlags.DISAMBIGUATE,
+          modifyOtherKeysState2: false,
+        })
+      );
+
+      simulateKey(container, createKeyEvent('KeyA', 'a', { ctrl: true }));
+      simulateKey(container, createKeyEvent('KeyC', 'c', { ctrl: true }));
+      simulateKey(container, createKeyEvent('KeyU', 'u', { ctrl: true }));
+      simulateKey(container, createKeyEvent('KeyW', 'w', { ctrl: true }));
+
+      expect(dataReceived).toEqual(['\x1b[97;5u', '\x1b[99;5u', '\x1b[117;5u', '\x1b[119;5u']);
+      handler.dispose();
+    });
+
     test('Cmd+C allows copy (no data sent)', () => {
       const handler = new InputHandler(
         ghostty,

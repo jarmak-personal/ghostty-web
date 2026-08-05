@@ -201,6 +201,9 @@ export class KeyEncoder {
     this.exports.ghostty_key_event_set_action(eventPtr, event.action);
     this.exports.ghostty_key_event_set_key(eventPtr, event.key);
     this.exports.ghostty_key_event_set_mods(eventPtr, event.mods);
+    if (event.unshiftedCodepoint !== undefined) {
+      this.exports.ghostty_key_event_set_unshifted_codepoint(eventPtr, event.unshiftedCodepoint);
+    }
 
     if (event.utf8) {
       const encoder = new TextEncoder();
