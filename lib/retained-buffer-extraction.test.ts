@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import type { GhosttyTerminal } from './ghostty';
+import { Ghostty, type GhosttyTerminal } from './ghostty';
 import type { ITerminalOptions } from './interfaces';
 import {
   type RetainedBufferExtractionError,
@@ -252,6 +252,51 @@ describe('exact retained semantic-boundary extraction', () => {
     const stale = terminal.extractRetainedBufferRange(start, end);
     terminal.write('primary-change');
     await expect(stale).rejects.toEqual(expectCode('stale'));
+  });
+
+  test('stales normal extraction after a hidden primary-screen cycle', async () => {
+    const terminal = await openTerminal({ cols: 8, rows: 2, scrollback: 10_000 });
+    const normalStart = terminal.captureRetainedBufferBoundary();
+    terminal.write('n\r\n'.repeat(2_000));
+    const normalEnd = terminal.captureRetainedBufferBoundary();
+
+    terminal.write('\x1b[?47h');
+    const hiddenPrimary = terminal.extractRetainedBufferRange(normalStart, normalEnd);
+    terminal.write('\x1b[?47lprimary\x1b[?47h');
+    await expect(hiddenPrimary).rejects.toEqual(expectCode('stale'));
+  });
+
+  test('records every screen touched by hidden cycles and ignores untouched screens', async () => {
+    const ghostty = await Ghostty.load();
+    const core = ghostty.createTerminal(8, 2, { scrollbackLimit: 10_000 });
+    try {
+      const initialPrimary = core.getPrimaryScreenGeneration();
+      const initialAlternate = core.getAlternateScreenGeneration();
+      core.write('primary-only');
+      expect(core.getPrimaryScreenGeneration()).not.toBe(initialPrimary);
+      expect(core.getAlternateScreenGeneration()).toBe(initialAlternate);
+
+      const beforeHiddenAlternatePrimary = core.getPrimaryScreenGeneration();
+      const beforeHiddenAlternate = core.getAlternateScreenGeneration();
+      core.write('\x1b[?47hhidden alternate\x1b[?47l');
+      expect(core.getPrimaryScreenGeneration()).not.toBe(beforeHiddenAlternatePrimary);
+      expect(core.getAlternateScreenGeneration()).not.toBe(beforeHiddenAlternate);
+
+      core.write('\x1b[?47h');
+      const beforeAlternateOnlyPrimary = core.getPrimaryScreenGeneration();
+      const beforeAlternateOnly = core.getAlternateScreenGeneration();
+      core.write('alternate-only');
+      expect(core.getPrimaryScreenGeneration()).toBe(beforeAlternateOnlyPrimary);
+      expect(core.getAlternateScreenGeneration()).not.toBe(beforeAlternateOnly);
+
+      const beforeHiddenPrimary = core.getPrimaryScreenGeneration();
+      const beforeHiddenPrimaryAlternate = core.getAlternateScreenGeneration();
+      core.write('\x1b[?47lhidden primary\x1b[?47h');
+      expect(core.getPrimaryScreenGeneration()).not.toBe(beforeHiddenPrimary);
+      expect(core.getAlternateScreenGeneration()).not.toBe(beforeHiddenPrimaryAlternate);
+    } finally {
+      core.free();
+    }
   });
 
   test('extracts an exact same-screen alternate range', async () => {
