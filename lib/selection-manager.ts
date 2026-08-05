@@ -59,6 +59,8 @@ export class SelectionManager {
   // Store bound event handlers for cleanup
   private boundMouseUpHandler: ((e: MouseEvent) => void) | null = null;
   private boundContextMenuHandler: ((e: MouseEvent) => void) | null = null;
+  private boundContextMenuResetHandler: (() => void) | null = null;
+  private contextMenuResetTimeout: number | null = null;
   private boundClickHandler: ((e: MouseEvent) => void) | null = null;
   private boundDocumentMouseMoveHandler: ((e: MouseEvent) => void) | null = null;
 
@@ -103,7 +105,8 @@ export class SelectionManager {
     terminal: Terminal,
     renderer: CanvasRenderer,
     wasmTerm: GhosttyTerminal,
-    textarea: HTMLTextAreaElement
+    textarea: HTMLTextAreaElement,
+    contextMenuEnabled: boolean = true
   ) {
     this.terminal = terminal;
     this.renderer = renderer;
@@ -111,7 +114,7 @@ export class SelectionManager {
     this.textarea = textarea;
 
     // Attach mouse event listeners
-    this.attachEventListeners();
+    this.attachEventListeners(contextMenuEnabled);
   }
 
   // ==========================================================================
@@ -237,9 +240,11 @@ export class SelectionManager {
    * Clear the selection
    */
   clearSelection(): void {
-    if (!this.hasSelection()) return;
+    if (!this.selectionStart && !this.selectionEnd && !this.isSelecting) return;
 
-    // Mark current selection rows as dirty for redraw
+    // Mark current or pending selection rows as dirty for redraw. This also
+    // revokes a below-threshold drag, which is intentionally not yet exposed
+    // through hasSelection().
     const coords = this.normalizeSelection();
     if (coords) {
       for (let row = coords.startRow; row <= coords.endRow; row++) {
@@ -260,11 +265,19 @@ export class SelectionManager {
    */
   selectAll(): void {
     const dims = this.wasmTerm.getDimensions();
-    const viewportY = this.getViewportY();
-    this.selectionStart = { col: 0, absoluteRow: viewportY };
-    this.selectionEnd = { col: dims.cols - 1, absoluteRow: viewportY + dims.rows - 1 };
+    const scrollbackLength = this.wasmTerm.getScrollbackLength();
+    this.selectionStart = { col: 0, absoluteRow: 0 };
+    this.selectionEnd = {
+      col: dims.cols - 1,
+      absoluteRow: scrollbackLength + dims.rows - 1,
+    };
     this.requestRender();
     this.selectionChangedEmitter.fire();
+  }
+
+  /** Replace the parser state owned by the same public Terminal instance. */
+  replaceTerminal(wasmTerm: GhosttyTerminal): void {
+    this.wasmTerm = wasmTerm;
   }
 
   /**
@@ -387,6 +400,7 @@ export class SelectionManager {
    * Cleanup resources
    */
   dispose(): void {
+    this.restoreContextMenuTextarea();
     this.selectionChangedEmitter.dispose();
 
     // Stop auto-scroll if active
@@ -427,7 +441,7 @@ export class SelectionManager {
   /**
    * Attach mouse event listeners to canvas
    */
-  private attachEventListeners(): void {
+  private attachEventListeners(contextMenuEnabled: boolean): void {
     const canvas = this.renderer.getCanvas();
 
     // Mouse down - start selection or clear existing
@@ -658,67 +672,61 @@ export class SelectionManager {
       }
     });
 
-    // Right-click (context menu) - position textarea to show browser's native menu
-    // This allows Copy/Paste options to appear in the context menu
-    this.boundContextMenuHandler = (e: MouseEvent) => {
-      // Position textarea at mouse cursor
-      const canvas = this.renderer.getCanvas();
-      const rect = canvas.getBoundingClientRect();
+    if (contextMenuEnabled) {
+      // Right-click (context menu) - position textarea to show browser's native menu
+      // This allows Copy/Paste options to appear in the context menu
+      this.boundContextMenuHandler = (e: MouseEvent) => {
+        this.restoreContextMenuTextarea();
 
-      this.textarea.style.position = 'fixed';
-      this.textarea.style.left = `${e.clientX}px`;
-      this.textarea.style.top = `${e.clientY}px`;
-      this.textarea.style.width = '1px';
-      this.textarea.style.height = '1px';
-      this.textarea.style.zIndex = '1000';
-      this.textarea.style.opacity = '0';
+        // Position textarea at mouse cursor
+        const canvas = this.renderer.getCanvas();
+        const rect = canvas.getBoundingClientRect();
 
-      // Enable pointer events temporarily so context menu targets the textarea
-      this.textarea.style.pointerEvents = 'auto';
+        this.textarea.style.position = 'fixed';
+        this.textarea.style.left = `${e.clientX}px`;
+        this.textarea.style.top = `${e.clientY}px`;
+        this.textarea.style.width = '1px';
+        this.textarea.style.height = '1px';
+        this.textarea.style.zIndex = '1000';
+        this.textarea.style.opacity = '0';
 
-      // If there's a selection, populate textarea with it and select the text
-      if (this.hasSelection()) {
-        const text = this.getSelection();
-        this.textarea.value = text;
-        this.textarea.select();
-        this.textarea.setSelectionRange(0, text.length);
-      } else {
-        // No selection - clear textarea but still show menu (for paste)
-        this.textarea.value = '';
-      }
+        // Enable pointer events temporarily so context menu targets the textarea
+        this.textarea.style.pointerEvents = 'auto';
 
-      // Focus the textarea so the context menu appears on it
-      this.textarea.focus();
-
-      // After a short delay, restore the textarea to its hidden state
-      // This allows the context menu to appear first
-      setTimeout(() => {
-        // Listen for when the context menu closes (user clicks away or selects an option)
-        const resetTextarea = () => {
-          this.textarea.style.pointerEvents = 'none';
-          this.textarea.style.zIndex = '-10';
-          this.textarea.style.width = '0';
-          this.textarea.style.height = '0';
-          this.textarea.style.left = '0';
-          this.textarea.style.top = '0';
+        // If there's a selection, populate textarea with it and select the text
+        if (this.hasSelection()) {
+          const text = this.getSelection();
+          this.textarea.value = text;
+          this.textarea.select();
+          this.textarea.setSelectionRange(0, text.length);
+        } else {
+          // No selection - clear textarea but still show menu (for paste)
           this.textarea.value = '';
+        }
 
-          // Remove the one-time listeners
-          document.removeEventListener('click', resetTextarea);
-          document.removeEventListener('contextmenu', resetTextarea);
-          this.textarea.removeEventListener('blur', resetTextarea);
-        };
+        // Focus the textarea so the context menu appears on it
+        this.textarea.focus();
 
-        // Reset on any of these events (menu closed)
-        document.addEventListener('click', resetTextarea, { once: true });
-        document.addEventListener('contextmenu', resetTextarea, { once: true });
-        this.textarea.addEventListener('blur', resetTextarea, { once: true });
-      }, 10);
+        // After a short delay, restore the textarea to its hidden state
+        // This allows the context menu to appear first
+        this.contextMenuResetTimeout = window.setTimeout(() => {
+          this.contextMenuResetTimeout = null;
+          // Listen for when the context menu closes (user clicks away or selects an option)
+          this.boundContextMenuResetHandler = () => this.restoreContextMenuTextarea();
 
-      // Don't prevent default - let browser show the context menu on the textarea
-    };
+          // Reset on any of these events (menu closed)
+          document.addEventListener('click', this.boundContextMenuResetHandler, { once: true });
+          document.addEventListener('contextmenu', this.boundContextMenuResetHandler, {
+            once: true,
+          });
+          this.textarea.addEventListener('blur', this.boundContextMenuResetHandler, { once: true });
+        }, 10);
 
-    canvas.addEventListener('contextmenu', this.boundContextMenuHandler);
+        // Don't prevent default - let browser show the context menu on the textarea
+      };
+
+      canvas.addEventListener('contextmenu', this.boundContextMenuHandler);
+    }
 
     // Click outside canvas - clear selection
     // This allows users to deselect by clicking anywhere outside the terminal
@@ -748,6 +756,28 @@ export class SelectionManager {
     };
 
     document.addEventListener('click', this.boundClickHandler);
+  }
+
+  /** Restore the input element and revoke transient menu-close work. */
+  private restoreContextMenuTextarea(): void {
+    if (this.contextMenuResetTimeout !== null) {
+      window.clearTimeout(this.contextMenuResetTimeout);
+      this.contextMenuResetTimeout = null;
+    }
+    if (this.boundContextMenuResetHandler) {
+      document.removeEventListener('click', this.boundContextMenuResetHandler);
+      document.removeEventListener('contextmenu', this.boundContextMenuResetHandler);
+      this.textarea.removeEventListener('blur', this.boundContextMenuResetHandler);
+      this.boundContextMenuResetHandler = null;
+    }
+
+    this.textarea.style.pointerEvents = 'none';
+    this.textarea.style.zIndex = '-10';
+    this.textarea.style.width = '0';
+    this.textarea.style.height = '0';
+    this.textarea.style.left = '0';
+    this.textarea.style.top = '0';
+    this.textarea.value = '';
   }
 
   /**

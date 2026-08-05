@@ -96,6 +96,19 @@ one full frame, and abandoned synchronization is released after Ghostty's one-se
 `getRenderStats()` reports the live synchronized-output state and timeout-recovery count without
 retaining terminal content.
 
+Embedding applications that own terminal menu presentation can disable ghostty-web's legacy
+hidden-textarea bridge at construction time. The host remains responsible for clipboard access and
+focus restoration:
+
+```typescript
+const term = new Terminal({ disableContextMenu: true });
+```
+
+With that option, right-click does not mutate or focus the hidden textarea and is not forwarded as
+terminal mouse input. Selection remains available through side-effect-free `hasSelection()` and
+`getSelection()` calls. Hosts can invoke `paste(text)`, `selectAll()`, `clear()`, and `reset()`;
+clear and reset mutate only client-side terminal state and never emit PTY input through `onData`.
+
 For a comprehensive client <-> server example, refer to the [demo](./demo/index.html#L141).
 
 ## Development
