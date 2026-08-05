@@ -375,6 +375,8 @@ export type TerminalSemanticAction =
 
 export type TerminalProgressState = 'remove' | 'set' | 'error' | 'indeterminate' | 'pause';
 
+export type TerminalNotificationSource = 'osc-9' | 'osc-777';
+
 export type TerminalPaletteTarget =
   | { kind: 'palette'; index: number }
   | { kind: 'special'; name: 'bold' | 'underline' | 'blink' | 'reverse' | 'italic' }
@@ -405,7 +407,7 @@ export type TerminalEvent =
   | { type: 'title'; title: string }
   | { type: 'working-directory'; uri: string }
   | { type: 'bell' }
-  | { type: 'notification'; title: string; body: string }
+  | { type: 'notification'; source: TerminalNotificationSource; title: string; body: string }
   | { type: 'progress'; state: TerminalProgressState; progress?: number }
   | {
       type: 'semantic';

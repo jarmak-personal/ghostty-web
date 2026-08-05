@@ -35,7 +35,12 @@ describe('structured terminal event core', () => {
         { type: 'title', title: 'Build logs' },
         { type: 'working-directory', uri: 'file://host/worktree' },
         { type: 'bell' },
-        { type: 'notification', title: 'Done', body: 'Build finished' },
+        {
+          type: 'notification',
+          source: 'osc-777',
+          title: 'Done',
+          body: 'Build finished',
+        },
         { type: 'progress', state: 'set', progress: 42 },
         {
           type: 'semantic',
@@ -56,6 +61,33 @@ describe('structured terminal event core', () => {
         { type: 'clipboard', operation: 'read', selection: 's' },
       ]);
       expect(core.readEvents()).toEqual([]);
+    } finally {
+      core.free();
+    }
+  });
+
+  test('distinguishes OSC 9 and OSC 777 sources across chunks and terminators', async () => {
+    const core = await createCore();
+    try {
+      core.write('\x1b]9;attention');
+      expect(core.readEvents()).toEqual([]);
+
+      core.write(' requested\x07\x1b]777;notify;Passive;Only\x1b\\\x07');
+      expect(core.readEvents()).toEqual([
+        {
+          type: 'notification',
+          source: 'osc-9',
+          title: '',
+          body: 'attention requested',
+        },
+        {
+          type: 'notification',
+          source: 'osc-777',
+          title: 'Passive',
+          body: 'Only',
+        },
+        { type: 'bell' },
+      ]);
     } finally {
       core.free();
     }
@@ -245,5 +277,11 @@ describe('event wire decoder', () => {
     inconsistent[1] = 1;
     new DataView(inconsistent.buffer).setUint32(28, 1, true);
     expect(decodeTerminalEventRecord(inconsistent)).toBeNull();
+
+    const unknownNotificationSource = new Uint8Array(36);
+    unknownNotificationSource[0] = 1;
+    unknownNotificationSource[1] = 4;
+    unknownNotificationSource[2] = 2;
+    expect(decodeTerminalEventRecord(unknownNotificationSource)).toBeNull();
   });
 });

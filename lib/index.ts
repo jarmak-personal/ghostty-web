@@ -104,6 +104,7 @@ export type {
   TerminalEventProvenance,
   TerminalEventScreen,
   TerminalHandle,
+  TerminalNotificationSource,
   TerminalPaletteRequest,
   TerminalPaletteTarget,
   TerminalProgressState,
