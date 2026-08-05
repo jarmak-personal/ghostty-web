@@ -29,10 +29,10 @@ index 4f8fef88e..ca9fb1d4d 100644
  #include <ghostty/vt/key.h>
 diff --git a/include/ghostty/vt/terminal.h b/include/ghostty/vt/terminal.h
 new file mode 100644
-index 000000000..c5bcf2a41
+index 000000000..5f9f25396
 --- /dev/null
 +++ b/include/ghostty/vt/terminal.h
-@@ -0,0 +1,416 @@
+@@ -0,0 +1,435 @@
 +/**
 + * @file terminal.h
 + *
@@ -68,21 +68,32 @@ index 000000000..c5bcf2a41
 +typedef void* GhosttyTerminal;
 +
 +/**
-+ * Terminal configuration.
-+ * All color values use 0xRRGGBB format. A value of 0 means "use default".
++ * Terminal configuration. Color values use 0xRRGGBB; color_mask distinguishes
++ * omitted fields from valid black (0x000000).
 + */
 +typedef struct {
 +    /** Maximum scrollback lines (0 = unlimited) */
 +    uint32_t scrollback_limit;
-+    /** Default foreground color (0xRRGGBB, 0 = default) */
++    /** Bits 0..2 select fg/bg/cursor; bits 8..23 select palette indexes 0..15. */
++    uint32_t color_mask;
++    /** Default foreground color (0xRRGGBB) */
 +    uint32_t fg_color;
-+    /** Default background color (0xRRGGBB, 0 = default) */
++    /** Default background color (0xRRGGBB) */
 +    uint32_t bg_color;
-+    /** Cursor color (0xRRGGBB, 0 = default) */
++    /** Cursor color (0xRRGGBB) */
 +    uint32_t cursor_color;
-+    /** ANSI color palette (16 colors, 0xRRGGBB format, 0 = default) */
++    /** ANSI color palette (16 colors, 0xRRGGBB format) */
 +    uint32_t palette[16];
 +} GhosttyTerminalConfig;
++
++/** Bounded live color configuration with the same color-mask layout. */
++typedef struct {
++    uint32_t mask;
++    uint32_t fg_color;
++    uint32_t bg_color;
++    uint32_t cursor_color;
++    uint32_t palette[16];
++} GhosttyColorConfig;
 +
 +/** Cell structure - 16 bytes, pre-resolved colors */
 +typedef struct {
@@ -138,6 +149,12 @@ index 000000000..c5bcf2a41
 +
 +/** Resize terminal */
 +void ghostty_terminal_resize(GhosttyTerminal term, int cols, int rows);
++
++/** Change configured base colors while preserving contents and app overrides. */
++bool ghostty_terminal_set_color_config(
++    GhosttyTerminal term,
++    const GhosttyColorConfig* config
++);
 +
 +/** Write data to terminal (parses VT sequences) */
 +void ghostty_terminal_write(GhosttyTerminal term, const uint8_t* data, size_t len);
@@ -280,6 +297,8 @@ index 000000000..c5bcf2a41
 +/** Get default colors as 0xRRGGBB */
 +uint32_t ghostty_render_state_get_bg_color(GhosttyTerminal term);
 +uint32_t ghostty_render_state_get_fg_color(GhosttyTerminal term);
++uint32_t ghostty_render_state_get_cursor_color(GhosttyTerminal term);
++uint32_t ghostty_render_state_get_palette_color(GhosttyTerminal term, int index);
 +
 +/** Check if a row is dirty */
 +bool ghostty_render_state_is_row_dirty(GhosttyTerminal term, int y);
@@ -450,10 +469,10 @@ index 000000000..c5bcf2a41
 +
 +#endif /* GHOSTTY_VT_TERMINAL_H */
 diff --git a/src/lib_vt.zig b/src/lib_vt.zig
-index 426660621..630bd7ea5 100644
+index 426660621..38370fae2 100644
 --- a/src/lib_vt.zig
 +++ b/src/lib_vt.zig
-@@ -143,6 +143,68 @@ comptime {
+@@ -143,6 +143,71 @@ comptime {
          @export(&c.sgr_unknown_partial, .{ .name = "ghostty_sgr_unknown_partial" });
          @export(&c.sgr_attribute_tag, .{ .name = "ghostty_sgr_attribute_tag" });
          @export(&c.sgr_attribute_value, .{ .name = "ghostty_sgr_attribute_value" });
@@ -462,6 +481,7 @@ index 426660621..630bd7ea5 100644
 +        @export(&c.terminal_new_with_config, .{ .name = "ghostty_terminal_new_with_config" });
 +        @export(&c.terminal_free, .{ .name = "ghostty_terminal_free" });
 +        @export(&c.terminal_resize, .{ .name = "ghostty_terminal_resize" });
++        @export(&c.terminal_set_color_config, .{ .name = "ghostty_terminal_set_color_config" });
 +        @export(&c.terminal_write, .{ .name = "ghostty_terminal_write" });
 +        @export(&c.terminal_retained_search_create, .{ .name = "ghostty_terminal_retained_search_create" });
 +        @export(&c.terminal_retained_search_step, .{ .name = "ghostty_terminal_retained_search_step" });
@@ -492,6 +512,8 @@ index 426660621..630bd7ea5 100644
 +        @export(&c.render_state_get_cursor_visible, .{ .name = "ghostty_render_state_get_cursor_visible" });
 +        @export(&c.render_state_get_bg_color, .{ .name = "ghostty_render_state_get_bg_color" });
 +        @export(&c.render_state_get_fg_color, .{ .name = "ghostty_render_state_get_fg_color" });
++        @export(&c.render_state_get_cursor_color, .{ .name = "ghostty_render_state_get_cursor_color" });
++        @export(&c.render_state_get_palette_color, .{ .name = "ghostty_render_state_get_palette_color" });
 +        @export(&c.render_state_is_row_dirty, .{ .name = "ghostty_render_state_is_row_dirty" });
 +        @export(&c.render_state_mark_clean, .{ .name = "ghostty_render_state_mark_clean" });
 +        @export(&c.render_state_get_viewport, .{ .name = "ghostty_render_state_get_viewport" });
@@ -557,7 +579,7 @@ index ea8ca1445..75a72480b 100644
      }
 
 diff --git a/src/terminal/c/main.zig b/src/terminal/c/main.zig
-index bc92597f5..b56a70e25 100644
+index bc92597f5..9b6b3cfa8 100644
 --- a/src/terminal/c/main.zig
 +++ b/src/terminal/c/main.zig
 @@ -4,6 +4,7 @@ pub const key_event = @import("key_event.zig");
@@ -568,7 +590,7 @@ index bc92597f5..b56a70e25 100644
 
  // The full C API, unexported.
  pub const osc_new = osc.new;
-@@ -52,6 +53,69 @@ pub const key_encoder_encode = key_encode.encode;
+@@ -52,6 +53,72 @@ pub const key_encoder_encode = key_encode.encode;
 
  pub const paste_is_safe = paste.is_safe;
 
@@ -577,6 +599,7 @@ index bc92597f5..b56a70e25 100644
 +pub const terminal_new_with_config = terminal.newWithConfig;
 +pub const terminal_free = terminal.free;
 +pub const terminal_resize = terminal.resize;
++pub const terminal_set_color_config = terminal.setColorConfig;
 +pub const terminal_write = terminal.write;
 +pub const terminal_retained_search_create = terminal.retainedSearchCreate;
 +pub const terminal_retained_search_step = terminal.retainedSearchStep;
@@ -607,6 +630,8 @@ index bc92597f5..b56a70e25 100644
 +pub const render_state_get_cursor_visible = terminal.renderStateGetCursorVisible;
 +pub const render_state_get_bg_color = terminal.renderStateGetBgColor;
 +pub const render_state_get_fg_color = terminal.renderStateGetFgColor;
++pub const render_state_get_cursor_color = terminal.renderStateGetCursorColor;
++pub const render_state_get_palette_color = terminal.renderStateGetPaletteColor;
 +pub const render_state_is_row_dirty = terminal.renderStateIsRowDirty;
 +pub const render_state_mark_clean = terminal.renderStateMarkClean;
 +pub const render_state_get_viewport = terminal.renderStateGetViewport;
@@ -638,7 +663,7 @@ index bc92597f5..b56a70e25 100644
  test {
      _ = color;
      _ = osc;
-@@ -59,6 +123,7 @@ test {
+@@ -59,6 +126,7 @@ test {
      _ = key_encode;
      _ = paste;
      _ = sgr;
@@ -648,10 +673,10 @@ index bc92597f5..b56a70e25 100644
      _ = @import("../../lib/allocator.zig");
 diff --git a/src/terminal/c/terminal.zig b/src/terminal/c/terminal.zig
 new file mode 100644
-index 000000000..8cf057133
+index 000000000..4e45e5e9e
 --- /dev/null
 +++ b/src/terminal/c/terminal.zig
-@@ -0,0 +1,2276 @@
+@@ -0,0 +1,2423 @@
 +//! C API wrapper for Terminal
 +//!
 +//! This provides a minimal, high-performance interface to Ghostty's Terminal
@@ -700,6 +725,10 @@ index 000000000..8cf057133
 +const max_retained_range_bytes = 4 * 1024 * 1024;
 +const primary_screen_touched: u8 = 1;
 +const alternate_screen_touched: u8 = 2;
++const foreground_configured: u32 = 1 << 0;
++const background_configured: u32 = 1 << 1;
++const cursor_configured: u32 = 1 << 2;
++const palette_configured_shift = 8;
 +
 +/// Versioned wire tags consumed by the TypeScript wrapper. The wire format is
 +/// internal to this compatibility ABI; public consumers receive typed records.
@@ -1007,8 +1036,7 @@ index 000000000..8cf057133
 +            };
 +            next.x = 0;
 +            break :format_start next;
-+        } else
-+            start.*;
++        } else start.*;
 +
 +        const id = self.next_id;
 +        self.next_id = id +% 1;
@@ -1092,7 +1120,8 @@ index 000000000..8cf057133
 +        const end_inclusive = self.validatedEnd(terminal, entry) orelse return -1;
 +        if (entry.complete) return 1;
 +        if (entry.start.eql(entry.end.*) and
-+            entry.start_after_cell == entry.end_after_cell) {
++            entry.start_after_cell == entry.end_after_cell)
++        {
 +            entry.complete = true;
 +            return 1;
 +        }
@@ -1755,16 +1784,62 @@ index 000000000..8cf057133
 +    }
 +
 +    fn colorOperation(self: *ResponseHandler, op: anytype, requests: anytype) !void {
-+        _ = self;
 +        _ = op;
-+        _ = requests;
-+        // Color operations are not supported in WASM context
++        var it = requests.constIterator(0);
++        while (it.next()) |request| {
++            switch (request.*) {
++                .set => |set| switch (set.target) {
++                    .palette => |index| self.terminal.colors.palette.set(index, set.color),
++                    .dynamic => |dynamic| switch (dynamic) {
++                        .foreground => self.terminal.colors.foreground.set(set.color),
++                        .background => self.terminal.colors.background.set(set.color),
++                        .cursor => self.terminal.colors.cursor.set(set.color),
++                        else => continue,
++                    },
++                    .special => continue,
++                },
++                .reset => |target| switch (target) {
++                    .palette => |index| self.terminal.colors.palette.reset(index),
++                    .dynamic => |dynamic| switch (dynamic) {
++                        .foreground => self.terminal.colors.foreground.reset(),
++                        .background => self.terminal.colors.background.reset(),
++                        .cursor => self.terminal.colors.cursor.reset(),
++                        else => continue,
++                    },
++                    .special => continue,
++                },
++                .reset_palette => self.terminal.colors.palette.resetAll(),
++                .query, .reset_special => continue,
++            }
++            self.terminal.flags.dirty.palette = true;
++        }
 +    }
 +
 +    fn kittyColorOperation(self: *ResponseHandler, value: anytype) !void {
-+        _ = self;
-+        _ = value;
-+        // Kitty color operations are not supported in WASM context
++        for (value.list.items) |item| {
++            switch (item) {
++                .set => |set| switch (set.key) {
++                    .palette => |index| self.terminal.colors.palette.set(index, set.color),
++                    .special => |special| switch (special) {
++                        .foreground => self.terminal.colors.foreground.set(set.color),
++                        .background => self.terminal.colors.background.set(set.color),
++                        .cursor => self.terminal.colors.cursor.set(set.color),
++                        else => continue,
++                    },
++                },
++                .reset => |key| switch (key) {
++                    .palette => |index| self.terminal.colors.palette.reset(index),
++                    .special => |special| switch (special) {
++                        .foreground => self.terminal.colors.foreground.reset(),
++                        .background => self.terminal.colors.background.reset(),
++                        .cursor => self.terminal.colors.cursor.reset(),
++                        else => continue,
++                    },
++                },
++                .query => continue,
++            }
++            self.terminal.flags.dirty.palette = true;
++        }
 +    }
 +};
 +
@@ -1827,11 +1902,54 @@ index 000000000..8cf057133
 +/// C-compatible terminal configuration
 +pub const GhosttyTerminalConfig = extern struct {
 +    scrollback_limit: u32,
++    color_mask: u32,
 +    fg_color: u32,
 +    bg_color: u32,
 +    cursor_color: u32,
 +    palette: [16]u32,
 +};
++
++pub const GhosttyColorConfig = extern struct {
++    mask: u32,
++    fg_color: u32,
++    bg_color: u32,
++    cursor_color: u32,
++    palette: [16]u32,
++};
++
++fn rgbFromInt(value: u32) color.RGB {
++    return .{
++        .r = @truncate((value >> 16) & 0xFF),
++        .g = @truncate((value >> 8) & 0xFF),
++        .b = @truncate(value & 0xFF),
++    };
++}
++
++fn paletteConfigured(mask: u32, index: usize) bool {
++    return mask & (@as(u32, 1) << @intCast(palette_configured_shift + index)) != 0;
++}
++
++/// Update configured base colors while preserving application overrides.
++fn applyColorConfig(colors: *Terminal.Colors, config: *const GhosttyColorConfig) void {
++    if (config.mask & foreground_configured != 0) {
++        colors.foreground.changeDefault(rgbFromInt(config.fg_color));
++    }
++    if (config.mask & background_configured != 0) {
++        colors.background.changeDefault(rgbFromInt(config.bg_color));
++    }
++    if (config.mask & cursor_configured != 0) {
++        colors.cursor.changeDefault(rgbFromInt(config.cursor_color));
++    }
++
++    var base_palette = colors.palette.original;
++    var palette_changed = false;
++    for (config.palette, 0..) |palette_value, index| {
++        if (!paletteConfigured(config.mask, index)) continue;
++        base_palette[index] = rgbFromInt(palette_value);
++        palette_changed = true;
++    }
++    if (palette_changed) colors.palette.changeDefault(base_palette);
++}
 +
 +// ============================================================================
 +// Lifecycle
@@ -1859,44 +1977,17 @@ index 000000000..8cf057133
 +    else
 +        10_000;
 +
-+    // Setup terminal colors
++    // Setup configured terminal colors without treating them as application overrides.
 +    var colors = Terminal.Colors.default;
 +    if (config_) |cfg| {
-+        if (cfg.fg_color != 0) {
-+            const rgb = color.RGB{
-+                .r = @truncate((cfg.fg_color >> 16) & 0xFF),
-+                .g = @truncate((cfg.fg_color >> 8) & 0xFF),
-+                .b = @truncate(cfg.fg_color & 0xFF),
-+            };
-+            colors.foreground = color.DynamicRGB.init(rgb);
-+        }
-+        if (cfg.bg_color != 0) {
-+            const rgb = color.RGB{
-+                .r = @truncate((cfg.bg_color >> 16) & 0xFF),
-+                .g = @truncate((cfg.bg_color >> 8) & 0xFF),
-+                .b = @truncate(cfg.bg_color & 0xFF),
-+            };
-+            colors.background = color.DynamicRGB.init(rgb);
-+        }
-+        if (cfg.cursor_color != 0) {
-+            const rgb = color.RGB{
-+                .r = @truncate((cfg.cursor_color >> 16) & 0xFF),
-+                .g = @truncate((cfg.cursor_color >> 8) & 0xFF),
-+                .b = @truncate(cfg.cursor_color & 0xFF),
-+            };
-+            colors.cursor = color.DynamicRGB.init(rgb);
-+        }
-+        // Apply palette colors (0 = use default)
-+        for (cfg.palette, 0..) |palette_color, i| {
-+            if (palette_color != 0) {
-+                const rgb = color.RGB{
-+                    .r = @truncate((palette_color >> 16) & 0xFF),
-+                    .g = @truncate((palette_color >> 8) & 0xFF),
-+                    .b = @truncate(palette_color & 0xFF),
-+                };
-+                colors.palette.set(@intCast(i), rgb);
-+            }
-+        }
++        const color_config: GhosttyColorConfig = .{
++            .mask = cfg.color_mask,
++            .fg_color = cfg.fg_color,
++            .bg_color = cfg.bg_color,
++            .cursor_color = cfg.cursor_color,
++            .palette = cfg.palette,
++        };
++        applyColorConfig(&colors, &color_config);
 +    }
 +
 +    wrapper.terminal = Terminal.init(alloc, .{
@@ -1973,6 +2064,18 @@ index 000000000..8cf057133
 +    // Match native Termio: resize is allowed to end synchronization so the
 +    // new geometry cannot remain hidden behind an abandoned update.
 +    wrapper.terminal.modes.set(.synchronized_output, false);
++}
++
++/// Change configured base colors without disturbing terminal contents or
++/// application-owned effective overrides.
++pub fn setColorConfig(
++    ptr: ?*anyopaque,
++    config: ?*const GhosttyColorConfig,
++) callconv(.c) bool {
++    const wrapper: *TerminalWrapper = @ptrCast(@alignCast(ptr orelse return false));
++    applyColorConfig(&wrapper.terminal.colors, config orelse return false);
++    wrapper.terminal.flags.dirty.palette = true;
++    return true;
 +}
 +
 +pub fn write(ptr: ?*anyopaque, data: [*]const u8, len: usize) callconv(.c) void {
@@ -2303,6 +2406,23 @@ index 000000000..8cf057133
 +    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return 0xCCCCCC));
 +    const fg = wrapper.render_state.colors.foreground;
 +    return (@as(u32, fg.r) << 16) | (@as(u32, fg.g) << 8) | fg.b;
++}
++
++/// Get effective cursor color, falling back to the effective foreground.
++pub fn renderStateGetCursorColor(ptr: ?*anyopaque) callconv(.c) u32 {
++    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return 0xCCCCCC));
++    const cursor = wrapper.render_state.colors.cursor orelse wrapper.render_state.colors.foreground;
++    return (@as(u32, cursor.r) << 16) | (@as(u32, cursor.g) << 8) | cursor.b;
++}
++
++/// Get one effective indexed palette color as 0xRRGGBB.
++pub fn renderStateGetPaletteColor(ptr: ?*anyopaque, index: c_int) callconv(.c) u32 {
++    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return 0));
++    if (index < 0) return 0;
++    const palette_index: usize = @intCast(index);
++    if (palette_index >= wrapper.render_state.colors.palette.len) return 0;
++    const palette = wrapper.render_state.colors.palette[palette_index];
++    return (@as(u32, palette.r) << 16) | (@as(u32, palette.g) << 8) | palette.b;
 +}
 +
 +/// Check if row is dirty
@@ -2875,6 +2995,58 @@ index 000000000..8cf057133
 +    try std.testing.expectEqual(@as(u32, 'o'), cells[4].codepoint);
 +}
 +
++test "configured palette changes preserve overrides and resets use latest base" {
++    const config: GhosttyTerminalConfig = .{
++        .scrollback_limit = 10_000,
++        .color_mask = foreground_configured |
++            background_configured |
++            cursor_configured |
++            (@as(u32, 1) << palette_configured_shift),
++        .fg_color = 0x102030,
++        .bg_color = 0x000000,
++        .cursor_color = 0x405060,
++        .palette = .{0x000000} ++ .{0} ** 15,
++    };
++    const term = newWithConfig(10, 2, &config);
++    defer free(term);
++    try std.testing.expect(term != null);
++
++    _ = renderStateUpdate(term);
++    try std.testing.expectEqual(@as(u32, 0x102030), renderStateGetFgColor(term));
++    try std.testing.expectEqual(@as(u32, 0x000000), renderStateGetBgColor(term));
++    try std.testing.expectEqual(@as(u32, 0x405060), renderStateGetCursorColor(term));
++    try std.testing.expectEqual(@as(u32, 0x000000), renderStateGetPaletteColor(term, 0));
++
++    const overrides = "\x1b]10;#a1a2a3\x07" ++
++        "\x1b]11;#b1b2b3\x07" ++
++        "\x1b]12;#c1c2c3\x07" ++
++        "\x1b]4;0;#d1d2d3\x07";
++    write(term, overrides, overrides.len);
++    _ = renderStateUpdate(term);
++
++    const next: GhosttyColorConfig = .{
++        .mask = config.color_mask,
++        .fg_color = 0x112233,
++        .bg_color = 0x010203,
++        .cursor_color = 0x445566,
++        .palette = .{0x070809} ++ .{0} ** 15,
++    };
++    try std.testing.expect(setColorConfig(term, &next));
++    _ = renderStateUpdate(term);
++    try std.testing.expectEqual(@as(u32, 0xA1A2A3), renderStateGetFgColor(term));
++    try std.testing.expectEqual(@as(u32, 0xB1B2B3), renderStateGetBgColor(term));
++    try std.testing.expectEqual(@as(u32, 0xC1C2C3), renderStateGetCursorColor(term));
++    try std.testing.expectEqual(@as(u32, 0xD1D2D3), renderStateGetPaletteColor(term, 0));
++
++    const resets = "\x1b]110\x07\x1b]111\x07\x1b]112\x07\x1b]104;0\x07";
++    write(term, resets, resets.len);
++    _ = renderStateUpdate(term);
++    try std.testing.expectEqual(@as(u32, 0x112233), renderStateGetFgColor(term));
++    try std.testing.expectEqual(@as(u32, 0x010203), renderStateGetBgColor(term));
++    try std.testing.expectEqual(@as(u32, 0x445566), renderStateGetCursorColor(term));
++    try std.testing.expectEqual(@as(u32, 0x070809), renderStateGetPaletteColor(term, 0));
++}
++
 +test "retained search create releases state when registry insertion fails" {
 +    const alloc = std.testing.allocator;
 +    var terminal = try Terminal.init(alloc, .{
@@ -2928,6 +3100,42 @@ index 000000000..8cf057133
 +    try std.testing.expectEqual(@as(c_int, -2), retainedRangeStep(term, large_id));
 +    try std.testing.expect(wrapper.retained_ranges.entry == null);
 +}
+diff --git a/src/terminal/color.zig b/src/terminal/color.zig
+index 3b806f8b8..869496c0f 100644
+--- a/src/terminal/color.zig
++++ b/src/terminal/color.zig
+@@ -257,11 +257,30 @@ pub const DynamicRGB = struct {
+         self.override = color;
+     }
+
++    /// Change the configured default while preserving an active override.
++    pub fn changeDefault(self: *DynamicRGB, color: RGB) void {
++        self.default = color;
++    }
++
+     pub fn reset(self: *DynamicRGB) void {
+-        self.override = self.default;
++        self.override = null;
+     }
+ };
+
++test "DynamicRGB configured default and override lifecycle" {
++    const first: RGB = .{ .r = 1, .g = 2, .b = 3 };
++    const second: RGB = .{ .r = 4, .g = 5, .b = 6 };
++    const application: RGB = .{ .r = 7, .g = 8, .b = 9 };
++
++    var dynamic: DynamicRGB = .init(first);
++    dynamic.set(application);
++    dynamic.changeDefault(second);
++    try std.testing.expectEqual(application, dynamic.get().?);
++
++    dynamic.reset();
++    try std.testing.expectEqual(second, dynamic.get().?);
++}
++
+ /// Color names in the standard 8 or 16 color palette.
+ pub const Name = enum(u8) {
+     black = 0,
 diff --git a/src/terminal/formatter.zig b/src/terminal/formatter.zig
 index 062e3969a..7ada25876 100644
 --- a/src/terminal/formatter.zig

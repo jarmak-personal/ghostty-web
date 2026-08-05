@@ -1351,8 +1351,9 @@ describe('Buffer Access API', () => {
     if (!container) throw new Error('DOM environment not available - check happydom setup');
 
     term.open(container!);
+    const configuredBackground = term.wasmTerm!.getColors().background;
 
-    // Write to main screen (default background = black)
+    // Write to the main screen using the configured background.
     term.write('MAIN\r\n');
     term.wasmTerm?.update();
     term.wasmTerm?.markClean();
@@ -1379,14 +1380,13 @@ describe('Buffer Access API', () => {
     term.write('\x1b[?1049l');
     term.wasmTerm?.update();
 
-    // CRITICAL: Background colors must be restored to main screen values (black)
+    // CRITICAL: Background colors must be restored to main screen values.
     const restoredViewport = term.wasmTerm?.getViewport();
     const firstCell = restoredViewport![0];
 
-    // Main screen cells should have default background (0, 0, 0 = black)
-    expect(firstCell.bg_r).toBe(0);
-    expect(firstCell.bg_g).toBe(0);
-    expect(firstCell.bg_b).toBe(0);
+    expect(firstCell.bg_r).toBe(configuredBackground.r);
+    expect(firstCell.bg_g).toBe(configuredBackground.g);
+    expect(firstCell.bg_b).toBe(configuredBackground.b);
 
     // Verify text is also restored
     expect(String.fromCodePoint(firstCell.codepoint)).toBe('M');

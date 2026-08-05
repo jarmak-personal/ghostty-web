@@ -11,18 +11,26 @@
  */
 
 import type { ITheme } from './interfaces';
+import { ANSI_THEME_KEYS, DEFAULT_THEME, normalizeTheme, parsePaletteColor } from './palette';
 import type { SelectionManager } from './selection-manager';
-import type { GhosttyCell, ILink } from './types';
-import { CellFlags } from './types';
+import type {
+  GhosttyCell,
+  ILink,
+  RenderStateColors,
+  RenderStateCursor,
+  RenderStateSnapshot,
+  RGB,
+} from './types';
+import { CellFlags, DirtyState } from './types';
+
+export { DEFAULT_THEME } from './palette';
 
 // Interface for objects that can be rendered
 export interface IRenderable {
   getLine(y: number): GhosttyCell[] | null;
-  getCursor(): { x: number; y: number; visible: boolean };
+  getRenderState(): RenderStateSnapshot;
   getDimensions(): { cols: number; rows: number };
   isRowDirty(y: number): boolean;
-  /** Returns true if a full redraw is needed (e.g., screen change) */
-  needsFullRedraw?(): boolean;
   clearDirty(): void;
   /**
    * Get the full grapheme string for a cell at (row, col).
@@ -57,36 +65,10 @@ export interface FontMetrics {
   baseline: number; // Distance from top to text baseline
 }
 
-// ============================================================================
-// Default Theme
-// ============================================================================
-
-export const DEFAULT_THEME: Required<ITheme> = {
-  foreground: '#d4d4d4',
-  background: '#1e1e1e',
-  cursor: '#ffffff',
-  cursorAccent: '#1e1e1e',
-  // Selection colors: solid colors that replace cell bg/fg when selected
-  // Using Ghostty's approach: selection bg = default fg, selection fg = default bg
-  selectionBackground: '#d4d4d4',
-  selectionForeground: '#1e1e1e',
-  black: '#000000',
-  red: '#cd3131',
-  green: '#0dbc79',
-  yellow: '#e5e510',
-  blue: '#2472c8',
-  magenta: '#bc3fbc',
-  cyan: '#11a8cd',
-  white: '#e5e5e5',
-  brightBlack: '#666666',
-  brightRed: '#f14c4c',
-  brightGreen: '#23d18b',
-  brightYellow: '#f5f543',
-  brightBlue: '#3b8eea',
-  brightMagenta: '#d670d6',
-  brightCyan: '#29b8db',
-  brightWhite: '#ffffff',
-};
+function themeRgb(value: string): RGB {
+  const packed = parsePaletteColor(value);
+  return { r: (packed >> 16) & 0xff, g: (packed >> 8) & 0xff, b: packed & 0xff };
+}
 
 // ============================================================================
 // CanvasRenderer Class
@@ -100,9 +82,9 @@ export class CanvasRenderer {
   private cursorStyle: 'block' | 'underline' | 'bar';
   private cursorBlink: boolean;
   private theme: Required<ITheme>;
+  private effectiveColors: RenderStateColors;
   private devicePixelRatio: number;
   private metrics: FontMetrics;
-  private palette: string[];
   private requestRender: () => void;
   private renderPaused = false;
 
@@ -155,28 +137,14 @@ export class CanvasRenderer {
     this.fontFamily = options.fontFamily ?? 'monospace';
     this.cursorStyle = options.cursorStyle ?? 'block';
     this.cursorBlink = options.cursorBlink ?? false;
-    this.theme = { ...DEFAULT_THEME, ...options.theme };
+    this.theme = normalizeTheme(options.theme);
+    this.effectiveColors = {
+      foreground: themeRgb(this.theme.foreground),
+      background: themeRgb(this.theme.background),
+      cursor: themeRgb(this.theme.cursor),
+      palette: ANSI_THEME_KEYS.map((key) => themeRgb(this.theme[key])),
+    };
     this.devicePixelRatio = options.devicePixelRatio ?? window.devicePixelRatio ?? 1;
-
-    // Build color palette (16 ANSI colors)
-    this.palette = [
-      this.theme.black,
-      this.theme.red,
-      this.theme.green,
-      this.theme.yellow,
-      this.theme.blue,
-      this.theme.magenta,
-      this.theme.cyan,
-      this.theme.white,
-      this.theme.brightBlack,
-      this.theme.brightRed,
-      this.theme.brightGreen,
-      this.theme.brightYellow,
-      this.theme.brightBlue,
-      this.theme.brightMagenta,
-      this.theme.brightCyan,
-      this.theme.brightWhite,
-    ];
 
     // Measure font metrics
     this.metrics = this.measureFont();
@@ -258,7 +226,11 @@ export class CanvasRenderer {
     this.ctx.textAlign = 'left';
 
     // Fill background after resize
-    this.ctx.fillStyle = this.theme.background;
+    this.ctx.fillStyle = this.rgbToCSS(
+      this.effectiveColors.background.r,
+      this.effectiveColors.background.g,
+      this.effectiveColors.background.b
+    );
     this.ctx.fillRect(0, 0, cssWidth, cssHeight);
   }
 
@@ -275,18 +247,19 @@ export class CanvasRenderer {
     viewportY: number = 0,
     scrollbackProvider?: IScrollbackProvider,
     scrollbarOpacity: number = 1
-  ): void {
+  ): RenderStateCursor {
     // Store buffer reference for grapheme lookups in renderCell
     this.currentBuffer = buffer;
 
-    // getCursor() calls update() internally to ensure fresh state.
-    // Multiple update() calls are safe - dirty state persists until clearDirty().
-    const cursor = buffer.getCursor();
-    const dims = buffer.getDimensions();
+    // Refresh Ghostty's RenderState exactly once for this Canvas frame.
+    const state = buffer.getRenderState();
+    const cursor = state.cursor;
+    this.effectiveColors = state.colors;
+    const dims = state.dimensions;
     const scrollbackLength = scrollbackProvider ? scrollbackProvider.getScrollbackLength() : 0;
 
     // Check if buffer needs full redraw (e.g., screen change between normal/alternate)
-    if (buffer.needsFullRedraw?.()) {
+    if (state.dirty === DirtyState.FULL) {
       forceAll = true;
     }
 
@@ -505,6 +478,7 @@ export class CanvasRenderer {
     // This is critical - if we don't clear after a full redraw, the dirty
     // state persists and the next frame might not detect new changes properly.
     buffer.clearDirty();
+    return cursor;
   }
 
   /**
@@ -522,13 +496,17 @@ export class CanvasRenderer {
     const lineY = y * this.metrics.height;
     const lineWidth = cols * this.metrics.width;
 
-    // Clear line background then fill with theme color.
+    // Clear line background then fill with Ghostty's effective color.
     // We clear just the cell area - glyph overflow is handled by also
     // redrawing adjacent rows (see render() method).
     // clearRect is needed because fillRect composites rather than replaces,
     // so transparent/translucent backgrounds wouldn't clear previous content.
     this.ctx.clearRect(0, lineY, lineWidth, this.metrics.height);
-    this.ctx.fillStyle = this.theme.background;
+    this.ctx.fillStyle = this.rgbToCSS(
+      this.effectiveColors.background.r,
+      this.effectiveColors.background.g,
+      this.effectiveColors.background.b
+    );
     this.ctx.fillRect(0, lineY, lineWidth, this.metrics.height);
 
     // PASS 1: Draw all cell backgrounds first
@@ -581,9 +559,12 @@ export class CanvasRenderer {
       bg_b = cell.fg_b;
     }
 
-    // Only draw cell background if it's different from the default (black)
-    // This lets the theme background (drawn earlier) show through for default cells
-    const isDefaultBg = bg_r === 0 && bg_g === 0 && bg_b === 0;
+    // The line was already filled with Ghostty's effective background.
+    const effectiveBackground = this.effectiveColors.background;
+    const isDefaultBg =
+      bg_r === effectiveBackground.r &&
+      bg_g === effectiveBackground.g &&
+      bg_b === effectiveBackground.b;
     if (!isDefaultBg) {
       this.ctx.fillStyle = this.rgbToCSS(bg_r, bg_g, bg_b);
       this.ctx.fillRect(cellX, cellY, cellWidth, this.metrics.height);
@@ -725,7 +706,11 @@ export class CanvasRenderer {
     const cursorX = x * this.metrics.width;
     const cursorY = y * this.metrics.height;
 
-    this.ctx.fillStyle = this.theme.cursor;
+    this.ctx.fillStyle = this.rgbToCSS(
+      this.effectiveColors.cursor.r,
+      this.effectiveColors.cursor.g,
+      this.effectiveColors.cursor.b
+    );
 
     switch (this.cursorStyle) {
       case 'block':
@@ -800,27 +785,7 @@ export class CanvasRenderer {
    * Update theme colors
    */
   public setTheme(theme: ITheme): void {
-    this.theme = { ...DEFAULT_THEME, ...theme };
-
-    // Rebuild palette
-    this.palette = [
-      this.theme.black,
-      this.theme.red,
-      this.theme.green,
-      this.theme.yellow,
-      this.theme.blue,
-      this.theme.magenta,
-      this.theme.cyan,
-      this.theme.white,
-      this.theme.brightBlack,
-      this.theme.brightRed,
-      this.theme.brightGreen,
-      this.theme.brightYellow,
-      this.theme.brightBlue,
-      this.theme.brightMagenta,
-      this.theme.brightCyan,
-      this.theme.brightWhite,
-    ];
+    this.theme = normalizeTheme(theme);
     this.requestRender();
   }
 
@@ -903,7 +868,11 @@ export class CanvasRenderer {
 
     // Always clear the scrollbar area first (fixes ghosting when fading out)
     ctx.clearRect(scrollbarX - 2, 0, scrollbarWidth + 6, canvasHeight);
-    ctx.fillStyle = this.theme.background;
+    ctx.fillStyle = this.rgbToCSS(
+      this.effectiveColors.background.r,
+      this.effectiveColors.background.g,
+      this.effectiveColors.background.b
+    );
     ctx.fillRect(scrollbarX - 2, 0, scrollbarWidth + 6, canvasHeight);
 
     // Don't draw scrollbar if fully transparent or no scrollback
@@ -1025,7 +994,11 @@ export class CanvasRenderer {
     // clearRect first because fillRect composites rather than replaces,
     // so transparent/translucent backgrounds wouldn't clear previous content.
     this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-    this.ctx.fillStyle = this.theme.background;
+    this.ctx.fillStyle = this.rgbToCSS(
+      this.effectiveColors.background.r,
+      this.effectiveColors.background.g,
+      this.effectiveColors.background.b
+    );
     this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
   }
 

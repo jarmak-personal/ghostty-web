@@ -485,6 +485,7 @@ export interface GhosttyWasmExports extends WebAssembly.Exports {
   ghostty_terminal_new_with_config(cols: number, rows: number, configPtr: number): TerminalHandle;
   ghostty_terminal_free(terminal: TerminalHandle): void;
   ghostty_terminal_resize(terminal: TerminalHandle, cols: number, rows: number): void;
+  ghostty_terminal_set_color_config(terminal: TerminalHandle, configPtr: number): boolean;
   ghostty_terminal_write(terminal: TerminalHandle, dataPtr: number, dataLen: number): void;
 
   // Retained normal-buffer search
@@ -558,6 +559,8 @@ export interface GhosttyWasmExports extends WebAssembly.Exports {
   ghostty_render_state_get_cursor_visible(terminal: TerminalHandle): boolean;
   ghostty_render_state_get_bg_color(terminal: TerminalHandle): number; // 0xRRGGBB
   ghostty_render_state_get_fg_color(terminal: TerminalHandle): number; // 0xRRGGBB
+  ghostty_render_state_get_cursor_color(terminal: TerminalHandle): number; // 0xRRGGBB
+  ghostty_render_state_get_palette_color(terminal: TerminalHandle, index: number): number;
   ghostty_render_state_is_row_dirty(terminal: TerminalHandle, row: number): boolean;
   ghostty_render_state_mark_clean(terminal: TerminalHandle): void;
   ghostty_render_state_get_viewport(
@@ -653,7 +656,16 @@ export interface RenderStateCursor {
 export interface RenderStateColors {
   background: RGB;
   foreground: RGB;
-  cursor: RGB | null;
+  cursor: RGB;
+  palette: RGB[];
+}
+
+/** One refreshed view of the native presentation state for a Canvas frame. */
+export interface RenderStateSnapshot {
+  dirty: DirtyState;
+  cursor: RenderStateCursor;
+  colors: RenderStateColors;
+  dimensions: { cols: number; rows: number };
 }
 
 /**
@@ -667,8 +679,8 @@ export const CURSOR_STRUCT_SIZE = 8;
 export const COLORS_STRUCT_SIZE = 12;
 
 /**
- * Terminal configuration (passed to ghostty_terminal_new_with_config)
- * All color values use 0xRRGGBB format. A value of 0 means "use default".
+ * Terminal configuration (passed to ghostty_terminal_new_with_config).
+ * Presence is encoded separately so 0x000000 remains a valid configured color.
  */
 export interface GhosttyTerminalConfig {
   scrollbackLimit?: number;
@@ -680,10 +692,11 @@ export interface GhosttyTerminalConfig {
 
 /**
  * Size of GhosttyTerminalConfig struct in WASM memory (bytes).
- * Layout: scrollback_limit(u32) + fg_color(u32) + bg_color(u32) + cursor_color(u32) + palette[16](u32*16)
- * Total: 4 + 4 + 4 + 4 + 64 = 80 bytes
+ * Layout: scrollback_limit(u32) + color_mask(u32) + fg_color(u32) +
+ * bg_color(u32) + cursor_color(u32) + palette[16](u32*16)
  */
-export const GHOSTTY_CONFIG_SIZE = 80;
+export const GHOSTTY_CONFIG_SIZE = 84;
+export const GHOSTTY_COLOR_CONFIG_SIZE = 80;
 
 /**
  * Opaque terminal pointer (WASM memory address)
