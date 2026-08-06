@@ -486,6 +486,11 @@ export interface GhosttyWasmExports extends WebAssembly.Exports {
   ghostty_terminal_free(terminal: TerminalHandle): void;
   ghostty_terminal_resize(terminal: TerminalHandle, cols: number, rows: number): void;
   ghostty_terminal_set_color_config(terminal: TerminalHandle, configPtr: number): boolean;
+  ghostty_terminal_set_cursor_config(
+    terminal: TerminalHandle,
+    style: number,
+    blink: number
+  ): boolean;
   ghostty_terminal_write(terminal: TerminalHandle, dataPtr: number, dataLen: number): void;
 
   // Retained normal-buffer search
@@ -557,6 +562,9 @@ export interface GhosttyWasmExports extends WebAssembly.Exports {
   ghostty_render_state_get_cursor_x(terminal: TerminalHandle): number;
   ghostty_render_state_get_cursor_y(terminal: TerminalHandle): number;
   ghostty_render_state_get_cursor_visible(terminal: TerminalHandle): boolean;
+  ghostty_render_state_get_cursor_blinking(terminal: TerminalHandle): boolean;
+  ghostty_render_state_get_cursor_style(terminal: TerminalHandle): number;
+  ghostty_render_state_get_cursor_default(terminal: TerminalHandle): boolean;
   ghostty_render_state_get_bg_color(terminal: TerminalHandle): number; // 0xRRGGBB
   ghostty_render_state_get_fg_color(terminal: TerminalHandle): number; // 0xRRGGBB
   ghostty_render_state_get_cursor_color(terminal: TerminalHandle): number; // 0xRRGGBB
@@ -636,9 +644,17 @@ export enum DirtyState {
   FULL = 2,
 }
 
+/** Configured cursor shape. Application DECSCUSR requests may override this default. */
+export type CursorStyle = 'block' | 'block_hollow' | 'underline' | 'bar';
+
 /**
- * Cursor state from RenderState (8 bytes packed)
- * Layout: x(u16) + y(u16) + viewport_x(i16) + viewport_y(i16) + visible(bool) + blinking(bool) + style(u8) + _pad(u8)
+ * Configured cursor blink policy. `terminal` follows DEC mode 12; booleans
+ * establish explicit blinking or steady defaults that ignore that mode.
+ */
+export type CursorBlink = boolean | 'terminal';
+
+/**
+ * Effective cursor state from Ghostty RenderState plus its fork-owned default source.
  */
 export interface RenderStateCursor {
   x: number;
@@ -647,7 +663,9 @@ export interface RenderStateCursor {
   viewportY: number;
   visible: boolean;
   blinking: boolean;
-  style: 'block' | 'underline' | 'bar';
+  style: CursorStyle;
+  /** True while the configured default is effective; false for application DECSCUSR. */
+  default: boolean;
 }
 
 /**
@@ -688,14 +706,17 @@ export interface GhosttyTerminalConfig {
   bgColor?: number;
   cursorColor?: number;
   palette?: number[];
+  cursorStyle?: CursorStyle;
+  cursorBlink?: CursorBlink;
 }
 
 /**
  * Size of GhosttyTerminalConfig struct in WASM memory (bytes).
  * Layout: scrollback_limit(u32) + color_mask(u32) + fg_color(u32) +
- * bg_color(u32) + cursor_color(u32) + palette[16](u32*16)
+ * bg_color(u32) + cursor_color(u32) + palette[16](u32*16) +
+ * cursor_style(u8) + cursor_blink(u8) + reserved(u16)
  */
-export const GHOSTTY_CONFIG_SIZE = 84;
+export const GHOSTTY_CONFIG_SIZE = 88;
 export const GHOSTTY_COLOR_CONFIG_SIZE = 80;
 
 /**

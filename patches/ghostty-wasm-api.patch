@@ -29,10 +29,10 @@ index 4f8fef88e..ca9fb1d4d 100644
  #include <ghostty/vt/key.h>
 diff --git a/include/ghostty/vt/terminal.h b/include/ghostty/vt/terminal.h
 new file mode 100644
-index 000000000..5f9f25396
+index 000000000..427f7eeaf
 --- /dev/null
 +++ b/include/ghostty/vt/terminal.h
-@@ -0,0 +1,435 @@
+@@ -0,0 +1,450 @@
 +/**
 + * @file terminal.h
 + *
@@ -84,6 +84,11 @@ index 000000000..5f9f25396
 +    uint32_t cursor_color;
 +    /** ANSI color palette (16 colors, 0xRRGGBB format) */
 +    uint32_t palette[16];
++    /** Configured cursor style: block, hollow block, bar, or underline. */
++    uint8_t cursor_style;
++    /** Configured blink policy: terminal-controlled, blinking, or steady. */
++    uint8_t cursor_blink;
++    uint16_t _cursor_reserved;
 +} GhosttyTerminalConfig;
 +
 +/** Bounded live color configuration with the same color-mask layout. */
@@ -154,6 +159,13 @@ index 000000000..5f9f25396
 +bool ghostty_terminal_set_color_config(
 +    GhosttyTerminal term,
 +    const GhosttyColorConfig* config
++);
++
++/** Update configured cursor defaults without replacing terminal state. */
++bool ghostty_terminal_set_cursor_config(
++    GhosttyTerminal term,
++    uint8_t style,
++    uint8_t blink
 +);
 +
 +/** Write data to terminal (parses VT sequences) */
@@ -293,6 +305,9 @@ index 000000000..5f9f25396
 +int ghostty_render_state_get_cursor_x(GhosttyTerminal term);
 +int ghostty_render_state_get_cursor_y(GhosttyTerminal term);
 +bool ghostty_render_state_get_cursor_visible(GhosttyTerminal term);
++bool ghostty_render_state_get_cursor_blinking(GhosttyTerminal term);
++uint8_t ghostty_render_state_get_cursor_style(GhosttyTerminal term);
++bool ghostty_render_state_get_cursor_default(GhosttyTerminal term);
 +
 +/** Get default colors as 0xRRGGBB */
 +uint32_t ghostty_render_state_get_bg_color(GhosttyTerminal term);
@@ -469,10 +484,10 @@ index 000000000..5f9f25396
 +
 +#endif /* GHOSTTY_VT_TERMINAL_H */
 diff --git a/src/lib_vt.zig b/src/lib_vt.zig
-index 426660621..38370fae2 100644
+index 426660621..343d37fdc 100644
 --- a/src/lib_vt.zig
 +++ b/src/lib_vt.zig
-@@ -143,6 +143,71 @@ comptime {
+@@ -143,6 +143,75 @@ comptime {
          @export(&c.sgr_unknown_partial, .{ .name = "ghostty_sgr_unknown_partial" });
          @export(&c.sgr_attribute_tag, .{ .name = "ghostty_sgr_attribute_tag" });
          @export(&c.sgr_attribute_value, .{ .name = "ghostty_sgr_attribute_value" });
@@ -482,6 +497,7 @@ index 426660621..38370fae2 100644
 +        @export(&c.terminal_free, .{ .name = "ghostty_terminal_free" });
 +        @export(&c.terminal_resize, .{ .name = "ghostty_terminal_resize" });
 +        @export(&c.terminal_set_color_config, .{ .name = "ghostty_terminal_set_color_config" });
++        @export(&c.terminal_set_cursor_config, .{ .name = "ghostty_terminal_set_cursor_config" });
 +        @export(&c.terminal_write, .{ .name = "ghostty_terminal_write" });
 +        @export(&c.terminal_retained_search_create, .{ .name = "ghostty_terminal_retained_search_create" });
 +        @export(&c.terminal_retained_search_step, .{ .name = "ghostty_terminal_retained_search_step" });
@@ -510,6 +526,9 @@ index 426660621..38370fae2 100644
 +        @export(&c.render_state_get_cursor_x, .{ .name = "ghostty_render_state_get_cursor_x" });
 +        @export(&c.render_state_get_cursor_y, .{ .name = "ghostty_render_state_get_cursor_y" });
 +        @export(&c.render_state_get_cursor_visible, .{ .name = "ghostty_render_state_get_cursor_visible" });
++        @export(&c.render_state_get_cursor_blinking, .{ .name = "ghostty_render_state_get_cursor_blinking" });
++        @export(&c.render_state_get_cursor_style, .{ .name = "ghostty_render_state_get_cursor_style" });
++        @export(&c.render_state_get_cursor_default, .{ .name = "ghostty_render_state_get_cursor_default" });
 +        @export(&c.render_state_get_bg_color, .{ .name = "ghostty_render_state_get_bg_color" });
 +        @export(&c.render_state_get_fg_color, .{ .name = "ghostty_render_state_get_fg_color" });
 +        @export(&c.render_state_get_cursor_color, .{ .name = "ghostty_render_state_get_cursor_color" });
@@ -579,7 +598,7 @@ index ea8ca1445..75a72480b 100644
      }
 
 diff --git a/src/terminal/c/main.zig b/src/terminal/c/main.zig
-index bc92597f5..9b6b3cfa8 100644
+index bc92597f5..f74c3baeb 100644
 --- a/src/terminal/c/main.zig
 +++ b/src/terminal/c/main.zig
 @@ -4,6 +4,7 @@ pub const key_event = @import("key_event.zig");
@@ -590,7 +609,7 @@ index bc92597f5..9b6b3cfa8 100644
 
  // The full C API, unexported.
  pub const osc_new = osc.new;
-@@ -52,6 +53,72 @@ pub const key_encoder_encode = key_encode.encode;
+@@ -52,6 +53,76 @@ pub const key_encoder_encode = key_encode.encode;
 
  pub const paste_is_safe = paste.is_safe;
 
@@ -600,6 +619,7 @@ index bc92597f5..9b6b3cfa8 100644
 +pub const terminal_free = terminal.free;
 +pub const terminal_resize = terminal.resize;
 +pub const terminal_set_color_config = terminal.setColorConfig;
++pub const terminal_set_cursor_config = terminal.setCursorConfig;
 +pub const terminal_write = terminal.write;
 +pub const terminal_retained_search_create = terminal.retainedSearchCreate;
 +pub const terminal_retained_search_step = terminal.retainedSearchStep;
@@ -628,6 +648,9 @@ index bc92597f5..9b6b3cfa8 100644
 +pub const render_state_get_cursor_x = terminal.renderStateGetCursorX;
 +pub const render_state_get_cursor_y = terminal.renderStateGetCursorY;
 +pub const render_state_get_cursor_visible = terminal.renderStateGetCursorVisible;
++pub const render_state_get_cursor_blinking = terminal.renderStateGetCursorBlinking;
++pub const render_state_get_cursor_style = terminal.renderStateGetCursorStyle;
++pub const render_state_get_cursor_default = terminal.renderStateGetCursorDefault;
 +pub const render_state_get_bg_color = terminal.renderStateGetBgColor;
 +pub const render_state_get_fg_color = terminal.renderStateGetFgColor;
 +pub const render_state_get_cursor_color = terminal.renderStateGetCursorColor;
@@ -663,7 +686,7 @@ index bc92597f5..9b6b3cfa8 100644
  test {
      _ = color;
      _ = osc;
-@@ -59,6 +126,7 @@ test {
+@@ -59,6 +130,7 @@ test {
      _ = key_encode;
      _ = paste;
      _ = sgr;
@@ -673,10 +696,10 @@ index bc92597f5..9b6b3cfa8 100644
      _ = @import("../../lib/allocator.zig");
 diff --git a/src/terminal/c/terminal.zig b/src/terminal/c/terminal.zig
 new file mode 100644
-index 000000000..4e45e5e9e
+index 000000000..1f8362e72
 --- /dev/null
 +++ b/src/terminal/c/terminal.zig
-@@ -0,0 +1,2423 @@
+@@ -0,0 +1,2640 @@
 +//! C API wrapper for Terminal
 +//!
 +//! This provides a minimal, high-performance interface to Ghostty's Terminal
@@ -709,6 +732,7 @@ index 000000000..4e45e5e9e
 +const device_status = @import("../device_status.zig");
 +const osc_color = @import("../osc/parsers/color.zig");
 +const PageList = @import("../PageList.zig");
++const Screen = @import("../Screen.zig");
 +const ScreenSet = @import("../ScreenSet.zig");
 +const Selection = @import("../Selection.zig");
 +const pagepkg = @import("../page.zig");
@@ -729,6 +753,97 @@ index 000000000..4e45e5e9e
 +const background_configured: u32 = 1 << 1;
 +const cursor_configured: u32 = 1 << 2;
 +const palette_configured_shift = 8;
++
++const CursorStyleConfig = enum(u8) {
++    block = 0,
++    block_hollow = 1,
++    bar = 2,
++    underline = 3,
++
++    fn decode(raw: u8) ?CursorStyleConfig {
++        return std.meta.intToEnum(CursorStyleConfig, raw) catch null;
++    }
++
++    fn terminalStyle(self: CursorStyleConfig) Screen.CursorStyle {
++        return switch (self) {
++            .block => .block,
++            .block_hollow => .block_hollow,
++            .bar => .bar,
++            .underline => .underline,
++        };
++    }
++};
++
++const CursorBlinkConfig = enum(u8) {
++    terminal = 0,
++    blinking = 1,
++    steady = 2,
++
++    fn decode(raw: u8) ?CursorBlinkConfig {
++        return std.meta.intToEnum(CursorBlinkConfig, raw) catch null;
++    }
++
++    fn initial(self: CursorBlinkConfig) bool {
++        return switch (self) {
++            .terminal, .blinking => true,
++            .steady => false,
++        };
++    }
++};
++
++/// Configured defaults and whether an application DECSCUSR currently owns the cursor.
++const CursorDefaults = struct {
++    style: CursorStyleConfig = .block,
++    blink: CursorBlinkConfig = .steady,
++    active: bool = true,
++
++    fn decode(style: u8, blink: u8) ?CursorDefaults {
++        return .{
++            .style = CursorStyleConfig.decode(style) orelse return null,
++            .blink = CursorBlinkConfig.decode(blink) orelse return null,
++        };
++    }
++
++    fn setInitial(self: *const CursorDefaults, terminal: *Terminal) void {
++        terminal.screens.active.cursor.cursor_style = self.style.terminalStyle();
++        terminal.modes.set(.cursor_blinking, self.blink.initial());
++    }
++
++    fn reset(self: *CursorDefaults, terminal: *Terminal) void {
++        self.active = true;
++        self.setInitial(terminal);
++    }
++
++    fn setApplication(
++        self: *CursorDefaults,
++        terminal: *Terminal,
++        style: Screen.CursorStyle,
++        blink: bool,
++    ) void {
++        self.active = false;
++        terminal.screens.active.cursor.cursor_style = style;
++        terminal.modes.set(.cursor_blinking, blink);
++    }
++
++    fn update(
++        self: *CursorDefaults,
++        terminal: *Terminal,
++        style: CursorStyleConfig,
++        blink: CursorBlinkConfig,
++    ) void {
++        const prior_blink = self.blink;
++        self.style = style;
++        self.blink = blink;
++        terminal.modes.default.cursor_blinking = blink.initial();
++        if (!self.active) return;
++
++        terminal.screens.active.cursor.cursor_style = style.terminalStyle();
++        // A same-policy terminal-controlled update preserves the live DEC mode.
++        if (prior_blink != blink or blink != .terminal) {
++            terminal.modes.set(.cursor_blinking, blink.initial());
++        }
++    }
++};
 +
 +/// Versioned wire tags consumed by the TypeScript wrapper. The wire format is
 +/// internal to this compatibility ABI; public consumers receive typed records.
@@ -1363,6 +1478,7 @@ index 000000000..4e45e5e9e
 +    events: *EventQueue,
 +    provenance: *ProvenanceRegistry,
 +    retained_ranges: *RetainedRangeRegistry,
++    cursor_defaults: *CursorDefaults,
 +    synchronized_output_generation: *u32,
 +    write_screen_mask: *u8,
 +
@@ -1373,6 +1489,7 @@ index 000000000..4e45e5e9e
 +        events: *EventQueue,
 +        provenance: *ProvenanceRegistry,
 +        retained_ranges: *RetainedRangeRegistry,
++        cursor_defaults: *CursorDefaults,
 +        synchronized_output_generation: *u32,
 +        write_screen_mask: *u8,
 +    ) ResponseHandler {
@@ -1383,6 +1500,7 @@ index 000000000..4e45e5e9e
 +            .events = events,
 +            .provenance = provenance,
 +            .retained_ranges = retained_ranges,
++            .cursor_defaults = cursor_defaults,
 +            .synchronized_output_generation = synchronized_output_generation,
 +            .write_screen_mask = write_screen_mask,
 +        };
@@ -1437,17 +1555,15 @@ index 000000000..4e45e5e9e
 +                self.terminal.screens.active.cursor.x + 1,
 +            ),
 +            .cursor_style => {
-+                const blink = switch (value) {
-+                    .default, .steady_block, .steady_bar, .steady_underline => false,
-+                    .blinking_block, .blinking_bar, .blinking_underline => true,
-+                };
-+                const style: @import("../Screen.zig").CursorStyle = switch (value) {
-+                    .default, .blinking_block, .steady_block => .block,
-+                    .blinking_bar, .steady_bar => .bar,
-+                    .blinking_underline, .steady_underline => .underline,
-+                };
-+                self.terminal.modes.set(.cursor_blinking, blink);
-+                self.terminal.screens.active.cursor.cursor_style = style;
++                switch (value) {
++                    .default => self.cursor_defaults.reset(self.terminal),
++                    .blinking_block => self.cursor_defaults.setApplication(self.terminal, .block, true),
++                    .steady_block => self.cursor_defaults.setApplication(self.terminal, .block, false),
++                    .blinking_bar => self.cursor_defaults.setApplication(self.terminal, .bar, true),
++                    .steady_bar => self.cursor_defaults.setApplication(self.terminal, .bar, false),
++                    .blinking_underline => self.cursor_defaults.setApplication(self.terminal, .underline, true),
++                    .steady_underline => self.cursor_defaults.setApplication(self.terminal, .underline, false),
++                }
 +            },
 +            .erase_display_below => self.terminal.eraseDisplay(.below, value),
 +            .erase_display_above => self.terminal.eraseDisplay(.above, value),
@@ -1518,6 +1634,7 @@ index 000000000..4e45e5e9e
 +                self.retained_ranges.clear(self.terminal);
 +                self.provenance.clear(self.terminal);
 +                self.terminal.fullReset();
++                self.cursor_defaults.reset(self.terminal);
 +                self.noteActiveScreen();
 +            },
 +            .start_hyperlink => try self.terminal.screens.active.startHyperlink(value.uri, value.id),
@@ -1651,6 +1768,8 @@ index 000000000..4e45e5e9e
 +    }
 +
 +    fn setMode(self: *ResponseHandler, mode: modespkg.Mode, enabled: bool) !void {
++        if (mode == .cursor_blinking and
++            (!self.cursor_defaults.active or self.cursor_defaults.blink != .terminal)) return;
 +        self.terminal.modes.set(mode, enabled);
 +        switch (mode) {
 +            .synchronized_output => if (enabled) {
@@ -1852,6 +1971,7 @@ index 000000000..4e45e5e9e
 +    terminal: Terminal,
 +    stream: ResponseStream,
 +    render_state: RenderState,
++    cursor_defaults: CursorDefaults,
 +    /// Response buffer for DSR and other query responses
 +    response_buffer: std.ArrayList(u8),
 +    /// Bounded parser storage used only by OSC families that require allocation.
@@ -1907,6 +2027,9 @@ index 000000000..4e45e5e9e
 +    bg_color: u32,
 +    cursor_color: u32,
 +    palette: [16]u32,
++    cursor_style: u8,
++    cursor_blink: u8,
++    _cursor_reserved: u16,
 +};
 +
 +pub const GhosttyColorConfig = extern struct {
@@ -1971,6 +2094,14 @@ index 000000000..4e45e5e9e
 +
 +    const wrapper = alloc.create(TerminalWrapper) catch return null;
 +
++    const cursor_defaults = if (config_) |cfg|
++        CursorDefaults.decode(cfg.cursor_style, cfg.cursor_blink) orelse {
++            alloc.destroy(wrapper);
++            return null;
++        }
++    else
++        CursorDefaults{};
++
 +    // Parse config or use defaults
 +    const scrollback_limit: usize = if (config_) |cfg|
 +        if (cfg.scrollback_limit == 0) std.math.maxInt(usize) else cfg.scrollback_limit
@@ -1990,11 +2121,14 @@ index 000000000..4e45e5e9e
 +        applyColorConfig(&colors, &color_config);
 +    }
 +
++    var default_modes: modespkg.ModePacked = .{};
++    default_modes.cursor_blinking = cursor_defaults.blink.initial();
 +    wrapper.terminal = Terminal.init(alloc, .{
 +        .cols = @intCast(cols),
 +        .rows = @intCast(rows),
 +        .max_scrollback = scrollback_limit,
 +        .colors = colors,
++        .default_modes = default_modes,
 +    }) catch {
 +        alloc.destroy(wrapper);
 +        return null;
@@ -2006,6 +2140,7 @@ index 000000000..4e45e5e9e
 +    wrapper.provenance = .{};
 +    wrapper.retained_searches = .{};
 +    wrapper.retained_ranges = .{};
++    wrapper.cursor_defaults = cursor_defaults;
 +    wrapper.synchronized_output_generation = 0;
 +    wrapper.primary_screen_generation = 0;
 +    wrapper.alternate_screen_generation = 0;
@@ -2013,6 +2148,7 @@ index 000000000..4e45e5e9e
 +    wrapper.render_state = RenderState.empty;
 +    wrapper.last_screen_is_alternate = false;
 +    wrapper.osc_allocator = std.heap.FixedBufferAllocator.init(&wrapper.osc_storage);
++    wrapper.cursor_defaults.setInitial(&wrapper.terminal);
 +
 +    // The parser allocator is intentionally bounded because PTY output is
 +    // untrusted. Oversized allocating OSC sequences become invalid and are
@@ -2024,6 +2160,7 @@ index 000000000..4e45e5e9e
 +        &wrapper.events,
 +        &wrapper.provenance,
 +        &wrapper.retained_ranges,
++        &wrapper.cursor_defaults,
 +        &wrapper.synchronized_output_generation,
 +        &wrapper.write_screen_mask,
 +    );
@@ -2075,6 +2212,19 @@ index 000000000..4e45e5e9e
 +    const wrapper: *TerminalWrapper = @ptrCast(@alignCast(ptr orelse return false));
 +    applyColorConfig(&wrapper.terminal.colors, config orelse return false);
 +    wrapper.terminal.flags.dirty.palette = true;
++    return true;
++}
++
++/// Change configured cursor defaults without replacing terminal or parser state.
++pub fn setCursorConfig(
++    ptr: ?*anyopaque,
++    style_raw: u8,
++    blink_raw: u8,
++) callconv(.c) bool {
++    const wrapper: *TerminalWrapper = @ptrCast(@alignCast(ptr orelse return false));
++    const style = CursorStyleConfig.decode(style_raw) orelse return false;
++    const blink = CursorBlinkConfig.decode(blink_raw) orelse return false;
++    wrapper.cursor_defaults.update(&wrapper.terminal, style, blink);
 +    return true;
 +}
 +
@@ -2392,6 +2542,29 @@ index 000000000..4e45e5e9e
 +pub fn renderStateGetCursorVisible(ptr: ?*anyopaque) callconv(.c) bool {
 +    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return false));
 +    return wrapper.render_state.cursor.visible;
++}
++
++/// Check whether the effective Ghostty cursor state blinks.
++pub fn renderStateGetCursorBlinking(ptr: ?*anyopaque) callconv(.c) bool {
++    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return false));
++    return wrapper.render_state.cursor.blinking;
++}
++
++/// Get the effective Ghostty cursor shape using CursorStyleConfig's wire values.
++pub fn renderStateGetCursorStyle(ptr: ?*anyopaque) callconv(.c) u8 {
++    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return 0));
++    return switch (wrapper.render_state.cursor.visual_style) {
++        .block => @intFromEnum(CursorStyleConfig.block),
++        .block_hollow => @intFromEnum(CursorStyleConfig.block_hollow),
++        .bar => @intFromEnum(CursorStyleConfig.bar),
++        .underline => @intFromEnum(CursorStyleConfig.underline),
++    };
++}
++
++/// True while configured defaults, rather than application DECSCUSR, own the cursor.
++pub fn renderStateGetCursorDefault(ptr: ?*anyopaque) callconv(.c) bool {
++    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return false));
++    return wrapper.cursor_defaults.active;
 +}
 +
 +/// Get default background color as 0xRRGGBB
@@ -2995,6 +3168,70 @@ index 000000000..4e45e5e9e
 +    try std.testing.expectEqual(@as(u32, 'o'), cells[4].codepoint);
 +}
 +
++test "configured cursor defaults and application requests share native state" {
++    const config: GhosttyTerminalConfig = .{
++        .scrollback_limit = 10_000,
++        .color_mask = 0,
++        .fg_color = 0,
++        .bg_color = 0,
++        .cursor_color = 0,
++        .palette = .{0} ** 16,
++        .cursor_style = @intFromEnum(CursorStyleConfig.block_hollow),
++        .cursor_blink = @intFromEnum(CursorBlinkConfig.terminal),
++        ._cursor_reserved = 0,
++    };
++    const term = newWithConfig(10, 3, &config);
++    defer free(term);
++    try std.testing.expect(term != null);
++
++    _ = renderStateUpdate(term);
++    try std.testing.expectEqual(
++        @intFromEnum(CursorStyleConfig.block_hollow),
++        renderStateGetCursorStyle(term),
++    );
++    try std.testing.expect(renderStateGetCursorBlinking(term));
++    try std.testing.expect(renderStateGetCursorDefault(term));
++
++    const dec_steady = "\x1b[?12l";
++    write(term, dec_steady, dec_steady.len);
++    _ = renderStateUpdate(term);
++    try std.testing.expect(!renderStateGetCursorBlinking(term));
++
++    renderStateMarkClean(term);
++    const app_block = "\x1b[1 q";
++    write(term, app_block, app_block.len);
++    try std.testing.expectEqual(GhosttyDirty.none, renderStateUpdate(term));
++    try std.testing.expectEqual(
++        @intFromEnum(CursorStyleConfig.block),
++        renderStateGetCursorStyle(term),
++    );
++    try std.testing.expect(renderStateGetCursorBlinking(term));
++    try std.testing.expect(!renderStateGetCursorDefault(term));
++    try std.testing.expect(!renderStateIsRowDirty(term, 0));
++
++    try std.testing.expect(setCursorConfig(
++        term,
++        @intFromEnum(CursorStyleConfig.underline),
++        @intFromEnum(CursorBlinkConfig.steady),
++    ));
++    _ = renderStateUpdate(term);
++    try std.testing.expectEqual(
++        @intFromEnum(CursorStyleConfig.block),
++        renderStateGetCursorStyle(term),
++    );
++
++    const app_reset = "\x1b[0 q";
++    write(term, app_reset, app_reset.len);
++    _ = renderStateUpdate(term);
++    try std.testing.expectEqual(
++        @intFromEnum(CursorStyleConfig.underline),
++        renderStateGetCursorStyle(term),
++    );
++    try std.testing.expect(!renderStateGetCursorBlinking(term));
++    try std.testing.expect(renderStateGetCursorDefault(term));
++    try std.testing.expect(!setCursorConfig(term, 255, 255));
++}
++
 +test "configured palette changes preserve overrides and resets use latest base" {
 +    const config: GhosttyTerminalConfig = .{
 +        .scrollback_limit = 10_000,
@@ -3006,6 +3243,9 @@ index 000000000..4e45e5e9e
 +        .bg_color = 0x000000,
 +        .cursor_color = 0x405060,
 +        .palette = .{0x000000} ++ .{0} ** 15,
++        .cursor_style = @intFromEnum(CursorStyleConfig.block),
++        .cursor_blink = @intFromEnum(CursorBlinkConfig.steady),
++        ._cursor_reserved = 0,
 +    };
 +    const term = newWithConfig(10, 2, &config);
 +    defer free(term);

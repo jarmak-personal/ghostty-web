@@ -275,9 +275,15 @@ describe('hvir presentation scheduler', () => {
       expect(renderRequests).toBe(3);
 
       renderer.setRenderPaused(false);
+      expect(intervals.size).toBe(0);
+      // The reveal frame reconciles against freshly advanced native state.
+      const cursorLifecycle = renderer as unknown as {
+        reconcileCursorBlink(enabled: boolean): void;
+      };
+      cursorLifecycle.reconcileCursorBlink(true);
       expect(intervals.size).toBe(1);
 
-      renderer.setCursorBlink(false);
+      cursorLifecycle.reconcileCursorBlink(false);
       const requestsAfterDisable = renderRequests;
       renderer.resetCursorBlink();
       expect(intervals.size).toBe(0);

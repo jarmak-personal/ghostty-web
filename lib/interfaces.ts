@@ -3,12 +3,13 @@
  */
 
 import type { Ghostty } from './ghostty';
+import type { CursorBlink, CursorStyle } from './types';
 
 export interface ITerminalOptions {
   cols?: number; // Default: 80
   rows?: number; // Default: 24
-  cursorBlink?: boolean; // Default: false
-  cursorStyle?: 'block' | 'underline' | 'bar';
+  cursorBlink?: CursorBlink; // Default: false
+  cursorStyle?: CursorStyle;
   theme?: ITheme;
   scrollback?: number; // Default: 10000
   fontSize?: number; // Default: 15

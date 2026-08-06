@@ -10,6 +10,8 @@ import { decodeTerminalEventRecord, MAX_TERMINAL_EVENT_BYTES } from './terminal-
 import {
   CellFlags,
   type Cursor,
+  type CursorBlink,
+  type CursorStyle,
   DirtyState,
   GHOSTTY_COLOR_CONFIG_SIZE,
   GHOSTTY_CONFIG_SIZE,
@@ -34,6 +36,29 @@ const FOREGROUND_CONFIGURED = 1 << 0;
 const BACKGROUND_CONFIGURED = 1 << 1;
 const CURSOR_CONFIGURED = 1 << 2;
 const PALETTE_CONFIGURED_SHIFT = 8;
+
+const CURSOR_STYLE_VALUES: Readonly<Record<CursorStyle, number>> = {
+  block: 0,
+  block_hollow: 1,
+  bar: 2,
+  underline: 3,
+};
+
+function encodedCursorStyle(style: CursorStyle | undefined): number {
+  return CURSOR_STYLE_VALUES[style ?? 'block'];
+}
+
+function encodedCursorBlink(blink: CursorBlink | undefined): number {
+  if (blink === 'terminal') return 0;
+  return (blink ?? false) ? 1 : 2;
+}
+
+function writeCursorConfig(view: DataView, offset: number, config: GhosttyTerminalConfig): number {
+  view.setUint8(offset, encodedCursorStyle(config.cursorStyle));
+  view.setUint8(offset + 1, encodedCursorBlink(config.cursorBlink));
+  view.setUint16(offset + 2, 0, true);
+  return offset + 4;
+}
 
 function validatedColor(value: number | undefined, field: string): number {
   if (value === undefined) return 0;
@@ -354,7 +379,8 @@ export class GhosttyTerminal {
         // scrollback_limit (u32)
         view.setUint32(offset, config.scrollbackLimit ?? 10000, true);
         offset += 4;
-        writeColorConfig(view, offset, config);
+        offset = writeColorConfig(view, offset, config);
+        writeCursorConfig(view, offset, config);
 
         this.handle = this.exports.ghostty_terminal_new_with_config(cols, rows, configPtr);
       } finally {
@@ -409,6 +435,16 @@ export class GhosttyTerminal {
     } finally {
       this.exports.ghostty_wasm_free_u8_array(configPtr, GHOSTTY_COLOR_CONFIG_SIZE);
     }
+  }
+
+  /** Change configured cursor defaults without replacing terminal or presentation state. */
+  setCursorConfig(config: Pick<GhosttyTerminalConfig, 'cursorStyle' | 'cursorBlink'>): boolean {
+    if (!this.handle) return false;
+    return this.exports.ghostty_terminal_set_cursor_config(
+      this.handle,
+      encodedCursorStyle(config.cursorStyle),
+      encodedCursorBlink(config.cursorBlink)
+    );
   }
 
   free(): void {
@@ -743,10 +779,26 @@ export class GhosttyTerminal {
       y: this.exports.ghostty_render_state_get_cursor_y(this.handle),
       viewportX: this.exports.ghostty_render_state_get_cursor_x(this.handle),
       viewportY: this.exports.ghostty_render_state_get_cursor_y(this.handle),
-      visible: this.exports.ghostty_render_state_get_cursor_visible(this.handle),
-      blinking: false,
-      style: 'block',
+      visible: !!this.exports.ghostty_render_state_get_cursor_visible(this.handle),
+      blinking: !!this.exports.ghostty_render_state_get_cursor_blinking(this.handle),
+      style: this.decodeCursorStyle(
+        this.exports.ghostty_render_state_get_cursor_style(this.handle)
+      ),
+      default: !!this.exports.ghostty_render_state_get_cursor_default(this.handle),
     };
+  }
+
+  private decodeCursorStyle(value: number): CursorStyle {
+    switch (value) {
+      case 1:
+        return 'block_hollow';
+      case 2:
+        return 'bar';
+      case 3:
+        return 'underline';
+      default:
+        return 'block';
+    }
   }
 
   private readColors(): RenderStateColors {
