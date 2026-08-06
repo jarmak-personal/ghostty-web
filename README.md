@@ -107,8 +107,9 @@ The Canvas scheduler also honors Ghostty's parser-owned synchronized-output mode
 2026). Parsing and terminal responses continue while presentation is deferred; completion produces
 one full frame, and abandoned synchronization is released after Ghostty's one-second safety timeout.
 `getRenderStats()` reports the live synchronized-output state and timeout-recovery count without
-retaining terminal content. Its bounded `lastFrame` counters report rendered rows, text and shaped
-runs, shaped cells, and the largest run in cells for presentation-capacity diagnostics.
+retaining terminal content. Its bounded `lastFrame` counters report rendered rows, text draws and
+measurements, shaped runs and cells, and the largest run in cells for presentation-capacity
+diagnostics.
 
 Embedding applications that own terminal menu presentation can disable ghostty-web's legacy
 hidden-textarea bridge at construction time. The host remains responsible for clipboard access and

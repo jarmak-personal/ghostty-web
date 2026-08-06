@@ -129,6 +129,7 @@ describe('hvir presentation scheduler', () => {
         lastFrame: {
           renderedRows: 0,
           textRuns: 0,
+          textMeasurements: 0,
           shapedRuns: 0,
           shapedCells: 0,
           maxRunCells: 0,

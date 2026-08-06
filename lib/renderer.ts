@@ -70,6 +70,7 @@ export interface FontMetrics {
 export interface RendererFrameStats {
   renderedRows: number;
   textRuns: number;
+  textMeasurements: number;
   shapedRuns: number;
   shapedCells: number;
   maxRunCells: number;
@@ -84,6 +85,7 @@ interface TextRunCell {
   alpha: number;
   styleKey: string;
   joinable: boolean;
+  advance: number | null;
 }
 
 interface TextRun {
@@ -91,11 +93,18 @@ interface TextRun {
   startColumn: number;
   endColumn: number;
   text: string;
+  measuredWidth: number | null;
+  expectedWidth: number;
 }
+
+const MAX_SHAPED_RUN_CELLS = 64;
+const MAX_GLYPH_ADVANCE_CACHE_ENTRIES = 512;
+const ADVANCE_EPSILON = 0.01;
 
 const EMPTY_FRAME_STATS: RendererFrameStats = {
   renderedRows: 0,
   textRuns: 0,
+  textMeasurements: 0,
   shapedRuns: 0,
   shapedCells: 0,
   maxRunCells: 0,
@@ -124,6 +133,7 @@ export class CanvasRenderer {
   private requestRender: (forceAll?: boolean) => void;
   private renderPaused = false;
   private frameStats: RendererFrameStats = { ...EMPTY_FRAME_STATS };
+  private glyphAdvanceCache = new Map<string, number>();
 
   // Cursor blinking state
   private cursorVisible: boolean = true;
@@ -220,6 +230,7 @@ export class CanvasRenderer {
    * Remeasure font metrics (call after font loads or changes)
    */
   public remeasureFont(): void {
+    this.glyphAdvanceCache.clear();
     this.metrics = this.measureFont();
     this.requestRender();
   }
@@ -240,6 +251,7 @@ export class CanvasRenderer {
    * Resize canvas to fit terminal dimensions
    */
   public resize(cols: number, rows: number): void {
+    this.glyphAdvanceCache.clear();
     const cssWidth = cols * this.metrics.width;
     const cssHeight = rows * this.metrics.height;
 
@@ -627,8 +639,11 @@ export class CanvasRenderer {
         : String.fromCodePoint(cell.codepoint || 32);
     const isAscii = cell.codepoint >= 0x20 && cell.codepoint <= 0x7e;
     const cursorOwned = cursorColumn === x;
-    const joinable =
-      this.fontLigatures && cell.width === 1 && cell.grapheme_len === 0 && isAscii && !cursorOwned;
+    const advance =
+      this.fontLigatures && !cursorOwned && cell.width === 1 && cell.grapheme_len === 0 && isAscii
+        ? this.getGlyphAdvance(font, text)
+        : null;
+    const joinable = advance !== null && Number.isFinite(advance);
     const regexHovered = this.isInHoveredLinkRange(x, y);
     const alpha = cell.flags & CellFlags.FAINT ? 0.5 : 1;
 
@@ -653,7 +668,35 @@ export class CanvasRenderer {
       isAscii ? 'ascii' : `fallback:${cell.codepoint}`,
     ].join('|');
 
-    return { cell, column: x, text, font, fillStyle, alpha, styleKey, joinable };
+    return { cell, column: x, text, font, fillStyle, alpha, styleKey, joinable, advance };
+  }
+
+  private getGlyphAdvance(font: string, text: string): number | null {
+    const key = `${font}\0${text}`;
+    const cached = this.glyphAdvanceCache.get(key);
+    if (cached !== undefined) return cached;
+
+    this.ctx.font = font;
+    const width = this.ctx.measureText(text).width;
+    this.frameStats.textMeasurements++;
+    if (!Number.isFinite(width) || width <= 0) return null;
+
+    if (this.glyphAdvanceCache.size >= MAX_GLYPH_ADVANCE_CACHE_ENTRIES) {
+      this.glyphAdvanceCache.clear();
+    }
+    this.glyphAdvanceCache.set(key, width);
+    return width;
+  }
+
+  private measureRunWidth(font: string, text: string): number | null {
+    this.ctx.font = font;
+    const width = this.ctx.measureText(text).width;
+    this.frameStats.textMeasurements++;
+    return Number.isFinite(width) && width > 0 ? width : null;
+  }
+
+  private advancesMatch(left: number | null, right: number | null): boolean {
+    return left !== null && right !== null && Math.abs(left - right) <= ADVANCE_EPSILON;
   }
 
   private buildTextRuns(cells: TextRunCell[]): TextRun[] {
@@ -667,20 +710,32 @@ export class CanvasRenderer {
         previous !== undefined &&
         previousLastCell?.joinable &&
         previous.cells[0].styleKey === prepared.styleKey &&
-        previous.endColumn === prepared.column;
+        previous.endColumn === prepared.column &&
+        previous.cells.length < MAX_SHAPED_RUN_CELLS &&
+        this.advancesMatch(previousLastCell.advance, prepared.advance);
 
       if (canJoin) {
-        previous.cells.push(prepared);
-        previous.endColumn = prepared.column + prepared.cell.width;
-        previous.text += prepared.text;
-      } else {
-        runs.push({
-          cells: [prepared],
-          startColumn: prepared.column,
-          endColumn: prepared.column + prepared.cell.width,
-          text: prepared.text,
-        });
+        const candidateText = previous.text + prepared.text;
+        const measuredWidth = this.measureRunWidth(prepared.font, candidateText);
+        const expectedWidth = previous.expectedWidth + (prepared.advance ?? 0);
+        if (measuredWidth !== null && Math.abs(measuredWidth - expectedWidth) <= ADVANCE_EPSILON) {
+          previous.cells.push(prepared);
+          previous.endColumn = prepared.column + prepared.cell.width;
+          previous.text = candidateText;
+          previous.measuredWidth = measuredWidth;
+          previous.expectedWidth = expectedWidth;
+          continue;
+        }
       }
+
+      runs.push({
+        cells: [prepared],
+        startColumn: prepared.column,
+        endColumn: prepared.column + prepared.cell.width,
+        text: prepared.text,
+        measuredWidth: prepared.advance,
+        expectedWidth: prepared.advance ?? 0,
+      });
     }
 
     return runs;
@@ -701,7 +756,13 @@ export class CanvasRenderer {
     this.ctx.font = first.font;
     this.ctx.fillStyle = first.fillStyle;
     this.ctx.globalAlpha = first.alpha;
-    this.ctx.fillText(run.text, startX, y * this.metrics.height + this.metrics.baseline);
+    if (run.cells.length > 1 && run.measuredWidth !== null) {
+      this.ctx.translate(startX, 0);
+      this.ctx.scale(ownedWidth / run.measuredWidth, 1);
+      this.ctx.fillText(run.text, 0, y * this.metrics.height + this.metrics.baseline);
+    } else {
+      this.ctx.fillText(run.text, startX, y * this.metrics.height + this.metrics.baseline);
+    }
     this.ctx.restore();
   }
 
@@ -807,9 +868,13 @@ export class CanvasRenderer {
         startColumn: x,
         endColumn: x + cell.width,
         text: prepared.text,
+        measuredWidth: prepared.advance,
+        expectedWidth: prepared.advance ?? 0,
       },
       y
     );
+    this.frameStats.textRuns++;
+    this.frameStats.maxRunCells = Math.max(this.frameStats.maxRunCells, 1);
     this.renderCellDecorations(prepared, y);
   }
 
@@ -937,6 +1002,7 @@ export class CanvasRenderer {
    */
   public setFontSize(size: number): void {
     this.fontSize = size;
+    this.glyphAdvanceCache.clear();
     this.metrics = this.measureFont();
     this.requestRender();
   }
@@ -946,6 +1012,7 @@ export class CanvasRenderer {
    */
   public setFontFamily(family: string): void {
     this.fontFamily = family;
+    this.glyphAdvanceCache.clear();
     this.metrics = this.measureFont();
     this.requestRender();
   }

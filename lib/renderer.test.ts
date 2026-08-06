@@ -163,6 +163,7 @@ describe('CanvasRenderer', () => {
       expect(harness.renderer.getFrameStats()).toEqual({
         renderedRows: 1,
         textRuns: 1,
+        textMeasurements: 4,
         shapedRuns: 1,
         shapedCells: 3,
         maxRunCells: 3,
@@ -179,6 +180,7 @@ describe('CanvasRenderer', () => {
       expect(harness.fillTexts.map(([text]) => text)).toEqual(['!', '=', '=']);
       expect(harness.renderer.getFrameStats()).toMatchObject({
         textRuns: 3,
+        textMeasurements: 0,
         shapedRuns: 0,
         shapedCells: 0,
         maxRunCells: 1,
@@ -258,7 +260,7 @@ describe('CanvasRenderer', () => {
         harness.renderer.charWidth,
         harness.renderer.charHeight,
       ]);
-      expect(harness.renderer.getFrameStats()).toMatchObject({ textRuns: 3, shapedRuns: 0 });
+      expect(harness.renderer.getFrameStats()).toMatchObject({ textRuns: 4, shapedRuns: 0 });
       harness.renderer.dispose();
     });
 
@@ -326,6 +328,114 @@ describe('CanvasRenderer', () => {
       harness.renderer.setFontLigatures(true);
 
       expect(harness.requestedFullFrames).toEqual([true, true]);
+      harness.renderer.dispose();
+    });
+
+    test('splits proportional and fallback ASCII advances while preserving a later safe run', () => {
+      const harness = createRenderHarness([
+        [makeCell('f'), makeCell('i'), makeCell('~'), makeCell('='), makeCell('>')],
+      ]);
+      const context = (harness.renderer as unknown as { ctx: CanvasRenderingContext2D }).ctx;
+      context.measureText = ((text: string) => ({
+        width: text === 'f' ? 5 : text === 'i' ? 4 : text === '~' ? 9 : text.length * 8,
+      })) as CanvasRenderingContext2D['measureText'];
+
+      harness.renderer.render(harness.buffer, true);
+
+      expect(harness.fillTexts.map(([text]) => text)).toEqual(['f', 'i', '~', '=>']);
+      expect(harness.renderer.getFrameStats()).toMatchObject({
+        textRuns: 4,
+        shapedRuns: 1,
+        shapedCells: 2,
+      });
+      harness.renderer.dispose();
+    });
+
+    test('rejects a whole-run advance mismatch without suppressing a later compatible prefix', () => {
+      const harness = createRenderHarness([[makeCell('a'), makeCell('b'), makeCell('c')]]);
+      const context = (harness.renderer as unknown as { ctx: CanvasRenderingContext2D }).ctx;
+      context.measureText = ((text: string) => ({
+        width: text === 'ab' ? 17 : text.length * 8,
+      })) as CanvasRenderingContext2D['measureText'];
+
+      harness.renderer.render(harness.buffer, true);
+
+      expect(harness.fillTexts.map(([text]) => text)).toEqual(['a', 'bc']);
+      expect(harness.renderer.getFrameStats()).toMatchObject({
+        textRuns: 2,
+        shapedRuns: 1,
+        shapedCells: 2,
+      });
+      harness.renderer.dispose();
+    });
+
+    test('maps a fixed-advance shaped run exactly onto its Ghostty-owned span', () => {
+      const harness = createRenderHarness([[makeCell('='), makeCell('>')]]);
+      const context = (harness.renderer as unknown as { ctx: CanvasRenderingContext2D }).ctx;
+      const translations: Array<[number, number]> = [];
+      const scales: Array<[number, number]> = [];
+      context.measureText = ((text: string) => ({
+        width: text.length * 7.5,
+      })) as CanvasRenderingContext2D['measureText'];
+      context.translate = ((x: number, y: number) => {
+        translations.push([x, y]);
+      }) as CanvasRenderingContext2D['translate'];
+      context.scale = ((x: number, y: number) => {
+        scales.push([x, y]);
+      }) as CanvasRenderingContext2D['scale'];
+
+      harness.renderer.render(harness.buffer, true);
+
+      expect(translations).toContainEqual([0, 0]);
+      expect(scales).toContainEqual([(harness.renderer.charWidth * 2) / 15, 1]);
+      expect(harness.clips).toContainEqual([
+        0,
+        0,
+        harness.renderer.charWidth * 2,
+        harness.renderer.charHeight,
+      ]);
+      harness.renderer.dispose();
+    });
+
+    test('bounds shaped runs and measurements independently of line length', () => {
+      const line = Array.from({ length: 130 }, () => makeCell('='));
+      const harness = createRenderHarness([line]);
+
+      harness.renderer.render(harness.buffer, true);
+
+      expect(harness.fillTexts.map(([text]) => text.length)).toEqual([64, 64, 2]);
+      expect(harness.renderer.getFrameStats()).toMatchObject({
+        textRuns: 3,
+        shapedRuns: 3,
+        shapedCells: 130,
+        maxRunCells: 64,
+        textMeasurements: 128,
+      });
+      harness.renderer.dispose();
+    });
+
+    test('caches glyph advances and invalidates them on geometry-affecting changes', () => {
+      const harness = createRenderHarness([[makeCell('a'), makeCell('a')]]);
+      const context = (harness.renderer as unknown as { ctx: CanvasRenderingContext2D }).ctx;
+      let measurements = 0;
+      context.measureText = ((text: string) => {
+        measurements++;
+        return { width: text.length * 8 };
+      }) as CanvasRenderingContext2D['measureText'];
+
+      harness.renderer.render(harness.buffer, true);
+      expect(measurements).toBe(2);
+
+      harness.renderer.render(harness.buffer, true);
+      expect(measurements).toBe(3);
+
+      harness.renderer.resize(2, 1);
+      harness.renderer.render(harness.buffer, true);
+      expect(measurements).toBe(5);
+
+      harness.renderer.setFontFamily('test-monospace');
+      harness.renderer.render(harness.buffer, true);
+      expect(measurements).toBe(7);
       harness.renderer.dispose();
     });
   });
