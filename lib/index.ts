@@ -102,6 +102,8 @@ export type { TerminalRenderStats } from './terminal';
 export { Terminal } from './terminal';
 export type {
   Cursor,
+  CursorBlink,
+  CursorStyle,
   GhosttyCell,
   IBufferCellPosition,
   ILink,

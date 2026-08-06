@@ -2485,7 +2485,7 @@ describe('Options Proxy handleOptionChange', () => {
     }
   });
 
-  test('changing cursorStyle updates renderer', async () => {
+  test('changing cursorStyle updates parser-owned effective state', async () => {
     if (!container) return;
 
     const term = await createIsolatedTerminal({ cursorStyle: 'block' });
@@ -2500,17 +2500,12 @@ describe('Options Proxy handleOptionChange', () => {
     // Verify option was updated
     expect(term.options.cursorStyle).toBe('underline');
 
-    // Access renderer to verify it was updated
-    // @ts-ignore - accessing private for test
-    const renderer = term.renderer;
-    expect(renderer).toBeDefined();
-    // @ts-ignore - accessing private for test
-    expect(renderer.cursorStyle).toBe('underline');
+    expect(term.wasmTerm!.getCursor()).toMatchObject({ style: 'underline', default: true });
 
     term.dispose();
   });
 
-  test('changing cursorBlink starts/stops blink timer', async () => {
+  test('changing cursorBlink updates parser-owned effective state', async () => {
     if (!container) return;
 
     const term = await createIsolatedTerminal({ cursorBlink: false });
@@ -2523,18 +2518,12 @@ describe('Options Proxy handleOptionChange', () => {
     term.options.cursorBlink = true;
     expect(term.options.cursorBlink).toBe(true);
 
-    // @ts-ignore - accessing private for test
-    const renderer = term.renderer;
-    // @ts-ignore - accessing private for test
-    expect(renderer.cursorBlink).toBe(true);
-    // @ts-ignore - accessing private for test
-    expect(renderer.cursorBlinkInterval).toBeDefined();
+    expect(term.wasmTerm!.getCursor()).toMatchObject({ blinking: true, default: true });
 
     // Disable cursor blink
     term.options.cursorBlink = false;
     expect(term.options.cursorBlink).toBe(false);
-    // @ts-ignore - accessing private for test
-    expect(renderer.cursorBlink).toBe(false);
+    expect(term.wasmTerm!.getCursor()).toMatchObject({ blinking: false, default: true });
 
     term.dispose();
   });

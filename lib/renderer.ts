@@ -14,6 +14,7 @@ import type { ITheme } from './interfaces';
 import { ANSI_THEME_KEYS, DEFAULT_THEME, normalizeTheme, parsePaletteColor } from './palette';
 import type { SelectionManager } from './selection-manager';
 import type {
+  CursorStyle,
   GhosttyCell,
   ILink,
   RenderStateColors,
@@ -52,8 +53,6 @@ export interface IScrollbackProvider {
 export interface RendererOptions {
   fontSize?: number; // Default: 15
   fontFamily?: string; // Default: 'monospace'
-  cursorStyle?: 'block' | 'underline' | 'bar'; // Default: 'block'
-  cursorBlink?: boolean; // Default: false
   theme?: ITheme;
   devicePixelRatio?: number; // Default: window.devicePixelRatio
   requestRender?: () => void;
@@ -79,7 +78,6 @@ export class CanvasRenderer {
   private ctx: CanvasRenderingContext2D;
   private fontSize: number;
   private fontFamily: string;
-  private cursorStyle: 'block' | 'underline' | 'bar';
   private cursorBlink: boolean;
   private theme: Required<ITheme>;
   private effectiveColors: RenderStateColors;
@@ -92,6 +90,7 @@ export class CanvasRenderer {
   private cursorVisible: boolean = true;
   private cursorBlinkInterval?: number;
   private lastCursorPosition: { x: number; y: number } = { x: 0, y: 0 };
+  private lastCursorState?: RenderStateCursor;
 
   // Viewport tracking (for scrolling)
   private lastViewportY: number = 0;
@@ -135,8 +134,7 @@ export class CanvasRenderer {
     // Apply options
     this.fontSize = options.fontSize ?? 15;
     this.fontFamily = options.fontFamily ?? 'monospace';
-    this.cursorStyle = options.cursorStyle ?? 'block';
-    this.cursorBlink = options.cursorBlink ?? false;
+    this.cursorBlink = false;
     this.theme = normalizeTheme(options.theme);
     this.effectiveColors = {
       foreground: themeRgb(this.theme.foreground),
@@ -148,11 +146,6 @@ export class CanvasRenderer {
 
     // Measure font metrics
     this.metrics = this.measureFont();
-
-    // Setup cursor blinking if enabled
-    if (this.cursorBlink) {
-      this.startCursorBlink();
-    }
   }
 
   // ==========================================================================
@@ -254,6 +247,7 @@ export class CanvasRenderer {
     // Refresh Ghostty's RenderState exactly once for this Canvas frame.
     const state = buffer.getRenderState();
     const cursor = state.cursor;
+    this.reconcileCursorBlink(cursor.blinking);
     this.effectiveColors = state.colors;
     const dims = state.dimensions;
     const scrollbackLength = scrollbackProvider ? scrollbackProvider.getScrollbackLength() : 0;
@@ -279,27 +273,19 @@ export class CanvasRenderer {
       this.lastViewportY = viewportY;
     }
 
-    // Check if cursor position changed or if blinking (need to redraw cursor line)
+    // Cursor presentation is native state. Repaint only its old/current rows.
     const cursorMoved =
       cursor.x !== this.lastCursorPosition.x || cursor.y !== this.lastCursorPosition.y;
-    if (cursorMoved || this.cursorBlink) {
-      // Mark cursor lines as needing redraw
-      if (!forceAll && !buffer.isRowDirty(cursor.y)) {
-        // Need to redraw cursor line
-        const line = buffer.getLine(cursor.y);
-        if (line) {
-          this.renderLine(line, cursor.y, dims.cols);
-        }
-      }
-      if (cursorMoved && this.lastCursorPosition.y !== cursor.y) {
-        // Also redraw old cursor line if cursor moved to different line
-        if (!forceAll && !buffer.isRowDirty(this.lastCursorPosition.y)) {
-          const line = buffer.getLine(this.lastCursorPosition.y);
-          if (line) {
-            this.renderLine(line, this.lastCursorPosition.y, dims.cols);
-          }
-        }
-      }
+    const cursorPresentationChanged =
+      !this.lastCursorState ||
+      cursor.visible !== this.lastCursorState.visible ||
+      cursor.blinking !== this.lastCursorState.blinking ||
+      cursor.style !== this.lastCursorState.style ||
+      cursor.default !== this.lastCursorState.default;
+    const cursorRows = new Set<number>();
+    if (cursorMoved || cursorPresentationChanged || cursor.blinking) {
+      cursorRows.add(cursor.y);
+      if (cursorMoved || cursorPresentationChanged) cursorRows.add(this.lastCursorPosition.y);
     }
 
     // Check if we need to redraw selection-related lines
@@ -409,7 +395,11 @@ export class CanvasRenderer {
       const needsRender =
         viewportY > 0
           ? true
-          : forceAll || buffer.isRowDirty(y) || selectionRows.has(y) || hyperlinkRows.has(y);
+          : forceAll ||
+            buffer.isRowDirty(y) ||
+            cursorRows.has(y) ||
+            selectionRows.has(y) ||
+            hyperlinkRows.has(y);
 
       if (needsRender) {
         rowsToRender.add(y);
@@ -463,7 +453,7 @@ export class CanvasRenderer {
 
     // Render cursor (only if we're at the bottom, not scrolled)
     if (viewportY === 0 && cursor.visible && this.cursorVisible) {
-      this.renderCursor(cursor.x, cursor.y);
+      this.renderCursor(cursor.x, cursor.y, cursor.style);
     }
 
     // Render scrollbar if scrolled or scrollback exists (with opacity for fade effect)
@@ -473,6 +463,7 @@ export class CanvasRenderer {
 
     // Update last cursor position
     this.lastCursorPosition = { x: cursor.x, y: cursor.y };
+    this.lastCursorState = { ...cursor };
 
     // ALWAYS clear dirty flags after rendering, regardless of forceAll.
     // This is critical - if we don't clear after a full redraw, the dirty
@@ -702,7 +693,7 @@ export class CanvasRenderer {
   /**
    * Render cursor
    */
-  private renderCursor(x: number, y: number): void {
+  private renderCursor(x: number, y: number, style: CursorStyle): void {
     const cursorX = x * this.metrics.width;
     const cursorY = y * this.metrics.height;
 
@@ -712,7 +703,7 @@ export class CanvasRenderer {
       this.effectiveColors.cursor.b
     );
 
-    switch (this.cursorStyle) {
+    switch (style) {
       case 'block':
         // Full cell block
         this.ctx.fillRect(cursorX, cursorY, this.metrics.width, this.metrics.height);
@@ -728,6 +719,17 @@ export class CanvasRenderer {
             this.ctx.restore();
           }
         }
+        break;
+
+      case 'block_hollow':
+        this.ctx.strokeStyle = this.ctx.fillStyle;
+        this.ctx.lineWidth = 1;
+        this.ctx.strokeRect(
+          cursorX + 0.5,
+          cursorY + 0.5,
+          Math.max(0, this.metrics.width - 1),
+          Math.max(0, this.metrics.height - 1)
+        );
         break;
 
       case 'underline':
@@ -769,6 +771,24 @@ export class CanvasRenderer {
     this.cursorVisible = true;
   }
 
+  /** Reconcile animation ownership from the current native RenderState snapshot. */
+  private reconcileCursorBlink(enabled: boolean): void {
+    if (enabled === this.cursorBlink) {
+      if (enabled && !this.renderPaused && this.cursorBlinkInterval === undefined) {
+        this.startCursorBlink();
+      }
+      return;
+    }
+
+    this.cursorBlink = enabled;
+    if (enabled) {
+      this.cursorVisible = true;
+      if (!this.renderPaused) this.startCursorBlink();
+    } else {
+      this.stopCursorBlink();
+    }
+  }
+
   /** Make a blinking cursor visible now and restart its idle cadence. */
   public resetCursorBlink(): void {
     if (!this.cursorBlink || this.renderPaused) return;
@@ -807,28 +827,6 @@ export class CanvasRenderer {
     this.requestRender();
   }
 
-  /**
-   * Update cursor style
-   */
-  public setCursorStyle(style: 'block' | 'underline' | 'bar'): void {
-    this.cursorStyle = style;
-    this.requestRender();
-  }
-
-  /**
-   * Enable/disable cursor blinking
-   */
-  public setCursorBlink(enabled: boolean): void {
-    if (enabled && !this.cursorBlink) {
-      this.cursorBlink = true;
-      if (!this.renderPaused) this.startCursorBlink();
-    } else if (!enabled && this.cursorBlink) {
-      this.cursorBlink = false;
-      this.stopCursorBlink();
-    }
-    this.requestRender();
-  }
-
   /** Suspend or resume cursor presentation timing with terminal rendering. */
   public setRenderPaused(paused: boolean): void {
     if (this.renderPaused === paused) return;
@@ -836,8 +834,6 @@ export class CanvasRenderer {
     this.renderPaused = paused;
     if (paused) {
       this.stopCursorBlink();
-    } else if (this.cursorBlink) {
-      this.startCursorBlink();
     }
   }
 

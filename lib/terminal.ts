@@ -251,10 +251,7 @@ export class Terminal implements ITerminalCore {
 
       case 'cursorBlink':
       case 'cursorStyle':
-        if (this.renderer) {
-          this.renderer.setCursorStyle(this.options.cursorStyle);
-          this.renderer.setCursorBlink(this.options.cursorBlink);
-        }
+        this.applyCursorDefaults();
         break;
 
       case 'fontSize':
@@ -310,7 +307,25 @@ export class Terminal implements ITerminalCore {
    * Convert terminal options to WASM terminal config.
    */
   private buildWasmConfig(): GhosttyTerminalConfig {
-    return themeToTerminalConfig(normalizeTheme(this.options.theme), this.options.scrollback);
+    return {
+      ...themeToTerminalConfig(normalizeTheme(this.options.theme), this.options.scrollback),
+      cursorStyle: this.options.cursorStyle,
+      cursorBlink: this.options.cursorBlink,
+    };
+  }
+
+  /** Apply parser-owned cursor defaults without replacing terminal or Canvas state. */
+  private applyCursorDefaults(): void {
+    if (!this.wasmTerm) return;
+    if (
+      !this.wasmTerm.setCursorConfig({
+        cursorStyle: this.options.cursorStyle,
+        cursorBlink: this.options.cursorBlink,
+      })
+    ) {
+      throw new Error('Failed to apply terminal cursor defaults');
+    }
+    this.requestRender();
   }
 
   // ==========================================================================
@@ -408,8 +423,6 @@ export class Terminal implements ITerminalCore {
       this.renderer = new CanvasRenderer(this.canvas, {
         fontSize: this.options.fontSize,
         fontFamily: this.options.fontFamily,
-        cursorStyle: this.options.cursorStyle,
-        cursorBlink: this.options.cursorBlink,
         theme: this.options.theme,
         requestRender: () => this.requestRender(),
       });

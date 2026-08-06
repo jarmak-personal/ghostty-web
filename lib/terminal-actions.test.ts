@@ -292,7 +292,7 @@ describe('host-owned terminal actions', () => {
     for (let line = 0; line < 8; line++) terminal.writeln(`line-${line}`);
     terminal.selectAll();
     terminal.scrollToTop();
-    expect(terminal.wasmTerm!.getCursor().visible).toBe(0);
+    expect(terminal.wasmTerm!.getCursor().visible).toBe(false);
     expect(terminal.hasBracketedPaste()).toBe(true);
 
     const ptyInput: string[] = [];
@@ -304,7 +304,7 @@ describe('host-owned terminal actions', () => {
     expect(terminal.textarea).toBe(textarea);
     expect(terminal.wasmTerm).not.toBe(oldParser);
     expect(terminal.wasmTerm!.getScrollbackLength()).toBe(0);
-    expect(terminal.wasmTerm!.getCursor()).toMatchObject({ x: 0, y: 0, visible: 1 });
+    expect(terminal.wasmTerm!.getCursor()).toMatchObject({ x: 0, y: 0, visible: true });
     expect(terminal.wasmTerm!.getLine(0)?.every((cell) => cell.codepoint === 0)).toBe(true);
     expect(terminal.hasBracketedPaste()).toBe(false);
     expect(terminal.hasSelection()).toBe(false);

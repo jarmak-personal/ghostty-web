@@ -73,6 +73,11 @@ term.onData((data) => websocket.send(data));
 websocket.onmessage = (e) => term.write(e.data);
 ```
 
+Cursor options establish defaults while applications remain free to use `DECSCUSR`. In addition
+to `block`, `bar`, and `underline`, `cursorStyle` accepts `block_hollow`. Set `cursorBlink` to
+`'terminal'` to follow DEC cursor-blinking mode, or use `true`/`false` for an explicit blinking or
+steady default. Changing either option after `open()` updates the retained terminal in place.
+
 The hvir compatibility artifact also exposes typed events sourced directly from Ghostty's parser:
 
 ```typescript
