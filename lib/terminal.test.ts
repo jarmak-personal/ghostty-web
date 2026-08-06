@@ -2628,6 +2628,71 @@ describe('Options Proxy handleOptionChange', () => {
     term.dispose();
   });
 
+  test('defaults ligatures on and normalizes non-false runtime values to on', async () => {
+    const term = await createIsolatedTerminal();
+    expect(term.options.fontLigatures).toBe(true);
+
+    term.options.fontLigatures = false;
+    expect(term.options.fontLigatures).toBe(false);
+
+    (term.options as unknown as { fontLigatures: unknown }).fontLigatures = 'invalid';
+    expect(term.options.fontLigatures).toBe(true);
+    term.dispose();
+  });
+
+  test('changes ligatures live without replacing terminal, Canvas, buffer, or geometry', async () => {
+    if (!container) return;
+
+    const term = await createIsolatedTerminal({ cols: 8, rows: 3 });
+    term.setRenderPaused(true);
+    term.open(container);
+    term.write('!==');
+    const wasmTerm = term.wasmTerm;
+    const canvas = term.renderer!.getCanvas();
+    const framesBefore = term.getRenderStats().renderFrames;
+
+    term.options.fontLigatures = false;
+
+    expect(term.options.fontLigatures).toBe(false);
+    expect((term.renderer as unknown as { fontLigatures: boolean }).fontLigatures).toBe(false);
+    expect(term.wasmTerm).toBe(wasmTerm);
+    expect(term.renderer!.getCanvas()).toBe(canvas);
+    expect(
+      term
+        .wasmTerm!.getLine(0)
+        ?.slice(0, 3)
+        .map((cell) => cell.codepoint)
+    ).toEqual([33, 61, 61]);
+    expect({ cols: term.cols, rows: term.rows }).toEqual({ cols: 8, rows: 3 });
+    expect(term.getRenderStats()).toMatchObject({
+      renderFrames: framesBefore,
+      paused: true,
+      pendingFrame: false,
+    });
+    expect((term as unknown as { forceFullRender: boolean }).forceFullRender).toBe(true);
+
+    term.dispose();
+    expect(term.getRenderStats().pendingFrame).toBe(false);
+  });
+
+  test('retains exact selection text and cell boundaries with ligatures enabled', async () => {
+    if (!container) return;
+
+    const term = await createIsolatedTerminal({ cols: 8, rows: 2, fontLigatures: true });
+    term.setRenderPaused(true);
+    term.open(container);
+    term.write('!==界');
+
+    term.select(1, 0, 1);
+    expect(term.getSelection()).toBe('=');
+    expect(term.getSelectionPosition()).toEqual({
+      start: { x: 1, y: 0 },
+      end: { x: 1, y: 0 },
+    });
+
+    term.dispose();
+  });
+
   test('font change clears active selection', async () => {
     if (!container) return;
 

@@ -78,6 +78,12 @@ to `block`, `bar`, and `underline`, `cursorStyle` accepts `block_hollow`. Set `c
 `'terminal'` to follow DEC cursor-blinking mode, or use `true`/`false` for an explicit blinking or
 steady default. Changing either option after `open()` updates the retained terminal in place.
 
+`fontLigatures` defaults to `true`. Compatible same-style ASCII cells are shaped as clipped Canvas
+runs without changing Ghostty's cell grid, while Unicode graphemes, wide and fallback-sensitive
+glyphs, selection, cursor, hyperlinks, and rendition boundaries remain independently owned. Set the
+option to `false` for isolated cell glyph draws. Changing it after `open()` repaints the retained
+Canvas without replacing terminal state, scrollback, or PTY geometry.
+
 The hvir compatibility artifact also exposes typed events sourced directly from Ghostty's parser:
 
 ```typescript
@@ -101,7 +107,8 @@ The Canvas scheduler also honors Ghostty's parser-owned synchronized-output mode
 2026). Parsing and terminal responses continue while presentation is deferred; completion produces
 one full frame, and abandoned synchronization is released after Ghostty's one-second safety timeout.
 `getRenderStats()` reports the live synchronized-output state and timeout-recovery count without
-retaining terminal content.
+retaining terminal content. Its bounded `lastFrame` counters report rendered rows, text and shaped
+runs, shaped cells, and the largest run in cells for presentation-capacity diagnostics.
 
 Embedding applications that own terminal menu presentation can disable ghostty-web's legacy
 hidden-textarea bridge at construction time. The host remains responsible for clipboard access and

@@ -126,6 +126,13 @@ describe('hvir presentation scheduler', () => {
         cursorVisible: true,
         synchronizedOutput: false,
         synchronizedOutputRecoveries: 0,
+        lastFrame: {
+          renderedRows: 0,
+          textRuns: 0,
+          shapedRuns: 0,
+          shapedCells: 0,
+          maxRunCells: 0,
+        },
       });
 
       frames.runNext();

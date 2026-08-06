@@ -7,7 +7,96 @@
  */
 
 import { describe, expect, test } from 'bun:test';
-import { DEFAULT_THEME } from './renderer';
+import { CanvasRenderer, DEFAULT_THEME, type IRenderable } from './renderer';
+import type { SelectionManager } from './selection-manager';
+import { CellFlags, DirtyState, type GhosttyCell, type RenderStateSnapshot } from './types';
+
+function makeCell(character: string, overrides: Partial<GhosttyCell> = {}): GhosttyCell {
+  return {
+    codepoint: character.codePointAt(0) ?? 0,
+    fg_r: 212,
+    fg_g: 212,
+    fg_b: 212,
+    bg_r: 30,
+    bg_g: 30,
+    bg_b: 30,
+    flags: 0,
+    width: 1,
+    hyperlink_id: 0,
+    grapheme_len: 0,
+    ...overrides,
+  };
+}
+
+function makeState(cols: number, rows: number): RenderStateSnapshot {
+  return {
+    dirty: DirtyState.FULL,
+    cursor: {
+      x: 0,
+      y: 0,
+      viewportX: 0,
+      viewportY: 0,
+      visible: false,
+      blinking: false,
+      style: 'block',
+      default: true,
+    },
+    colors: {
+      background: { r: 30, g: 30, b: 30 },
+      foreground: { r: 212, g: 212, b: 212 },
+      cursor: { r: 255, g: 255, b: 255 },
+      palette: Array.from({ length: 16 }, () => ({ r: 0, g: 0, b: 0 })),
+    },
+    dimensions: { cols, rows },
+  };
+}
+
+function createRenderHarness(
+  lines: GhosttyCell[][],
+  options: { fontLigatures?: boolean; cursor?: Partial<RenderStateSnapshot['cursor']> } = {}
+): {
+  renderer: CanvasRenderer;
+  buffer: IRenderable;
+  state: RenderStateSnapshot;
+  fillTexts: Array<[string, number, number]>;
+  clips: Array<[number, number, number, number]>;
+  requestedFullFrames: boolean[];
+} {
+  const canvas = document.createElement('canvas');
+  const requestedFullFrames: boolean[] = [];
+  const renderer = new CanvasRenderer(canvas, {
+    devicePixelRatio: 1,
+    fontLigatures: options.fontLigatures,
+    requestRender: (forceAll) => requestedFullFrames.push(forceAll ?? false),
+  });
+  const cols = Math.max(1, ...lines.map((line) => line.length));
+  const state = makeState(cols, lines.length);
+  state.cursor = { ...state.cursor, ...options.cursor };
+  let dirtyRows = new Set(lines.map((_, row) => row));
+  const buffer: IRenderable = {
+    getLine: (row) => lines[row] ?? null,
+    getRenderState: () => state,
+    getDimensions: () => state.dimensions,
+    isRowDirty: (row) => dirtyRows.has(row),
+    clearDirty: () => {
+      dirtyRows = new Set();
+      state.dirty = DirtyState.NONE;
+    },
+  };
+
+  renderer.resize(cols, lines.length);
+  const context = (renderer as unknown as { ctx: CanvasRenderingContext2D }).ctx;
+  const fillTexts: Array<[string, number, number]> = [];
+  const clips: Array<[number, number, number, number]> = [];
+  context.fillText = ((text: string, x: number, y: number) => {
+    fillTexts.push([text, x, y]);
+  }) as CanvasRenderingContext2D['fillText'];
+  context.rect = ((x: number, y: number, width: number, height: number) => {
+    clips.push([x, y, width, height]);
+  }) as CanvasRenderingContext2D['rect'];
+
+  return { renderer, buffer, state, fillTexts, clips, requestedFullFrames };
+}
 
 describe('CanvasRenderer', () => {
   describe('Default Theme', () => {
@@ -59,6 +148,185 @@ describe('CanvasRenderer', () => {
       expect(DEFAULT_THEME.foreground).toMatch(hexPattern);
       expect(DEFAULT_THEME.background).toMatch(hexPattern);
       expect(DEFAULT_THEME.cursor).toMatch(hexPattern);
+    });
+  });
+
+  describe('bounded shaped line runs', () => {
+    test('shapes compatible ASCII cells in one clipped owned span by default', () => {
+      const harness = createRenderHarness([[makeCell('!'), makeCell('='), makeCell('=')]]);
+      harness.renderer.render(harness.buffer, true);
+
+      expect(harness.fillTexts).toEqual([['!==', 0, harness.renderer.getMetrics().baseline]]);
+      expect(harness.clips).toEqual([
+        [0, 0, harness.renderer.charWidth * 3, harness.renderer.charHeight],
+      ]);
+      expect(harness.renderer.getFrameStats()).toEqual({
+        renderedRows: 1,
+        textRuns: 1,
+        shapedRuns: 1,
+        shapedCells: 3,
+        maxRunCells: 3,
+      });
+      harness.renderer.dispose();
+    });
+
+    test('retains isolated cell glyph draws when ligatures are disabled', () => {
+      const harness = createRenderHarness([[makeCell('!'), makeCell('='), makeCell('=')]], {
+        fontLigatures: false,
+      });
+      harness.renderer.render(harness.buffer, true);
+
+      expect(harness.fillTexts.map(([text]) => text)).toEqual(['!', '=', '=']);
+      expect(harness.renderer.getFrameStats()).toMatchObject({
+        textRuns: 3,
+        shapedRuns: 0,
+        shapedCells: 0,
+        maxRunCells: 1,
+      });
+      harness.renderer.dispose();
+    });
+
+    test('splits at rendition, color, inverse, decoration, faint, and hyperlink boundaries', () => {
+      const boundaries: Array<[string, GhosttyCell]> = [
+        ['bold', makeCell('b', { flags: CellFlags.BOLD })],
+        ['italic', makeCell('b', { flags: CellFlags.ITALIC })],
+        ['underline', makeCell('b', { flags: CellFlags.UNDERLINE })],
+        ['strikethrough', makeCell('b', { flags: CellFlags.STRIKETHROUGH })],
+        ['inverse', makeCell('b', { flags: CellFlags.INVERSE })],
+        ['faint', makeCell('b', { flags: CellFlags.FAINT })],
+        ['foreground', makeCell('b', { fg_r: 1 })],
+        ['background', makeCell('b', { bg_r: 1 })],
+        ['hyperlink', makeCell('b', { hyperlink_id: 7 })],
+      ];
+
+      for (const [name, boundary] of boundaries) {
+        const harness = createRenderHarness([[makeCell('a'), boundary]]);
+        harness.renderer.render(harness.buffer, true);
+        expect(
+          harness.fillTexts.map(([text]) => text),
+          name
+        ).toEqual(['a', 'b']);
+        harness.renderer.dispose();
+      }
+    });
+
+    test('isolates wide, grapheme, emoji, box-drawing, and fallback-sensitive glyphs', () => {
+      const line = [
+        makeCell('a'),
+        makeCell('界', { width: 2 }),
+        makeCell(' ', { width: 0 }),
+        makeCell('e', { grapheme_len: 1 }),
+        makeCell('😀', { width: 2 }),
+        makeCell(' ', { width: 0 }),
+        makeCell('─'),
+        makeCell('\ue0b0'),
+        makeCell('b'),
+      ];
+      const harness = createRenderHarness([line]);
+      harness.buffer.getGraphemeString = (_row, column) => (column === 3 ? 'e\u0301' : ' ');
+      harness.renderer.render(harness.buffer, true);
+
+      expect(harness.fillTexts.map(([text]) => text)).toEqual([
+        'a',
+        '界',
+        'e\u0301',
+        '😀',
+        '─',
+        '\ue0b0',
+        'b',
+      ]);
+      expect(harness.renderer.getFrameStats().maxRunCells).toBe(1);
+      harness.renderer.dispose();
+    });
+
+    test('splits cursor ownership without changing its exact cell geometry', () => {
+      const harness = createRenderHarness([[makeCell('a'), makeCell('b'), makeCell('c')]], {
+        cursor: { x: 1, visible: true, style: 'block' },
+      });
+      const context = (harness.renderer as unknown as { ctx: CanvasRenderingContext2D }).ctx;
+      const cursorFills: Array<[number, number, number, number]> = [];
+      context.fillRect = ((x: number, y: number, width: number, height: number) => {
+        cursorFills.push([x, y, width, height]);
+      }) as CanvasRenderingContext2D['fillRect'];
+
+      harness.renderer.render(harness.buffer, true);
+
+      expect(harness.fillTexts.map(([text]) => text)).toEqual(['a', 'b', 'c', 'b']);
+      expect(cursorFills).toContainEqual([
+        harness.renderer.charWidth,
+        0,
+        harness.renderer.charWidth,
+        harness.renderer.charHeight,
+      ]);
+      expect(harness.renderer.getFrameStats()).toMatchObject({ textRuns: 3, shapedRuns: 0 });
+      harness.renderer.dispose();
+    });
+
+    test('splits selection and hovered regex-link boundaries at exact cells', () => {
+      const harness = createRenderHarness([
+        [makeCell('a'), makeCell('b'), makeCell('c'), makeCell('d')],
+      ]);
+      const selection = {
+        hasSelection: () => true,
+        getSelectionCoords: () => ({ startCol: 1, startRow: 0, endCol: 1, endRow: 0 }),
+        getDirtySelectionRows: () => new Set<number>(),
+        clearDirtySelectionRows: () => {},
+      } as unknown as SelectionManager;
+      harness.renderer.setSelectionManager(selection);
+      harness.renderer.setHoveredLinkRange({ startX: 2, startY: 0, endX: 2, endY: 0 });
+      harness.renderer.render(harness.buffer, true);
+
+      expect(harness.fillTexts.map(([text]) => text)).toEqual(['a', 'b', 'c', 'd']);
+      harness.renderer.dispose();
+    });
+
+    test('uses scrollback-owned graphemes instead of screen coordinates', () => {
+      const harness = createRenderHarness([[makeCell('x', { grapheme_len: 1 })]]);
+      const scrollbackProvider = {
+        getScrollbackLength: () => 1,
+        getScrollbackLine: () => [makeCell('e', { grapheme_len: 1 })],
+        getScrollbackGraphemeString: (offset: number, col: number) => `${offset}:${col}:e\u0301`,
+      };
+
+      harness.renderer.render(harness.buffer, true, 1, scrollbackProvider);
+
+      expect(harness.fillTexts.map(([text]) => text)).toEqual(['0:0:e\u0301']);
+      harness.renderer.dispose();
+    });
+
+    test('limits partial updates to dirty rows and their established overflow neighbors', () => {
+      const lines = Array.from({ length: 7 }, (_, row) => [makeCell(String(row))]);
+      const harness = createRenderHarness(lines);
+      const requestedRows: number[] = [];
+      let dirtyRow = -1;
+      harness.buffer.getLine = (row) => {
+        requestedRows.push(row);
+        return lines[row] ?? null;
+      };
+      harness.buffer.isRowDirty = (row) => row === dirtyRow;
+
+      harness.renderer.render(harness.buffer, true);
+      requestedRows.length = 0;
+      harness.fillTexts.length = 0;
+      dirtyRow = 3;
+      harness.state.dirty = DirtyState.PARTIAL;
+      harness.renderer.render(harness.buffer);
+
+      expect(requestedRows).toEqual([2, 3, 4]);
+      expect(harness.fillTexts.map(([text]) => text)).toEqual(['2', '3', '4']);
+      expect(harness.renderer.getFrameStats()).toMatchObject({ renderedRows: 3, textRuns: 3 });
+      harness.renderer.dispose();
+    });
+
+    test('requests one full repaint when the live ligatures mode changes', () => {
+      const harness = createRenderHarness([[makeCell('a'), makeCell('b')]]);
+
+      harness.renderer.setFontLigatures(false);
+      harness.renderer.setFontLigatures(false);
+      harness.renderer.setFontLigatures(true);
+
+      expect(harness.requestedFullFrames).toEqual([true, true]);
+      harness.renderer.dispose();
     });
   });
 });

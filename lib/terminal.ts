@@ -41,7 +41,7 @@ import { normalizeTheme, themeToTerminalConfig } from './palette';
 import { encodePaste } from './paste';
 import { OSC8LinkProvider } from './providers/osc8-link-provider';
 import { UrlRegexProvider } from './providers/url-regex-provider';
-import { CanvasRenderer } from './renderer';
+import { CanvasRenderer, type RendererFrameStats } from './renderer';
 import {
   RetainedBufferExtractionError,
   RetainedBufferExtractionManager,
@@ -70,6 +70,7 @@ export interface TerminalRenderStats {
   cursorVisible: boolean;
   synchronizedOutput: boolean;
   synchronizedOutputRecoveries: number;
+  lastFrame: RendererFrameStats;
 }
 
 /** Keep the web scheduler aligned with Ghostty Termio's bounded recovery. */
@@ -194,6 +195,7 @@ export class Terminal implements ITerminalCore {
       scrollback: options.scrollback ?? 10000,
       fontSize: options.fontSize ?? 15,
       fontFamily: options.fontFamily ?? 'monospace',
+      fontLigatures: options.fontLigatures !== false,
       allowTransparency: options.allowTransparency ?? false,
       convertEol: options.convertEol ?? false,
       disableStdin: options.disableStdin ?? false,
@@ -211,6 +213,13 @@ export class Terminal implements ITerminalCore {
           const theme = normalizeTheme(value);
           if (this.isOpen) this.applyTheme(theme);
           target[prop] = theme;
+          return true;
+        }
+
+        if (prop === 'fontLigatures') {
+          const enabled = value !== false;
+          target[prop] = enabled;
+          if (this.isOpen) this.handleOptionChange(prop, enabled, oldValue);
           return true;
         }
 
@@ -266,6 +275,10 @@ export class Terminal implements ITerminalCore {
           this.renderer.setFontFamily(this.options.fontFamily);
           this.handleFontChange();
         }
+        break;
+
+      case 'fontLigatures':
+        this.renderer?.setFontLigatures(this.options.fontLigatures);
         break;
 
       case 'cols':
@@ -423,8 +436,9 @@ export class Terminal implements ITerminalCore {
       this.renderer = new CanvasRenderer(this.canvas, {
         fontSize: this.options.fontSize,
         fontFamily: this.options.fontFamily,
+        fontLigatures: this.options.fontLigatures,
         theme: this.options.theme,
-        requestRender: () => this.requestRender(),
+        requestRender: (forceAll = false) => this.requestRender(forceAll),
       });
       this.renderer.setRenderPaused(this.renderPaused);
 
@@ -1251,6 +1265,13 @@ export class Terminal implements ITerminalCore {
 
   /** Inspect parser and presentation activity for diagnostics. */
   public getRenderStats(): TerminalRenderStats {
+    const lastFrame = this.renderer?.getFrameStats?.() ?? {
+      renderedRows: 0,
+      textRuns: 0,
+      shapedRuns: 0,
+      shapedCells: 0,
+      maxRunCells: 0,
+    };
     return {
       parsedWrites: this.parsedWrites,
       renderRequests: this.renderRequests,
@@ -1261,6 +1282,7 @@ export class Terminal implements ITerminalCore {
       cursorVisible: this.renderer?.getCursorVisible() ?? false,
       synchronizedOutput: this.synchronizedOutputActive,
       synchronizedOutputRecoveries: this.synchronizedOutputRecoveries,
+      lastFrame,
     };
   }
 

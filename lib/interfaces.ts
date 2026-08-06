@@ -14,6 +14,7 @@ export interface ITerminalOptions {
   scrollback?: number; // Default: 10000
   fontSize?: number; // Default: 15
   fontFamily?: string; // Default: 'monospace'
+  fontLigatures?: boolean; // Default: true
   allowTransparency?: boolean;
 
   // Phase 1 additions
