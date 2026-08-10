@@ -543,6 +543,8 @@ export class Terminal implements ITerminalCore {
       const disableContextMenu = this.options.disableContextMenu;
       const mouseConfig: MouseTrackingConfig = {
         hasMouseTracking: () => this.wasmTerm?.hasMouseTracking() ?? false,
+        // Shift reserves the complete pointer gesture for local selection/scroll.
+        shouldReportEvent: (event) => !event.shiftKey,
         shouldReportButton: (button) => !(disableContextMenu && button === 2),
         hasSgrMouseMode: () => this.wasmTerm?.getMode(1006, false) ?? true, // SGR extended mode
         getCellDimensions: () => ({
@@ -601,7 +603,8 @@ export class Terminal implements ITerminalCore {
         this.renderer,
         this.wasmTerm,
         this.textarea,
-        !disableContextMenu
+        !disableContextMenu,
+        (event) => !(this.wasmTerm?.hasMouseTracking() ?? false) || event.shiftKey
       );
 
       // Connect selection manager to renderer
@@ -2065,12 +2068,20 @@ export class Terminal implements ITerminalCore {
   private handleWheel = (e: WheelEvent): void => {
     // Always prevent default browser scrolling
     e.preventDefault();
-    e.stopPropagation();
 
     // Allow custom handler to override
     if (this.customWheelEventHandler && this.customWheelEventHandler(e)) {
+      e.stopPropagation();
       return;
     }
+
+    // In mouse-reporting modes, the bubbling InputHandler owns unmodified
+    // wheel events. Returning here keeps this capture listener from hiding
+    // real canvas events before they reach the protocol encoder.
+    if ((this.wasmTerm?.hasMouseTracking() ?? false) && !e.shiftKey) return;
+
+    // Shift is the documented local override while mouse tracking is active.
+    e.stopPropagation();
 
     // Check if in alternate screen mode (vim, less, htop, etc.)
     const isAltScreen = this.wasmTerm?.isAlternateScreen() ?? false;
@@ -2082,13 +2093,7 @@ export class Terminal implements ITerminalCore {
       const direction = e.deltaY > 0 ? 'down' : 'up';
       const count = Math.min(Math.abs(Math.round(e.deltaY / 33)), 5); // Cap at 5
 
-      for (let i = 0; i < count; i++) {
-        if (direction === 'up') {
-          this.dataEmitter.fire('\x1B[A'); // Up arrow
-        } else {
-          this.dataEmitter.fire('\x1B[B'); // Down arrow
-        }
-      }
+      this.inputHandler?.sendArrowKeys(direction, count);
     } else {
       // Normal screen: scroll viewport through history with smooth scrolling
       // Handle different deltaMode values for better trackpad/mouse support

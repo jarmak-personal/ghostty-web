@@ -37,6 +37,7 @@ export class SelectionManager {
   private renderer: CanvasRenderer;
   private wasmTerm: GhosttyTerminal;
   private textarea: HTMLTextAreaElement;
+  private shouldUseLocalMouse: (event: MouseEvent) => boolean;
 
   // Selection state - coordinates are in ABSOLUTE buffer space (viewportY + viewportRow)
   // This ensures selection persists correctly when scrolling
@@ -113,12 +114,14 @@ export class SelectionManager {
     renderer: CanvasRenderer,
     wasmTerm: GhosttyTerminal,
     textarea: HTMLTextAreaElement,
-    contextMenuEnabled: boolean = true
+    contextMenuEnabled: boolean = true,
+    shouldUseLocalMouse: (event: MouseEvent) => boolean = () => true
   ) {
     this.terminal = terminal;
     this.renderer = renderer;
     this.wasmTerm = wasmTerm;
     this.textarea = textarea;
+    this.shouldUseLocalMouse = shouldUseLocalMouse;
 
     try {
       this.attachEventListeners(contextMenuEnabled);
@@ -493,6 +496,8 @@ export class SelectionManager {
           canvas.parentElement.focus();
         }
 
+        if (!this.shouldUseLocalMouse(e)) return;
+
         const cell = this.pixelToCell(e.offsetX, e.offsetY);
 
         // Always clear previous selection on new click
@@ -658,6 +663,8 @@ export class SelectionManager {
     // Handle click events for double-click (word) and triple-click (line) selection
     // Use event.detail which browsers set to click count (1, 2, 3, etc.)
     const canvasClickHandler = (e: MouseEvent) => {
+      if (!this.shouldUseLocalMouse(e)) return;
+
       // event.detail: 1 = single, 2 = double, 3 = triple click
       if (e.detail === 2) {
         // Double-click - select word
