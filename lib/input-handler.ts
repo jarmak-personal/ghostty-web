@@ -183,6 +183,24 @@ function getUnshiftedCodepoint(event: KeyboardEvent): number {
   return event.key.codePointAt(0) ?? 0;
 }
 
+type NavigatorWithUserAgentData = Navigator & {
+  userAgentData?: { platform?: string };
+};
+
+function getMacOSOptionLetter(event: KeyboardEvent): string | null {
+  if (!event.altKey || event.ctrlKey || event.metaKey || typeof navigator === 'undefined') {
+    return null;
+  }
+
+  const userAgentPlatform = (navigator as NavigatorWithUserAgentData).userAgentData?.platform;
+  const platform = userAgentPlatform || navigator.platform || '';
+  if (userAgentPlatform !== 'macOS' && !platform.startsWith('Mac')) return null;
+
+  const match = /^Key([A-Z])$/.exec(event.code);
+  if (!match) return null;
+  return event.shiftKey ? match[1] : match[1].toLowerCase();
+}
+
 /**
  * InputHandler class
  * Attaches keyboard event listeners to a container and converts
@@ -484,6 +502,19 @@ export class InputHandler {
       keyboardProtocolState !== undefined &&
       (keyboardProtocolState.kittyFlags !== KittyKeyFlags.DISABLED ||
         keyboardProtocolState.modifyOtherKeysState2);
+
+    // macOS Option-letter events expose composed characters (or "Dead") in
+    // event.key. Legacy terminal applications expect the physical Alt-letter
+    // chord; negotiated protocols continue through Ghostty's encoder below.
+    const optionLetter = getMacOSOptionLetter(event);
+    if (optionLetter !== null && !hasExtendedKeyboardProtocol) {
+      const data = `\x1b${optionLetter}`;
+      event.preventDefault();
+      event.stopPropagation();
+      this.onDataCallback(data);
+      this.recordKeyDownData(data);
+      return;
+    }
 
     // Preserve legacy shortcuts only while no extended keyboard protocol is
     // active. Once negotiated, the Ghostty encoder owns mapped special keys
