@@ -106,6 +106,26 @@ export class Terminal implements ITerminalCore {
   private retainedBufferSearch?: RetainedBufferSearchManager;
   private retainedBufferExtraction?: RetainedBufferExtractionManager;
   private canvas?: HTMLCanvasElement;
+  private selectionChangeDisposable?: IDisposable;
+
+  // Listener references and host state owned by open(). Keeping these explicit
+  // makes both successful disposal and partial-open rollback symmetric.
+  private beforeInputListener?: (event: InputEvent) => void;
+  private canvasMouseDownListener?: (event: MouseEvent) => void;
+  private canvasTouchEndListener?: (event: TouchEvent) => void;
+  private hostMouseDownListenerAttached = false;
+  private hostMouseMoveListenerAttached = false;
+  private hostMouseLeaveListenerAttached = false;
+  private hostClickListenerAttached = false;
+  private hostWheelListenerAttached = false;
+  private documentMouseUpListenerAttached = false;
+  private focusTimeout?: number;
+  private hostState?: {
+    element: HTMLElement;
+    attributes: Map<string, string | null>;
+    outline: string;
+    cursor: string;
+  };
 
   // Link detection system
   private linkDetector?: LinkDetector;
@@ -386,9 +406,20 @@ export class Terminal implements ITerminalCore {
       throw new Error('Terminal has been disposed');
     }
 
-    // Store parent element
+    // Store parent element and the state that open() temporarily owns.
     this.element = parent;
     this.isOpen = true;
+    this.hostState = {
+      element: parent,
+      attributes: new Map(
+        ['tabindex', 'contenteditable', 'role', 'aria-label', 'aria-multiline'].map((name) => [
+          name,
+          parent.getAttribute(name),
+        ])
+      ),
+      outline: parent.style.outline,
+      cursor: parent.style.cursor,
+    };
 
     try {
       // Make parent focusable if it isn't already
@@ -400,11 +431,13 @@ export class Terminal implements ITerminalCore {
       // this as an input element and don't intercept keyboard events.
       parent.setAttribute('contenteditable', 'true');
       // Prevent actual content editing - we handle input ourselves
-      parent.addEventListener('beforeinput', (e) => {
+      const beforeInputListener = (e: InputEvent) => {
         if (e.target === parent) {
           e.preventDefault();
         }
-      });
+      };
+      parent.addEventListener('beforeinput', beforeInputListener);
+      this.beforeInputListener = beforeInputListener;
 
       // Add accessibility attributes for screen readers and extensions
       parent.setAttribute('role', 'textbox');
@@ -448,16 +481,20 @@ export class Terminal implements ITerminalCore {
       // Focus textarea on interaction - preventDefault before focus
       const textarea = this.textarea;
       // Desktop: mousedown
-      this.canvas.addEventListener('mousedown', (ev) => {
+      const canvasMouseDownListener = (ev: MouseEvent) => {
         if (ev.button !== 0) return;
         ev.preventDefault();
         textarea.focus();
-      });
+      };
+      this.canvas.addEventListener('mousedown', canvasMouseDownListener);
+      this.canvasMouseDownListener = canvasMouseDownListener;
       // Mobile: touchend with preventDefault to suppress iOS caret
-      this.canvas.addEventListener('touchend', (ev) => {
+      const canvasTouchEndListener = (ev: TouchEvent) => {
         ev.preventDefault();
         textarea.focus();
-      });
+      };
+      this.canvas.addEventListener('touchend', canvasTouchEndListener);
+      this.canvasTouchEndListener = canvasTouchEndListener;
 
       // Create renderer
       this.renderer = new CanvasRenderer(this.canvas, {
@@ -543,7 +580,7 @@ export class Terminal implements ITerminalCore {
       this.renderer.setSelectionManager(this.selectionManager);
 
       // Forward selection change events
-      this.selectionManager.onSelectionChange(() => {
+      this.selectionChangeDisposable = this.selectionManager.onSelectionChange(() => {
         this.selectionChangeEmitter.fire();
       });
 
@@ -562,16 +599,22 @@ export class Terminal implements ITerminalCore {
       // Setup mouse event handling for links and scrollbar
       // Use capture phase to intercept scrollbar clicks before SelectionManager
       parent.addEventListener('mousedown', this.handleMouseDown, { capture: true });
+      this.hostMouseDownListenerAttached = true;
       parent.addEventListener('mousemove', this.handleMouseMove);
+      this.hostMouseMoveListenerAttached = true;
       parent.addEventListener('mouseleave', this.handleMouseLeave);
+      this.hostMouseLeaveListenerAttached = true;
       parent.addEventListener('click', this.handleClick);
+      this.hostClickListenerAttached = true;
 
       // Setup document-level mouseup for scrollbar drag (so drag works even outside canvas)
       document.addEventListener('mouseup', this.handleMouseUp);
+      this.documentMouseUpListenerAttached = true;
 
       // Setup wheel event handling for scrolling (Phase 2)
       // Use capture phase to ensure we get the event before browser scrolling
       parent.addEventListener('wheel', this.handleWheel, { passive: false, capture: true });
+      this.hostWheelListenerAttached = true;
 
       // Present the initial screen on one coalesced frame.
       this.requestRender(true);
@@ -580,8 +623,12 @@ export class Terminal implements ITerminalCore {
       // to prewarm a terminal without taking focus from another control.
       if (this.options.focusOnOpen !== false) this.focus();
     } catch (error) {
-      // Clean up on error
+      // Unwind everything that was created before the failing step. Keep the
+      // Ghostty module reference so callers can retry open() on the same object.
       this.isOpen = false;
+      this.resetSynchronizedOutputTracking();
+      this.stopPresentationWork(false);
+      this.writeQueue.length = 0;
       this.cleanupComponents();
       throw new Error(`Failed to open terminal: ${error}`);
     }
@@ -829,7 +876,9 @@ export class Terminal implements ITerminalCore {
 
       // Also schedule a delayed focus as backup to ensure it sticks
       // (some browsers may need this if DOM isn't fully settled)
-      setTimeout(() => {
+      if (this.focusTimeout !== undefined) window.clearTimeout(this.focusTimeout);
+      this.focusTimeout = window.setTimeout(() => {
+        this.focusTimeout = undefined;
         this.element?.focus();
       }, 0);
     }
@@ -1274,6 +1323,7 @@ export class Terminal implements ITerminalCore {
 
     // Clean up components
     this.cleanupComponents();
+    this.ghostty = undefined;
 
     // Dispose event emitters
     this.dataEmitter.dispose();
@@ -1541,6 +1591,9 @@ export class Terminal implements ITerminalCore {
    * Clean up components (called on dispose or error)
    */
   private cleanupComponents(): void {
+    this.selectionChangeDisposable?.dispose();
+    this.selectionChangeDisposable = undefined;
+
     // Dispose selection manager
     if (this.selectionManager) {
       this.selectionManager.dispose();
@@ -1553,6 +1606,15 @@ export class Terminal implements ITerminalCore {
       this.inputHandler = undefined;
     }
 
+    if (this.canvas && this.canvasMouseDownListener) {
+      this.canvas.removeEventListener('mousedown', this.canvasMouseDownListener);
+    }
+    this.canvasMouseDownListener = undefined;
+    if (this.canvas && this.canvasTouchEndListener) {
+      this.canvas.removeEventListener('touchend', this.canvasTouchEndListener);
+    }
+    this.canvasTouchEndListener = undefined;
+
     // Dispose renderer
     if (this.renderer) {
       this.renderer.dispose();
@@ -1560,35 +1622,53 @@ export class Terminal implements ITerminalCore {
     }
 
     // Remove canvas from DOM
-    if (this.canvas && this.canvas.parentNode) {
-      this.canvas.parentNode.removeChild(this.canvas);
+    if (this.canvas) {
+      this.canvas.remove();
       this.canvas = undefined;
     }
 
     // Remove textarea from DOM
-    if (this.textarea && this.textarea.parentNode) {
-      this.textarea.parentNode.removeChild(this.textarea);
+    if (this.textarea) {
+      this.textarea.remove();
       this.textarea = undefined;
     }
 
     // Remove event listeners
     if (this.element) {
-      this.element.removeEventListener('wheel', this.handleWheel);
-      this.element.removeEventListener('mousedown', this.handleMouseDown, { capture: true });
-      this.element.removeEventListener('mousemove', this.handleMouseMove);
-      this.element.removeEventListener('mouseleave', this.handleMouseLeave);
-      this.element.removeEventListener('click', this.handleClick);
-
-      // Remove contenteditable and accessibility attributes added in open()
-      this.element.removeAttribute('contenteditable');
-      this.element.removeAttribute('role');
-      this.element.removeAttribute('aria-label');
-      this.element.removeAttribute('aria-multiline');
+      if (this.beforeInputListener) {
+        this.element.removeEventListener('beforeinput', this.beforeInputListener);
+      }
+      if (this.hostWheelListenerAttached) {
+        this.element.removeEventListener('wheel', this.handleWheel, { capture: true });
+      }
+      if (this.hostMouseDownListenerAttached) {
+        this.element.removeEventListener('mousedown', this.handleMouseDown, { capture: true });
+      }
+      if (this.hostMouseMoveListenerAttached) {
+        this.element.removeEventListener('mousemove', this.handleMouseMove);
+      }
+      if (this.hostMouseLeaveListenerAttached) {
+        this.element.removeEventListener('mouseleave', this.handleMouseLeave);
+      }
+      if (this.hostClickListenerAttached) {
+        this.element.removeEventListener('click', this.handleClick);
+      }
     }
+    this.beforeInputListener = undefined;
+    this.hostWheelListenerAttached = false;
+    this.hostMouseDownListenerAttached = false;
+    this.hostMouseMoveListenerAttached = false;
+    this.hostMouseLeaveListenerAttached = false;
+    this.hostClickListenerAttached = false;
 
-    // Remove document-level listeners (only if opened)
-    if (this.isOpen && typeof document !== 'undefined') {
+    if (this.documentMouseUpListenerAttached && typeof document !== 'undefined') {
       document.removeEventListener('mouseup', this.handleMouseUp);
+    }
+    this.documentMouseUpListenerAttached = false;
+
+    if (this.focusTimeout !== undefined) {
+      window.clearTimeout(this.focusTimeout);
+      this.focusTimeout = undefined;
     }
 
     // Clean up scrollbar timers
@@ -1609,8 +1689,18 @@ export class Terminal implements ITerminalCore {
       this.wasmTerm = undefined;
     }
 
+    // Restore attributes and styles that belonged to the host before open().
+    if (this.hostState) {
+      for (const [name, value] of this.hostState.attributes) {
+        if (value === null) this.hostState.element.removeAttribute(name);
+        else this.hostState.element.setAttribute(name, value);
+      }
+      this.hostState.element.style.outline = this.hostState.outline;
+      this.hostState.element.style.cursor = this.hostState.cursor;
+      this.hostState = undefined;
+    }
+
     // Clear references
-    this.ghostty = undefined;
     this.element = undefined;
     this.textarea = undefined;
   }
