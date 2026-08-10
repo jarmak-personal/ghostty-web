@@ -76,6 +76,14 @@ export interface TerminalRenderStats {
 
 /** Keep the web scheduler aligned with Ghostty Termio's bounded recovery. */
 const SYNCHRONIZED_OUTPUT_TIMEOUT_MS = 1000;
+const DEFAULT_SMOOTH_SCROLL_DURATION_MS = 100;
+
+function normalizeSmoothScrollDuration(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return DEFAULT_SMOOTH_SCROLL_DURATION_MS;
+  }
+  return Math.max(0, value);
+}
 
 export class Terminal implements ITerminalCore {
   // Public properties (xterm.js compatibility)
@@ -168,7 +176,9 @@ export class Terminal implements ITerminalCore {
   public viewportY: number = 0; // Top line of viewport in scrollback buffer (0 = at bottom, can be fractional during smooth scroll)
   private targetViewportY: number = 0; // Target viewport position for smooth scrolling
   private scrollAnimationStartTime?: number;
+  private scrollAnimationStartViewportY: number = 0;
   private scrollAnimationFrame?: number;
+  private scrollAnimationGeneration: number = 0;
   private customWheelEventHandler?: (event: WheelEvent) => boolean;
   private lastCursorY: number = 0; // Track cursor position for onCursorMove
 
@@ -206,7 +216,7 @@ export class Terminal implements ITerminalCore {
       disableContextMenu: options.disableContextMenu ?? false,
       resolveClipboardFilePaste: options.resolveClipboardFilePaste,
       linkHandler: options.linkHandler ?? null,
-      smoothScrollDuration: options.smoothScrollDuration ?? 100, // Default: 100ms smooth scroll
+      smoothScrollDuration: normalizeSmoothScrollDuration(options.smoothScrollDuration),
     };
 
     // Wrap in Proxy to intercept runtime changes (xterm.js compatibility)
@@ -225,6 +235,13 @@ export class Terminal implements ITerminalCore {
           const enabled = value !== false;
           target[prop] = enabled;
           if (this.isOpen) this.handleOptionChange(prop, enabled, oldValue);
+          return true;
+        }
+
+        if (prop === 'smoothScrollDuration') {
+          const duration = normalizeSmoothScrollDuration(value);
+          target[prop] = duration;
+          if (this.isOpen) this.handleOptionChange(prop, duration, oldValue);
           return true;
         }
 
@@ -290,6 +307,17 @@ export class Terminal implements ITerminalCore {
 
       case 'linkHandler':
         this.synchronizeLinkHandlerPolicy();
+        break;
+
+      case 'smoothScrollDuration':
+        if (this.scrollAnimationStartTime !== undefined) {
+          if (newValue === 0) {
+            this.finishSmoothScroll();
+          } else {
+            this.scrollAnimationStartViewportY = this.viewportY;
+            this.scrollAnimationStartTime = performance.now();
+          }
+        }
         break;
 
       case 'cols':
@@ -610,7 +638,8 @@ export class Terminal implements ITerminalCore {
     // like clicking or typing, not by incoming data.
 
     const viewportBefore = this.viewportY;
-    const preserveViewport = viewportBefore > 0 && !this.wasmTerm!.isAlternateScreen();
+    const wasAlternateScreen = this.wasmTerm!.isAlternateScreen();
+    const preserveViewport = viewportBefore > 0 && !wasAlternateScreen;
     const scrollbackBefore = preserveViewport ? this.getScrollbackLength() : 0;
     const smoothScrollWasActive =
       this.scrollAnimationFrame !== undefined || this.scrollAnimationStartTime !== undefined;
@@ -620,6 +649,13 @@ export class Terminal implements ITerminalCore {
 
     // Write directly to WASM terminal (handles VT parsing internally)
     const synchronizationCompleted = this.writeToWasm(data);
+    const isAlternateScreen = this.wasmTerm!.isAlternateScreen();
+
+    // A screen switch owns the live viewport. Revoke the old screen's
+    // animation before listeners can observe or reenter with stale state.
+    if (isAlternateScreen !== wasAlternateScreen) {
+      this.resetViewport();
+    }
 
     // Drain a snapshot before firing listeners so reentrant writes cannot
     // reorder records for later listeners.
@@ -632,7 +668,7 @@ export class Terminal implements ITerminalCore {
     // Invalidate link cache (content changed)
     this.linkDetector?.invalidateCache();
 
-    if (preserveViewport && !this.wasmTerm!.isAlternateScreen()) {
+    if (preserveViewport && !isAlternateScreen) {
       // Keep the same retained text under the user's eyes. As active rows move
       // into history, the distance from the live bottom grows by the same amount.
       const scrollbackAfter = this.getScrollbackLength();
@@ -649,6 +685,10 @@ export class Terminal implements ITerminalCore {
         this.targetViewportY = Math.max(
           0,
           Math.min(scrollbackAfter, targetViewportBefore + scrollbackGrowth)
+        );
+        this.scrollAnimationStartViewportY = Math.max(
+          0,
+          Math.min(scrollbackAfter, this.scrollAnimationStartViewportY + scrollbackGrowth)
         );
       }
     } else if (this.viewportY !== 0) {
@@ -1046,6 +1086,8 @@ export class Terminal implements ITerminalCore {
       throw new Error('Terminal not open');
     }
 
+    this.cancelSmoothScroll();
+
     const scrollbackLength = this.getScrollbackLength();
     const maxScroll = scrollbackLength;
 
@@ -1059,6 +1101,8 @@ export class Terminal implements ITerminalCore {
 
     if (newViewportY !== this.viewportY) {
       this.viewportY = newViewportY;
+      this.scrollAnimationStartViewportY = newViewportY;
+      this.targetViewportY = newViewportY;
       this.scrollEmitter.fire(this.viewportY);
 
       // Show scrollbar when scrolling (with auto-hide)
@@ -1081,9 +1125,12 @@ export class Terminal implements ITerminalCore {
    * Scroll viewport to the top of the scrollback buffer
    */
   public scrollToTop(): void {
+    this.cancelSmoothScroll();
     const scrollbackLength = this.getScrollbackLength();
     if (scrollbackLength > 0 && this.viewportY !== scrollbackLength) {
       this.viewportY = scrollbackLength;
+      this.scrollAnimationStartViewportY = scrollbackLength;
+      this.targetViewportY = scrollbackLength;
       this.scrollEmitter.fire(this.viewportY);
       this.showScrollbar();
       this.requestRender();
@@ -1094,8 +1141,11 @@ export class Terminal implements ITerminalCore {
    * Scroll viewport to the bottom (current output)
    */
   public scrollToBottom(): void {
+    this.cancelSmoothScroll();
     if (this.viewportY !== 0) {
       this.viewportY = 0;
+      this.scrollAnimationStartViewportY = 0;
+      this.targetViewportY = 0;
       this.scrollEmitter.fire(this.viewportY);
       // Show scrollbar briefly when scrolling to bottom
       if (this.getScrollbackLength() > 0) {
@@ -1110,11 +1160,14 @@ export class Terminal implements ITerminalCore {
    * @param line Line number (0 = top of scrollback, scrollbackLength = bottom)
    */
   public scrollToLine(line: number): void {
+    this.cancelSmoothScroll();
     const scrollbackLength = this.getScrollbackLength();
     const newViewportY = Math.max(0, Math.min(scrollbackLength, line));
 
     if (newViewportY !== this.viewportY) {
       this.viewportY = newViewportY;
+      this.scrollAnimationStartViewportY = newViewportY;
+      this.targetViewportY = newViewportY;
       this.scrollEmitter.fire(this.viewportY);
 
       // Show scrollbar when scrolling to specific line
@@ -1130,7 +1183,7 @@ export class Terminal implements ITerminalCore {
    * @param targetY Target viewport Y position (in lines, can be fractional)
    */
   private smoothScrollTo(targetY: number): void {
-    if (!this.wasmTerm) return;
+    if (!this.wasmTerm || !Number.isFinite(targetY)) return;
 
     const scrollbackLength = this.getScrollbackLength();
     const maxScroll = scrollbackLength;
@@ -1139,11 +1192,16 @@ export class Terminal implements ITerminalCore {
     const newTarget = Math.max(0, Math.min(maxScroll, targetY));
 
     // If smooth scrolling is disabled (duration = 0), jump immediately
-    const duration = this.options.smoothScrollDuration ?? 100;
+    const duration = this.options.smoothScrollDuration;
     if (duration === 0) {
+      const viewportChanged = this.viewportY !== newTarget;
+      this.cancelSmoothScroll();
       this.viewportY = newTarget;
       this.targetViewportY = newTarget;
-      this.scrollEmitter.fire(Math.floor(this.viewportY));
+      this.scrollAnimationStartViewportY = newTarget;
+      if (!viewportChanged) return;
+
+      this.scrollEmitter.fire(Math.floor(newTarget));
 
       if (scrollbackLength > 0) {
         this.showScrollbar();
@@ -1152,60 +1210,52 @@ export class Terminal implements ITerminalCore {
       return;
     }
 
-    // Update target (accumulate if animation running)
-    this.targetViewportY = newTarget;
-
-    // If animation is already running, don't restart it
-    // Just let it continue toward the updated target
-    // This prevents choppy restarts during continuous scrolling
-    if (this.scrollAnimationFrame) {
+    if (newTarget === this.viewportY) {
+      this.cancelSmoothScroll();
       return;
     }
 
-    // Start new animation
-    this.scrollAnimationStartTime = Date.now();
-    this.animateScroll();
+    // An active segment keeps its original time window so high-frequency
+    // trackpad events cannot continually reset progress before the next frame.
+    this.targetViewportY = newTarget;
+    if (this.scrollAnimationFrame !== undefined) {
+      return;
+    }
+
+    this.scrollAnimationStartViewportY = this.viewportY;
+    this.scrollAnimationStartTime = performance.now();
+
+    // Preserve the existing responsive wheel behavior by presenting the first
+    // millisecond of progress synchronously. Subsequent progress is derived
+    // exclusively from rAF timestamps.
+    this.animateScroll(
+      this.scrollAnimationStartTime + Math.min(1, duration),
+      this.scrollAnimationGeneration
+    );
   }
 
   /**
    * Animation loop for smooth scrolling
-   * Uses asymptotic approach - moves a fraction of remaining distance each frame
+   * Uses elapsed time so every finite duration reaches its target exactly.
    */
-  private animateScroll = (): void => {
-    if (!this.wasmTerm || this.scrollAnimationStartTime === undefined) {
+  private animateScroll(timestamp: DOMHighResTimeStamp, generation: number): void {
+    if (generation !== this.scrollAnimationGeneration) return;
+    this.scrollAnimationFrame = undefined;
+    if (!this.wasmTerm || this.scrollAnimationStartTime === undefined) return;
+
+    const duration = this.options.smoothScrollDuration;
+    const elapsed = Math.max(0, timestamp - this.scrollAnimationStartTime);
+    const completed = duration === 0 || timestamp >= this.scrollAnimationStartTime + duration;
+    const progress = completed ? 1 : Math.min(1, elapsed / duration);
+    const easedProgress = 1 - (1 - progress) ** 3;
+    this.viewportY =
+      this.scrollAnimationStartViewportY +
+      (this.targetViewportY - this.scrollAnimationStartViewportY) * easedProgress;
+
+    if (completed) {
+      this.finishSmoothScroll();
       return;
     }
-
-    const duration = this.options.smoothScrollDuration ?? 100;
-
-    // Calculate distance to target
-    const distance = this.targetViewportY - this.viewportY;
-    const absDistance = Math.abs(distance);
-
-    // If very close, snap to target
-    if (absDistance < 0.01) {
-      this.viewportY = this.targetViewportY;
-      this.scrollEmitter.fire(Math.floor(this.viewportY));
-
-      const scrollbackLength = this.getScrollbackLength();
-      if (scrollbackLength > 0) {
-        this.showScrollbar();
-      }
-
-      this.requestRender();
-
-      // Animation complete
-      this.scrollAnimationFrame = undefined;
-      this.scrollAnimationStartTime = undefined;
-      return;
-    }
-
-    // Move a fraction of the remaining distance
-    // At 60fps, move ~1/6 of distance per frame for ~100ms total duration
-    // This creates smooth deceleration toward target
-    const framesForDuration = (duration / 1000) * 60; // Convert ms to frame count
-    const moveRatio = 1 - (1 / framesForDuration) ** 2; // Ease-out
-    this.viewportY += distance * moveRatio;
 
     // Fire scroll event (use floor to convert fractional to integer for API)
     const intViewportY = Math.floor(this.viewportY);
@@ -1219,19 +1269,61 @@ export class Terminal implements ITerminalCore {
 
     this.requestRender();
 
-    // Continue animation
-    this.scrollAnimationFrame = requestAnimationFrame(this.animateScroll);
-  };
+    // Scroll listeners may cancel or replace the animation reentrantly. Do not
+    // let the old callback schedule over the newer owner.
+    if (
+      generation !== this.scrollAnimationGeneration ||
+      this.scrollAnimationStartTime === undefined
+    ) {
+      return;
+    }
 
-  /** Return the viewport to current output and revoke any in-flight scrolling. */
-  private resetViewport(): void {
-    const wasScrolled = this.viewportY !== 0 || this.targetViewportY !== 0;
+    this.scheduleScrollAnimationFrame();
+  }
+
+  private scheduleScrollAnimationFrame(): void {
+    const generation = this.scrollAnimationGeneration;
+    this.scrollAnimationFrame = requestAnimationFrame((timestamp) =>
+      this.animateScroll(timestamp, generation)
+    );
+  }
+
+  /** Snap an active animation to its exact destination. */
+  private finishSmoothScroll(): void {
+    this.scrollAnimationGeneration++;
+    if (this.scrollAnimationFrame !== undefined) {
+      cancelAnimationFrame(this.scrollAnimationFrame);
+      this.scrollAnimationFrame = undefined;
+    }
+    this.viewportY = this.targetViewportY;
+    this.scrollAnimationStartViewportY = this.viewportY;
+    this.scrollAnimationStartTime = undefined;
+    this.scrollEmitter.fire(Math.floor(this.viewportY));
+
+    if (this.getScrollbackLength() > 0) {
+      this.showScrollbar();
+    }
+    this.requestRender();
+  }
+
+  /** Revoke animation callbacks and synchronize their target to the viewport. */
+  private cancelSmoothScroll(): void {
+    this.scrollAnimationGeneration++;
     if (this.scrollAnimationFrame !== undefined) {
       cancelAnimationFrame(this.scrollAnimationFrame);
       this.scrollAnimationFrame = undefined;
     }
     this.scrollAnimationStartTime = undefined;
+    this.scrollAnimationStartViewportY = this.viewportY;
+    this.targetViewportY = this.viewportY;
+  }
+
+  /** Return the viewport to current output and revoke any in-flight scrolling. */
+  private resetViewport(): void {
+    const wasScrolled = this.viewportY !== 0 || this.targetViewportY !== 0;
+    this.cancelSmoothScroll();
     this.viewportY = 0;
+    this.scrollAnimationStartViewportY = 0;
     this.targetViewportY = 0;
 
     if (this.scrollbarHideTimeout !== undefined) {
@@ -1446,14 +1538,12 @@ export class Terminal implements ITerminalCore {
 
     const smoothScrollWasActive =
       this.scrollAnimationFrame !== undefined || this.scrollAnimationStartTime !== undefined;
-    if (this.scrollAnimationFrame !== undefined) {
-      cancelAnimationFrame(this.scrollAnimationFrame);
-      this.scrollAnimationFrame = undefined;
-    }
-    this.scrollAnimationStartTime = undefined;
+    const smoothScrollTarget = this.targetViewportY;
+    this.cancelSmoothScroll();
     if (normalizeSmoothScroll && smoothScrollWasActive) {
-      const normalizedViewportY = Math.max(0, Math.floor(this.targetViewportY));
+      const normalizedViewportY = Math.max(0, Math.floor(smoothScrollTarget));
       this.viewportY = normalizedViewportY;
+      this.scrollAnimationStartViewportY = normalizedViewportY;
       this.targetViewportY = normalizedViewportY;
       this.scrollEmitter.fire(normalizedViewportY);
     }
