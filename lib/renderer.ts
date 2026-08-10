@@ -100,6 +100,8 @@ interface TextRun {
 const MAX_SHAPED_RUN_CELLS = 64;
 const MAX_GLYPH_ADVANCE_CACHE_ENTRIES = 512;
 const ADVANCE_EPSILON = 0.01;
+const POWERLINE_SEPARATOR_START = 0xe0b0;
+const POWERLINE_SEPARATOR_END = 0xe0b7;
 
 const EMPTY_FRAME_STATS: RendererFrameStats = {
   renderedRows: 0,
@@ -113,6 +115,14 @@ const EMPTY_FRAME_STATS: RendererFrameStats = {
 function themeRgb(value: string): RGB {
   const packed = parsePaletteColor(value);
   return { r: (packed >> 16) & 0xff, g: (packed >> 8) & 0xff, b: packed & 0xff };
+}
+
+function isPowerlineSeparator(cell: GhosttyCell): boolean {
+  return (
+    cell.grapheme_len === 0 &&
+    cell.codepoint >= POWERLINE_SEPARATOR_START &&
+    cell.codepoint <= POWERLINE_SEPARATOR_END
+  );
 }
 
 // ============================================================================
@@ -746,24 +756,88 @@ export class CanvasRenderer {
     const startX = run.startColumn * this.metrics.width;
     const ownedWidth = (run.endColumn - run.startColumn) * this.metrics.width;
     const canvasHeight = this.canvas.height / this.devicePixelRatio;
+    const cellY = y * this.metrics.height;
+    const powerlineSeparator =
+      run.cells.length === 1 && isPowerlineSeparator(first.cell) ? first.cell.codepoint : null;
 
     this.ctx.save();
     this.ctx.beginPath();
-    // Clip horizontally to the Ghostty-owned columns while retaining the
-    // renderer's established vertical overflow behavior for complex glyphs.
-    this.ctx.rect(startX, 0, ownedWidth, canvasHeight);
+    if (powerlineSeparator !== null) {
+      // Powerline geometry owns the entire cell but must never bleed into a
+      // neighboring row. Ordinary text retains the established vertical
+      // overflow behavior for complex scripts below.
+      this.ctx.rect(startX, cellY, ownedWidth, this.metrics.height);
+    } else {
+      // Clip horizontally to the Ghostty-owned columns while retaining the
+      // renderer's established vertical overflow behavior for complex glyphs.
+      this.ctx.rect(startX, 0, ownedWidth, canvasHeight);
+    }
     this.ctx.clip();
     this.ctx.font = first.font;
     this.ctx.fillStyle = first.fillStyle;
     this.ctx.globalAlpha = first.alpha;
-    if (run.cells.length > 1 && run.measuredWidth !== null) {
+    if (powerlineSeparator !== null) {
+      this.drawPowerlineSeparator(powerlineSeparator, startX, cellY, ownedWidth);
+    } else if (run.cells.length > 1 && run.measuredWidth !== null) {
       this.ctx.translate(startX, 0);
       this.ctx.scale(ownedWidth / run.measuredWidth, 1);
-      this.ctx.fillText(run.text, 0, y * this.metrics.height + this.metrics.baseline);
+      this.ctx.fillText(run.text, 0, cellY + this.metrics.baseline);
     } else {
-      this.ctx.fillText(run.text, startX, y * this.metrics.height + this.metrics.baseline);
+      this.ctx.fillText(run.text, startX, cellY + this.metrics.baseline);
     }
     this.ctx.restore();
+  }
+
+  /** Draw the canonical Powerline separators as cell-sized vector geometry. */
+  private drawPowerlineSeparator(
+    codepoint: number,
+    cellX: number,
+    cellY: number,
+    cellWidth: number
+  ): void {
+    const cellHeight = this.metrics.height;
+    const right = cellX + cellWidth;
+    const bottom = cellY + cellHeight;
+    const middle = cellY + cellHeight / 2;
+
+    this.ctx.beginPath();
+    switch (codepoint) {
+      case 0xe0b0: // Solid right-pointing triangle
+      case 0xe0b1: // Right-pointing chevron
+        this.ctx.moveTo(cellX, cellY);
+        this.ctx.lineTo(right, middle);
+        this.ctx.lineTo(cellX, bottom);
+        break;
+      case 0xe0b2: // Solid left-pointing triangle
+      case 0xe0b3: // Left-pointing chevron
+        this.ctx.moveTo(right, cellY);
+        this.ctx.lineTo(cellX, middle);
+        this.ctx.lineTo(right, bottom);
+        break;
+      case 0xe0b4: // Solid right half-circle
+      case 0xe0b5: // Right half-circle outline
+        this.ctx.moveTo(cellX, cellY);
+        this.ctx.ellipse(cellX, middle, cellWidth, cellHeight / 2, 0, -Math.PI / 2, Math.PI / 2);
+        break;
+      case 0xe0b6: // Solid left half-circle
+      case 0xe0b7: // Left half-circle outline
+        this.ctx.moveTo(right, bottom);
+        this.ctx.ellipse(right, middle, cellWidth, cellHeight / 2, 0, Math.PI / 2, Math.PI * 1.5);
+        break;
+    }
+
+    if ((codepoint & 1) === 0) {
+      this.ctx.closePath();
+      this.ctx.fill();
+      return;
+    }
+
+    // Keep outlines one physical pixel wide at fractional and high DPRs.
+    this.ctx.strokeStyle = this.ctx.fillStyle;
+    this.ctx.lineWidth = 1 / this.devicePixelRatio;
+    this.ctx.lineCap = 'butt';
+    this.ctx.lineJoin = 'miter';
+    this.ctx.stroke();
   }
 
   private renderCellDecorations(prepared: TextRunCell, y: number): void {
