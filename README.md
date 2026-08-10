@@ -73,6 +73,10 @@ term.onData((data) => websocket.send(data));
 websocket.onmessage = (e) => term.write(e.data);
 ```
 
+`open()` focuses the terminal by default. Set `focusOnOpen: false` to mount or prewarm a terminal
+without moving focus from another control; an explicit later call to `term.focus()` still focuses
+the terminal normally.
+
 Cursor options establish defaults while applications remain free to use `DECSCUSR`. In addition
 to `block`, `bar`, and `underline`, `cursorStyle` accepts `block_hollow`. Set `cursorBlink` to
 `'terminal'` to follow DEC cursor-blinking mode, or use `true`/`false` for an explicit blinking or

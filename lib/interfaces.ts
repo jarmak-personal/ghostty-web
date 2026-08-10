@@ -20,6 +20,8 @@ export interface ITerminalOptions {
   // Phase 1 additions
   convertEol?: boolean; // Convert \n to \r\n (default: false)
   disableStdin?: boolean; // Disable keyboard input (default: false)
+  /** Focus the terminal when open() completes (default: true). */
+  focusOnOpen?: boolean;
   /**
    * Disable ghostty-web's hidden-textarea context-menu bridge (default: false).
    *

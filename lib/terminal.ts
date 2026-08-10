@@ -199,6 +199,7 @@ export class Terminal implements ITerminalCore {
       allowTransparency: options.allowTransparency ?? false,
       convertEol: options.convertEol ?? false,
       disableStdin: options.disableStdin ?? false,
+      focusOnOpen: options.focusOnOpen ?? true,
       disableContextMenu: options.disableContextMenu ?? false,
       resolveClipboardFilePaste: options.resolveClipboardFilePaste,
       smoothScrollDuration: options.smoothScrollDuration ?? 100, // Default: 100ms smooth scroll
@@ -545,8 +546,9 @@ export class Terminal implements ITerminalCore {
       // Present the initial screen on one coalesced frame.
       this.requestRender(true);
 
-      // Focus input (auto-focus so user can start typing immediately)
-      this.focus();
+      // Preserve the historical auto-focus default while allowing embedders
+      // to prewarm a terminal without taking focus from another control.
+      if (this.options.focusOnOpen !== false) this.focus();
     } catch (error) {
       // Clean up on error
       this.isOpen = false;

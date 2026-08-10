@@ -3407,4 +3407,39 @@ describe('Synchronous open()', () => {
 
     term.dispose();
   });
+
+  test('focuses on open by default', async () => {
+    if (!container) return;
+
+    const term = await createIsolatedTerminal();
+    term.open(container);
+
+    expect(term.options.focusOnOpen).toBe(true);
+    expect(document.activeElement).toBe(container);
+
+    term.dispose();
+  });
+
+  test('focusOnOpen false preserves focus through the delayed focus tick', async () => {
+    if (!container) return;
+
+    const other = document.createElement('input');
+    document.body.appendChild(other);
+    const term = await createIsolatedTerminal({ focusOnOpen: false });
+
+    try {
+      other.focus();
+      term.open(container);
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+      expect(term.options.focusOnOpen).toBe(false);
+      expect(document.activeElement).toBe(other);
+
+      term.focus();
+      expect(document.activeElement).toBe(container);
+    } finally {
+      term.dispose();
+      other.remove();
+    }
+  });
 });
