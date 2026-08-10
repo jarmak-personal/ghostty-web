@@ -2,8 +2,9 @@ import { describe, expect, test } from 'bun:test';
 import {
   createAuthConfig,
   generateSessionToken,
-  validateTokenRequest,
-  validateWebSocketRequest,
+  validateAuthenticationMessage,
+  validateSessionToken,
+  validateWebSocketUpgrade,
 } from '../demo/bin/auth.js';
 
 const TOKEN = '0123456789abcdef0123456789abcdef';
@@ -22,180 +23,163 @@ describe('demo auth helper', () => {
     expect(first).not.toBe(second);
   });
 
-  test('accepts valid loopback host, matching origin, and token for websocket', () => {
-    const result = validateWebSocketRequest(testConfig(), {
+  test('accepts a valid loopback websocket upgrade', () => {
+    const result = validateWebSocketUpgrade(testConfig(), {
       host: '127.0.0.1:8080',
       origin: 'http://127.0.0.1:8080',
-      token: TOKEN,
     });
 
     expect(result.ok).toBe(true);
   });
 
-  test('rejects missing websocket token', () => {
-    const result = validateWebSocketRequest(testConfig(), {
-      host: 'localhost:8080',
-      origin: 'http://localhost:8080',
-    });
-
-    expect(result.ok).toBe(false);
-    expect(result.status).toBe(401);
-  });
-
-  test('rejects invalid websocket token', () => {
-    const result = validateWebSocketRequest(testConfig(), {
-      host: 'localhost:8080',
-      origin: 'http://localhost:8080',
-      token: 'invalid-token',
-    });
-
-    expect(result.ok).toBe(false);
-    expect(result.status).toBe(401);
-  });
-
-  test('rejects different-length tokens without throwing', () => {
-    expect(() =>
-      validateWebSocketRequest(testConfig(), {
-        host: 'localhost:8080',
-        origin: 'http://localhost:8080',
-        token: 'short',
-      })
-    ).not.toThrow();
-
-    const result = validateWebSocketRequest(testConfig(), {
-      host: 'localhost:8080',
-      origin: 'http://localhost:8080',
-      token: 'short',
-    });
-
-    expect(result.ok).toBe(false);
-    expect(result.status).toBe(401);
-  });
-
-  test('rejects foreign websocket origin even with a valid token', () => {
-    const result = validateWebSocketRequest(testConfig(), {
+  test('rejects foreign websocket origins', () => {
+    const result = validateWebSocketUpgrade(testConfig(), {
       host: '127.0.0.1:8080',
       origin: 'https://evil.example',
-      token: TOKEN,
     });
 
     expect(result.ok).toBe(false);
     expect(result.status).toBe(403);
   });
 
-  test('rejects missing websocket origin', () => {
-    const result = validateWebSocketRequest(testConfig(), {
+  test('rejects missing websocket origins', () => {
+    const result = validateWebSocketUpgrade(testConfig(), {
       host: '127.0.0.1:8080',
-      token: TOKEN,
     });
 
     expect(result.ok).toBe(false);
     expect(result.status).toBe(403);
   });
 
-  test('rejects malformed websocket origin', () => {
-    const result = validateWebSocketRequest(testConfig(), {
+  test('rejects malformed websocket origins', () => {
+    const result = validateWebSocketUpgrade(testConfig(), {
       host: '127.0.0.1:8080',
       origin: 'not an origin',
-      token: TOKEN,
     });
 
     expect(result.ok).toBe(false);
     expect(result.status).toBe(400);
   });
 
-  test('rejects missing hosts for token and websocket requests', () => {
-    const tokenResult = validateTokenRequest(testConfig(), {});
-    const wsResult = validateWebSocketRequest(testConfig(), {
+  test('rejects missing, malformed, and unallowed hosts', () => {
+    const missing = validateWebSocketUpgrade(testConfig(), {
       origin: 'http://127.0.0.1:8080',
-      token: TOKEN,
     });
-
-    expect(tokenResult.ok).toBe(false);
-    expect(tokenResult.status).toBe(400);
-    expect(wsResult.ok).toBe(false);
-    expect(wsResult.status).toBe(400);
-  });
-
-  test('rejects malformed hosts for token and websocket requests', () => {
-    const tokenResult = validateTokenRequest(testConfig(), { host: 'bad host:8080' });
-    const wsResult = validateWebSocketRequest(testConfig(), {
+    const malformed = validateWebSocketUpgrade(testConfig(), {
       host: 'bad host:8080',
       origin: 'http://bad host:8080',
-      token: TOKEN,
     });
-
-    expect(tokenResult.ok).toBe(false);
-    expect(tokenResult.status).toBe(400);
-    expect(wsResult.ok).toBe(false);
-    expect(wsResult.status).toBe(400);
-  });
-
-  test('rejects unallowed hosts for token and websocket requests', () => {
-    const tokenResult = validateTokenRequest(testConfig(), { host: 'evil.example:8080' });
-    const wsResult = validateWebSocketRequest(testConfig(), {
+    const unallowed = validateWebSocketUpgrade(testConfig(), {
       host: 'evil.example:8080',
       origin: 'http://evil.example:8080',
-      token: TOKEN,
     });
 
-    expect(tokenResult.ok).toBe(false);
-    expect(tokenResult.status).toBe(403);
-    expect(wsResult.ok).toBe(false);
-    expect(wsResult.status).toBe(403);
-  });
-
-  test('allows token requests from an allowed host with no origin', () => {
-    const result = validateTokenRequest(testConfig(), { host: 'localhost:8080' });
-
-    expect(result.ok).toBe(true);
-  });
-
-  test('rejects token requests with a foreign origin', () => {
-    const result = validateTokenRequest(testConfig(), {
-      host: 'localhost:8080',
-      origin: 'http://evil.example:8080',
-    });
-
-    expect(result.ok).toBe(false);
-    expect(result.status).toBe(403);
+    expect(missing).toMatchObject({ ok: false, status: 400 });
+    expect(malformed).toMatchObject({ ok: false, status: 400 });
+    expect(unallowed).toMatchObject({ ok: false, status: 403 });
   });
 
   test('allows extra hosts only when explicitly configured', () => {
-    const defaultResult = validateTokenRequest(testConfig(), { host: 'demo.example:8080' });
-    const configured = testConfig({ allowedHosts: ['demo.example'] });
-    const tokenResult = validateTokenRequest(configured, { host: 'demo.example:8080' });
-    const wsResult = validateWebSocketRequest(configured, {
+    const defaultResult = validateWebSocketUpgrade(testConfig(), {
       host: 'demo.example:8080',
       origin: 'http://demo.example:8080',
-      token: TOKEN,
+    });
+    const configured = testConfig({ allowedHosts: ['demo.example'] });
+    const configuredResult = validateWebSocketUpgrade(configured, {
+      host: 'demo.example:8080',
+      origin: 'http://demo.example:8080',
     });
 
-    expect(defaultResult.ok).toBe(false);
-    expect(defaultResult.status).toBe(403);
-    expect(tokenResult.ok).toBe(true);
-    expect(wsResult.ok).toBe(true);
+    expect(defaultResult).toMatchObject({ ok: false, status: 403 });
+    expect(configuredResult.ok).toBe(true);
   });
 
-  test('allows hosts configured through GHOSTTY_ALLOWED_HOSTS when using a wildcard bind', () => {
+  test('allows hosts configured for wildcard and concrete binds', () => {
     const wildcard = testConfig({ env: { HOST: '0.0.0.0' } });
-    const configured = testConfig({
+    const configuredWildcard = testConfig({
       env: { HOST: '0.0.0.0', GHOSTTY_ALLOWED_HOSTS: 'demo.example' },
     });
+    const concrete = testConfig({ env: { HOST: 'demo.local' } });
 
-    expect(validateTokenRequest(wildcard, { host: 'demo.example:8080' }).ok).toBe(false);
-    expect(validateTokenRequest(configured, { host: 'demo.example:8080' }).ok).toBe(true);
+    expect(
+      validateWebSocketUpgrade(wildcard, {
+        host: 'demo.example:8080',
+        origin: 'http://demo.example:8080',
+      })
+    ).toMatchObject({ ok: false, status: 403 });
+    expect(
+      validateWebSocketUpgrade(configuredWildcard, {
+        host: 'demo.example:8080',
+        origin: 'http://demo.example:8080',
+      }).ok
+    ).toBe(true);
+    expect(
+      validateWebSocketUpgrade(concrete, {
+        host: 'demo.local:8080',
+        origin: 'http://demo.local:8080',
+      }).ok
+    ).toBe(true);
   });
 
-  test('allows a concrete HOST bind value as an allowed host', () => {
-    const configured = testConfig({ env: { HOST: 'demo.local' } });
-
-    const result = validateWebSocketRequest(configured, {
-      host: 'demo.local:8080',
-      origin: 'http://demo.local:8080',
-      token: TOKEN,
+  test('authenticates session tokens without throwing on invalid lengths', () => {
+    expect(validateSessionToken(testConfig(), TOKEN).ok).toBe(true);
+    expect(validateSessionToken(testConfig(), undefined)).toMatchObject({
+      ok: false,
+      status: 401,
     });
+    expect(validateSessionToken(testConfig(), 'short')).toMatchObject({
+      ok: false,
+      status: 401,
+    });
+  });
 
-    expect(result.ok).toBe(true);
+  test('accepts a complete authentication message', () => {
+    expect(
+      validateAuthenticationMessage(testConfig(), {
+        type: 'authenticate',
+        token: TOKEN,
+        cols: 80,
+        rows: 24,
+      })
+    ).toEqual({ ok: true, cols: 80, rows: 24 });
+  });
+
+  test('rejects missing or invalid authentication messages', () => {
+    expect(validateAuthenticationMessage(testConfig(), null)).toMatchObject({
+      ok: false,
+      status: 400,
+    });
+    expect(validateAuthenticationMessage(testConfig(), {})).toMatchObject({
+      ok: false,
+      status: 401,
+    });
+    expect(
+      validateAuthenticationMessage(testConfig(), {
+        type: 'authenticate',
+        token: 'invalid-token',
+        cols: 80,
+        rows: 24,
+      })
+    ).toMatchObject({ ok: false, status: 401 });
+  });
+
+  test('rejects invalid initial terminal dimensions', () => {
+    for (const [cols, rows] of [
+      [1, 24],
+      [80, 0],
+      [1001, 24],
+      [80, 1001],
+      [80.5, 24],
+      [80, Number.NaN],
+    ]) {
+      expect(
+        validateAuthenticationMessage(testConfig(), {
+          type: 'authenticate',
+          token: TOKEN,
+          cols,
+          rows,
+        })
+      ).toMatchObject({ ok: false, status: 400 });
+    }
   });
 });

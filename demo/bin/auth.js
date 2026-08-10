@@ -302,21 +302,7 @@ export function createAuthConfig(options = {}) {
   });
 }
 
-export function validateTokenRequest(config, request) {
-  const hostDecision = validateAllowedHost(config, request.host);
-  if (!hostDecision.ok) {
-    return hostDecision;
-  }
-
-  const originDecision = validateMatchingOrigin(request.origin, hostDecision.host, false);
-  if (!originDecision.ok) {
-    return originDecision;
-  }
-
-  return { ok: true };
-}
-
-export function validateWebSocketRequest(config, request) {
+export function validateWebSocketUpgrade(config, request) {
   const hostDecision = validateAllowedHost(config, request.host);
   if (!hostDecision.ok) {
     return hostDecision;
@@ -327,9 +313,47 @@ export function validateWebSocketRequest(config, request) {
     return originDecision;
   }
 
-  if (!safeTokenEquals(config.token, request.token)) {
+  return { ok: true };
+}
+
+export function validateSessionToken(config, token) {
+  assertAuthConfig(config);
+  if (!safeTokenEquals(config.token, token)) {
     return unauthorized();
   }
 
   return { ok: true };
+}
+
+export function validateTerminalDimensions(cols, rows) {
+  if (
+    !Number.isInteger(cols) ||
+    !Number.isInteger(rows) ||
+    cols < 2 ||
+    rows < 1 ||
+    cols > 1000 ||
+    rows > 1000
+  ) {
+    return badRequest();
+  }
+
+  return { ok: true, cols, rows };
+}
+
+export function validateAuthenticationMessage(config, value) {
+  assertAuthConfig(config);
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return badRequest();
+  }
+
+  if (value.type !== 'authenticate') {
+    return unauthorized();
+  }
+
+  const tokenDecision = validateSessionToken(config, value.token);
+  if (!tokenDecision.ok) {
+    return tokenDecision;
+  }
+
+  return validateTerminalDimensions(value.cols, value.rows);
 }
