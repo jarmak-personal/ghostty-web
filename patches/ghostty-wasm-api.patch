@@ -563,6 +563,33 @@ index 426660621..343d37fdc 100644
 
          // On Wasm we need to export our allocator convenience functions.
          if (builtin.target.cpu.arch.isWasm()) {
+diff --git a/src/terminal/PageList.zig b/src/terminal/PageList.zig
+index 6e39428db..aac4b567c 100644
+--- a/src/terminal/PageList.zig
++++ b/src/terminal/PageList.zig
+@@ -480,6 +480,6 @@ fn initPages(
+-        // In runtime safety modes we have to memset because the Zig allocator
+-        // interface will always memset to 0xAA for undefined. In non-safe modes
+-        // we use a page allocator and the OS guarantees zeroed memory.
+-        if (comptime std.debug.runtime_safety) @memset(page_buf, 0);
+-
++        // Runtime safety allocators initialize to undefined, 0xAA. WASM also
++        // reuses page allocations without guaranteeing zeroed contents.
++        if (comptime builtin.target.cpu.arch.isWasm() or std.debug.runtime_safety)
++            @memset(page_buf, 0);
++
+         // Initialize the first set of pages to contain our viewport so that
+@@ -3388,5 +3388,6 @@ inline fn createPageExt(
+-    // Required only with runtime safety because allocators initialize
+-    // to undefined, 0xAA.
+-    if (comptime std.debug.runtime_safety) @memset(page_buf, 0);
+-
++    // Runtime safety allocators initialize to undefined, 0xAA. WASM also
++    // reuses page allocations without guaranteeing zeroed contents.
++    if (comptime builtin.target.cpu.arch.isWasm() or std.debug.runtime_safety)
++        @memset(page_buf, 0);
++
+     page.* = .{
 diff --git a/src/terminal/Screen.zig b/src/terminal/Screen.zig
 index ea8ca1445..75a72480b 100644
 --- a/src/terminal/Screen.zig
