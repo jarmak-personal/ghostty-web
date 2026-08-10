@@ -276,7 +276,7 @@ const HTML_TEMPLATE = `<!doctype html>
           try {
             history.replaceState(null, '', window.location.pathname + window.location.search);
           } catch (_error) {
-            // Referrer policy still prevents the fragment from being disclosed.
+            // URL fragments are never included in HTTP requests or referrer URLs.
           }
         } else {
           try {
@@ -291,6 +291,14 @@ const HTML_TEMPLATE = `<!doctype html>
 
       function buildWebSocketUrl() {
         return protocol + '//' + window.location.host + '/ws';
+      }
+
+      function getTerminalDimensions() {
+        const clamp = (value, minimum) => {
+          const integer = Number.isFinite(value) ? Math.trunc(value) : minimum;
+          return Math.min(1000, Math.max(minimum, integer));
+        };
+        return { cols: clamp(term.cols, 2), rows: clamp(term.rows, 1) };
       }
 
       function connect() {
@@ -312,12 +320,12 @@ const HTML_TEMPLATE = `<!doctype html>
 
         ws.onopen = () => {
           setStatus('connecting', 'Authenticating...');
+          const dimensions = getTerminalDimensions();
           ws.send(
             JSON.stringify({
               type: 'authenticate',
               token,
-              cols: term.cols,
-              rows: term.rows,
+              ...dimensions,
             })
           );
         };
@@ -364,9 +372,9 @@ const HTML_TEMPLATE = `<!doctype html>
       });
 
       // Handle resize - notify PTY when terminal dimensions change
-      term.onResize(({ cols, rows }) => {
+      term.onResize(() => {
         if (sessionReady && ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: 'resize', cols, rows }));
+          ws.send(JSON.stringify({ type: 'resize', ...getTerminalDimensions() }));
         }
       });
 

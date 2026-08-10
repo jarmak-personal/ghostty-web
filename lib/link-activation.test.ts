@@ -69,6 +69,24 @@ describe('built-in link activation', () => {
     expect(isLinkUriAllowed('custom:payload\nnext', handler)).toBe(false);
   });
 
+  test('rejects high-risk browser protocols even when the host opts in', () => {
+    const handler: ILinkHandler = {
+      allowNonHttpProtocols: true,
+      activate: () => {},
+    };
+
+    for (const uri of [
+      'javascript:alert(1)',
+      'DATA:text/html,test',
+      'vbscript:msgbox(1)',
+      'blob:https://example.com/id',
+      'filesystem:https://example.com/temporary/file.html',
+    ]) {
+      expect(isLinkUriAllowed(uri, handler)).toBe(false);
+      expect(provideOsc8Link(uri, handler)).toBeUndefined();
+    }
+  });
+
   test('requires a modifier and uses the host handler when configured', () => {
     const activations: string[] = [];
     const handler: ILinkHandler = {

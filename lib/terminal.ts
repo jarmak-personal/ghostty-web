@@ -26,6 +26,7 @@ import type {
   IDisposable,
   IEvent,
   IKeyEvent,
+  ILinkHandler,
   IRetainedBufferExtractionOptions,
   IRetainedBufferRange,
   IRetainedBufferSearchOptions,
@@ -109,6 +110,8 @@ export class Terminal implements ITerminalCore {
   // Link detection system
   private linkDetector?: LinkDetector;
   private currentHoveredLink?: ILink;
+  private observedLinkHandler: ILinkHandler | null;
+  private observedAllowNonHttpProtocols: boolean;
   private mouseMoveThrottleTimeout?: number;
   private pendingMouseMove?: MouseEvent;
 
@@ -238,6 +241,8 @@ export class Terminal implements ITerminalCore {
 
     this.cols = this.options.cols;
     this.rows = this.options.rows;
+    this.observedLinkHandler = this.options.linkHandler;
+    this.observedAllowNonHttpProtocols = this.options.linkHandler?.allowNonHttpProtocols === true;
 
     // Initialize buffer API
     this.buffer = new BufferNamespace(this);
@@ -284,7 +289,7 @@ export class Terminal implements ITerminalCore {
         break;
 
       case 'linkHandler':
-        this.linkDetector?.invalidateCache();
+        this.synchronizeLinkHandlerPolicy();
         break;
 
       case 'cols':
@@ -293,6 +298,22 @@ export class Terminal implements ITerminalCore {
         this.resize(this.options.cols, this.options.rows);
         break;
     }
+  }
+
+  /** Keep cached hit-testing aligned with both handler replacement and policy mutation. */
+  private synchronizeLinkHandlerPolicy(): void {
+    const handler = this.options.linkHandler;
+    const allowNonHttpProtocols = handler?.allowNonHttpProtocols === true;
+    if (
+      handler === this.observedLinkHandler &&
+      allowNonHttpProtocols === this.observedAllowNonHttpProtocols
+    ) {
+      return;
+    }
+
+    this.observedLinkHandler = handler;
+    this.observedAllowNonHttpProtocols = allowNonHttpProtocols;
+    this.linkDetector?.invalidateCache();
   }
 
   /**
@@ -1644,6 +1665,7 @@ export class Terminal implements ITerminalCore {
    */
   private processMouseMove(e: MouseEvent): void {
     if (!this.canvas || !this.renderer || !this.linkDetector || !this.wasmTerm) return;
+    this.synchronizeLinkHandlerPolicy();
 
     // Convert mouse coordinates to terminal cell position
     const rect = this.canvas.getBoundingClientRect();
@@ -1816,6 +1838,7 @@ export class Terminal implements ITerminalCore {
     // For more reliable clicking, detect the link at click time
     // rather than relying on cached hover state (avoids async races)
     if (!this.canvas || !this.renderer || !this.linkDetector || !this.wasmTerm) return;
+    this.synchronizeLinkHandlerPolicy();
 
     // Get click position
     const rect = this.canvas.getBoundingClientRect();

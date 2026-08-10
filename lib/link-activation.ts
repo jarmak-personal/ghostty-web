@@ -1,6 +1,7 @@
 import type { IBufferRange, ILinkHandler } from './interfaces';
 
 const DEFAULT_PROTOCOLS = new Set(['http:', 'https:']);
+const BLOCKED_PROTOCOLS = new Set(['blob:', 'data:', 'filesystem:', 'javascript:', 'vbscript:']);
 const RAW_WHITESPACE_OR_CONTROL = /[\u0000-\u0020\u007f]/;
 
 export function isLinkUriAllowed(uri: string, handler: ILinkHandler | null = null): boolean {
@@ -15,7 +16,11 @@ export function isLinkUriAllowed(uri: string, handler: ILinkHandler | null = nul
     return false;
   }
 
-  return handler?.allowNonHttpProtocols === true || DEFAULT_PROTOCOLS.has(parsed.protocol);
+  if (BLOCKED_PROTOCOLS.has(parsed.protocol)) {
+    return false;
+  }
+
+  return DEFAULT_PROTOCOLS.has(parsed.protocol) || handler?.allowNonHttpProtocols === true;
 }
 
 export function activateBuiltInLink(

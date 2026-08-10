@@ -46,9 +46,11 @@ export interface ITerminalOptions {
   /**
    * Host-owned activation for built-in terminal links.
    *
-   * OSC 8 and plain-text links are restricted to HTTP(S) by default. Set a
-   * handler with `allowNonHttpProtocols` only when the host validates and owns
-   * navigation for every additional protocol it accepts.
+   * When configured, the handler owns activation for every built-in link,
+   * including HTTP(S). OSC 8 and plain-text links are restricted to HTTP(S) by
+   * default. Set `allowNonHttpProtocols` only when the host validates and owns
+   * navigation for every additional protocol it accepts. High-risk browser
+   * protocols remain blocked.
    */
   linkHandler?: ILinkHandler | null;
 
@@ -118,9 +120,9 @@ export interface IBufferRange {
 }
 
 export interface ILinkHandler {
-  /** Activate one already-validated built-in link. */
+  /** Activate an allowed built-in link, including HTTP(S). */
   activate(event: MouseEvent, text: string, range: IBufferRange): void;
-  /** Allow valid non-HTTP(S) URLs to reach this host-owned handler. */
+  /** Allow valid non-HTTP(S) URLs, except blocked browser protocols, to reach this handler. */
   allowNonHttpProtocols?: boolean;
 }
 

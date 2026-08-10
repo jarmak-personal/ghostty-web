@@ -169,10 +169,10 @@
         });
 
         // Handle terminal resize
-        term.onResize((size) => {
+        term.onResize(() => {
           if (sessionReady && ws && ws.readyState === WebSocket.OPEN) {
             // Send resize as control sequence (server expects this format)
-            ws.send(JSON.stringify({ type: 'resize', cols: size.cols, rows: size.rows }));
+            ws.send(JSON.stringify({ type: 'resize', ...getTerminalDimensions() }));
           }
         });
 
@@ -206,7 +206,7 @@
           try {
             history.replaceState(null, '', window.location.pathname + window.location.search);
           } catch (_error) {
-            // Referrer policy still prevents the fragment from being disclosed.
+            // URL fragments are never included in HTTP requests or referrer URLs.
           }
         } else {
           try {
@@ -222,6 +222,14 @@
       function buildWebSocketUrl() {
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         return `${protocol}//${window.location.host}/ws`;
+      }
+
+      function getTerminalDimensions() {
+        const clamp = (value, minimum) => {
+          const integer = Number.isFinite(value) ? Math.trunc(value) : minimum;
+          return Math.min(1000, Math.max(minimum, integer));
+        };
+        return { cols: clamp(term.cols, 2), rows: clamp(term.rows, 1) };
       }
 
       function connectWebSocket() {
@@ -243,12 +251,12 @@
         ws.onopen = () => {
           console.log('WebSocket connected');
           updateConnectionStatus(false, 'Authenticating...');
+          const dimensions = getTerminalDimensions();
           ws.send(
             JSON.stringify({
               type: 'authenticate',
               token,
-              cols: term.cols,
-              rows: term.rows,
+              ...dimensions,
             })
           );
         };
