@@ -67,6 +67,78 @@ describe('Buffer API', () => {
       term.write('\x1b[?1049l');
       expect(term.buffer.active.type).toBe('normal');
     });
+
+    test('fires exactly once for each parser-owned screen transition', () => {
+      const changes: string[] = [];
+      const disposable = term.buffer.onBufferChange((buffer) => changes.push(buffer.type));
+
+      for (const mode of ['47', '1047', '1049']) {
+        term.write(`\x1b[?${mode}h\x1b[?${mode}h\x1b[?${mode}l\x1b[?${mode}l`);
+      }
+
+      expect(changes).toEqual([
+        'alternate',
+        'normal',
+        'alternate',
+        'normal',
+        'alternate',
+        'normal',
+      ]);
+      disposable.dispose();
+    });
+
+    test('preserves enter and reset transitions from the same write', () => {
+      const changes: string[] = [];
+      term.buffer.onBufferChange((buffer) => changes.push(buffer.type));
+
+      term.write('\x1b[?1049h\x1bc');
+
+      expect(changes).toEqual(['alternate', 'normal']);
+    });
+
+    test('retains every transition before reset and ignores no-op switches', () => {
+      const changes: string[] = [];
+      term.buffer.onBufferChange((buffer) => changes.push(buffer.type));
+
+      term.write('\x1bc\x1b[?1049l');
+      expect(changes).toEqual([]);
+
+      term.write('\x1b[?1049h\x1b[?1049l\x1b[?1049h\x1bc');
+      expect(changes).toEqual(['alternate', 'normal', 'alternate', 'normal']);
+    });
+
+    test('reconciles retained selection anchors before publishing screen transitions', () => {
+      term.write('PRIMARY');
+      term.select(0, 0, 7);
+      expect(term.hasSelection()).toBe(true);
+
+      const observed: Array<{ active: string; hasSelection: boolean }> = [];
+      term.buffer.onBufferChange((buffer) => {
+        observed.push({ active: buffer.type, hasSelection: term.hasSelection() });
+      });
+
+      term.write('\x1b[?1049h');
+
+      expect(observed).toEqual([{ active: 'alternate', hasSelection: false }]);
+      expect(term.hasSelection()).toBe(false);
+    });
+
+    test('keeps retained selection across balanced transitions in one write', () => {
+      term.write('PRIMARY');
+      term.select(0, 0, 7);
+      const observed: Array<{ active: string; selection: string }> = [];
+      term.buffer.onBufferChange((buffer) => {
+        observed.push({ active: buffer.type, selection: term.getSelection() });
+      });
+
+      term.write('\x1b[?1049hALT\x1b[?1049l');
+
+      expect(observed).toEqual([
+        { active: 'alternate', selection: 'PRIMARY' },
+        { active: 'normal', selection: 'PRIMARY' },
+      ]);
+      expect(term.getSelection()).toBe('PRIMARY');
+    });
   });
 
   describe('Buffer', () => {
@@ -104,6 +176,77 @@ describe('Buffer API', () => {
       expect(nullCell.getChars()).toBe('');
       expect(nullCell.getWidth()).toBe(1);
     });
+
+    test('represents a never-activated alternate buffer as empty', () => {
+      const alternate = term.buffer.alternate;
+      expect(alternate.length).toBe(term.rows);
+      expect(alternate.cursorX).toBe(0);
+      expect(alternate.cursorY).toBe(0);
+      expect(alternate.getLine(0)?.translateToString(true)).toBe('');
+      expect(alternate.getLine(term.rows)).toBeUndefined();
+    });
+
+    test('keeps normal and alternate contents and cursors independent', () => {
+      term.write('PRIMARY');
+      expect(term.buffer.normal.cursorX).toBe(7);
+
+      term.write('\x1b[?1049h\x1b[HALT');
+
+      expect(term.buffer.active.type).toBe('alternate');
+      expect(term.buffer.normal.getLine(0)?.translateToString(true)).toBe('PRIMARY');
+      expect(term.buffer.normal.cursorX).toBe(7);
+      expect(term.buffer.alternate.getLine(0)?.translateToString(true)).toBe('ALT');
+      expect(term.buffer.alternate.cursorX).toBe(3);
+
+      term.write('\x1b[?1049l');
+      expect(term.buffer.normal.getLine(0)?.translateToString(true)).toBe('PRIMARY');
+      expect(term.buffer.alternate.getLine(0)?.translateToString(true)).toBe('ALT');
+    });
+
+    test('preserves graphemes, wide cells, and wraps while each screen is inactive', () => {
+      term.write(`e\u0301👩‍💻\x1b[2;1H${'A'.repeat(80)}B`);
+      term.write('\x1b[?1049h');
+
+      const normalLine = term.buffer.normal.getLine(0)!;
+      expect(normalLine.getCell(0)?.getChars()).toBe('e\u0301');
+      expect(normalLine.getCell(1)?.getChars()).toBe('👩‍💻');
+      expect(normalLine.getCell(1)?.getWidth()).toBe(2);
+      expect(term.buffer.normal.getLine(2)?.isWrapped).toBe(true);
+
+      term.write('\x1b[He\u0301👩‍💻');
+      term.write('\x1b[?1049l');
+
+      const alternateLine = term.buffer.alternate.getLine(0)!;
+      expect(alternateLine.getCell(0)?.getChars()).toBe('e\u0301');
+      expect(alternateLine.getCell(1)?.getChars()).toBe('👩‍💻');
+      expect(alternateLine.getCell(1)?.getWidth()).toBe(2);
+    });
+
+    test('reads inactive primary scrollback in absolute buffer coordinates', () => {
+      for (let line = 0; line < 30; line++) term.writeln(`line ${line}`);
+      const baseY = term.buffer.normal.baseY;
+      const oldest = term.buffer.normal.getLine(0)?.translateToString(true);
+      expect(baseY).toBeGreaterThan(0);
+
+      term.write('\x1b[?1049h');
+
+      expect(term.buffer.normal.baseY).toBe(baseY);
+      expect(term.buffer.normal.length).toBe(baseY + term.rows);
+      expect(term.buffer.normal.getLine(0)?.translateToString(true)).toBe(oldest);
+    });
+
+    test('reports history base and viewport offsets in buffer coordinates', () => {
+      for (let line = 0; line < 30; line++) term.writeln(`line ${line}`);
+
+      const buffer = term.buffer.normal;
+      expect(buffer.baseY).toBeGreaterThan(0);
+      expect(buffer.viewportY).toBe(buffer.baseY);
+      expect(buffer.length).toBe(buffer.baseY + term.rows);
+      expect(buffer.cursorY).toBe(term.wasmTerm!.getCursor().y);
+
+      term.scrollLines(-2);
+      expect(buffer.viewportY).toBe(buffer.baseY - 2);
+    });
   });
 
   describe('BufferLine', () => {
@@ -131,6 +274,13 @@ describe('Buffer API', () => {
 
       expect(line).toBeDefined();
       expect(line!.isWrapped).toBe(false);
+    });
+
+    test('preserves soft-wrap metadata across retained rows', () => {
+      term.write(`${'A'.repeat(80)}B`);
+
+      expect(term.buffer.normal.getLine(0)?.isWrapped).toBe(false);
+      expect(term.buffer.normal.getLine(1)?.isWrapped).toBe(true);
     });
 
     test('translateToString should return line content', () => {
@@ -367,6 +517,15 @@ describe('Buffer API', () => {
       const line = buffer.getLine(0);
 
       expect(line!.translateToString(true)).toBe('Héllo');
+    });
+
+    test('returns complete grapheme clusters from cells and lines', () => {
+      term.write('e\u0301👩‍💻');
+      const line = term.buffer.normal.getLine(0)!;
+
+      expect(line.getCell(0)?.getChars()).toBe('e\u0301');
+      expect(line.getCell(1)?.getChars()).toBe('👩‍💻');
+      expect(line.translateToString(true)).toBe('e\u0301👩‍💻');
     });
 
     test('should handle various Unicode characters', () => {

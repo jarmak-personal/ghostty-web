@@ -188,7 +188,11 @@ export interface IBufferNamespace {
   /** The alternate buffer (used by full-screen apps like vim) */
   readonly alternate: IBuffer;
 
-  /** Event fired when buffer changes (normal ↔ alternate) */
+  /**
+   * Event fired once for each parser-owned normal ↔ alternate transition.
+   * Writes are parsed as a batch, so use the callback buffer to identify each
+   * transition; `active` may already reflect the batch's final screen.
+   */
   readonly onBufferChange: IEvent<IBuffer>;
 }
 
@@ -200,11 +204,11 @@ export interface IBuffer {
   readonly type: 'normal' | 'alternate';
   /** Cursor X position (0-indexed) */
   readonly cursorX: number;
-  /** Cursor Y position (0-indexed, relative to viewport) */
+  /** Cursor Y position (0-indexed, relative to baseY) */
   readonly cursorY: number;
-  /** Viewport Y position (scroll offset, 0 = bottom of scrollback) */
+  /** Viewport Y position in buffer coordinates */
   readonly viewportY: number;
-  /** Base Y position (always 0 for normal buffer, may vary for alternate) */
+  /** Y position of the live screen within the buffer */
   readonly baseY: number;
   /** Total buffer length (rows + scrollback for normal, just rows for alternate) */
   readonly length: number;

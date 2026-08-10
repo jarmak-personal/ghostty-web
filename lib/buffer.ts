@@ -18,14 +18,7 @@
 import { EventEmitter } from './event-emitter';
 import type { GhosttyTerminal } from './ghostty';
 import { CellFlags } from './ghostty';
-import type {
-  IBuffer,
-  IBufferCell,
-  IBufferLine,
-  IBufferNamespace,
-  IDisposable,
-  IEvent,
-} from './interfaces';
+import type { IBuffer, IBufferCell, IBufferLine, IBufferNamespace, IEvent } from './interfaces';
 import type { Terminal } from './terminal';
 import type { GhosttyCell } from './types';
 
@@ -84,6 +77,10 @@ export class BufferNamespace implements IBufferNamespace {
   _fireBufferChange(buffer: IBuffer): void {
     this.bufferChangeEmitter.fire(buffer);
   }
+
+  _dispose(): void {
+    this.bufferChangeEmitter.dispose();
+  }
 }
 
 // ============================================================================
@@ -116,7 +113,7 @@ export class Buffer implements IBuffer {
       hyperlink_id: 0,
       grapheme_len: 0,
     };
-    this.nullCell = new BufferCell(nullCellData, 0);
+    this.nullCell = new BufferCell(nullCellData);
   }
 
   get type(): 'normal' | 'alternate' {
@@ -124,80 +121,65 @@ export class Buffer implements IBuffer {
   }
 
   get cursorX(): number {
-    const wasmTerm = this.getWasmTerm();
-    if (!wasmTerm) return 0;
-    return wasmTerm.getCursor().x;
+    return this.getInfo()?.cursorX ?? 0;
   }
 
   get cursorY(): number {
-    const wasmTerm = this.getWasmTerm();
-    if (!wasmTerm) return 0;
-    return wasmTerm.getCursor().y;
+    return this.getInfo()?.cursorY ?? 0;
   }
 
   get viewportY(): number {
-    // Get viewport offset from Terminal
-    // For now, return 0 (no scrollback navigation implemented yet)
-    return 0;
+    if (this.bufferType === 'alternate') return 0;
+    const baseY = this.baseY;
+    return Math.max(0, baseY - Math.floor(this.terminal.viewportY));
   }
 
   get baseY(): number {
-    // For normal buffer: 0
-    // For alternate buffer: 0 (alternate has no scrollback)
-    return 0;
+    return this.bufferType === 'normal' ? (this.getInfo()?.scrollbackLength ?? 0) : 0;
   }
 
   get length(): number {
     const wasmTerm = this.getWasmTerm();
     if (!wasmTerm) return 0;
 
-    if (this.bufferType === 'alternate') {
-      // Alternate buffer has no scrollback, just visible rows
-      return wasmTerm.rows;
-    } else {
-      // Normal buffer: scrollback + visible rows
-      const scrollback = wasmTerm.getScrollbackLength();
-      return scrollback + wasmTerm.rows;
-    }
+    const info = this.getInfo();
+    if (!info) return this.bufferType === 'alternate' ? wasmTerm.rows : 0;
+    return info.scrollbackLength + info.rows;
   }
 
   getLine(y: number): IBufferLine | undefined {
     const wasmTerm = this.getWasmTerm();
     if (!wasmTerm) return undefined;
 
-    // Check bounds
-    if (y < 0 || y >= this.length) {
+    const info = this.getInfo();
+    const length = info
+      ? info.scrollbackLength + info.rows
+      : this.bufferType === 'alternate'
+        ? wasmTerm.rows
+        : 0;
+    if (y < 0 || y >= length) {
       return undefined;
     }
 
-    // Determine if accessing scrollback or visible screen
-    const scrollbackLength = wasmTerm.getScrollbackLength();
-    let cells: GhosttyCell[] | null;
-    let lineNumber: number;
-    let isWrapped: boolean;
-
-    if (this.bufferType === 'normal' && y < scrollbackLength) {
-      // Accessing scrollback
-      // WASM getScrollbackLine: offset 0 = oldest, offset (length-1) = newest
-      // Buffer coords: y=0 = oldest, y=(length-1) = newest
-      // So scrollbackOffset = y directly!
-      const scrollbackOffset = y;
-      cells = wasmTerm.getScrollbackLine(scrollbackOffset);
-      // TODO: We'd need WASM API to check if scrollback line is wrapped
-      // For now, assume not wrapped
-      isWrapped = false;
-    } else {
-      // Accessing visible screen
-      lineNumber = this.bufferType === 'normal' ? y - scrollbackLength : y;
-      cells = wasmTerm.getLine(lineNumber);
-      isWrapped = wasmTerm.isRowWrapped(lineNumber);
-    }
+    if (!info) return new BufferLine([], false, wasmTerm.cols);
+    const cells = wasmTerm.getBufferLine(this.bufferType, y);
 
     if (!cells) {
       return undefined;
     }
 
-    return new BufferLine(cells, isWrapped, wasmTerm.cols);
+    const graphemes: Array<string | undefined> = [];
+    for (let x = 0; x < cells.length; x++) {
+      if (cells[x].grapheme_len === 0) continue;
+      const codepoints = wasmTerm.getBufferGrapheme(this.bufferType, y, x);
+      if (codepoints?.length) graphemes[x] = String.fromCodePoint(...codepoints);
+    }
+    return new BufferLine(
+      cells,
+      wasmTerm.isBufferRowWrapped(this.bufferType, y),
+      info.cols,
+      graphemes
+    );
   }
 
   getNullCell(): IBufferCell {
@@ -206,6 +188,10 @@ export class Buffer implements IBuffer {
 
   private getWasmTerm(): GhosttyTerminal | undefined {
     return (this.terminal as any).wasmTerm as GhosttyTerminal | undefined;
+  }
+
+  private getInfo() {
+    return this.getWasmTerm()?.getBufferInfo(this.bufferType) ?? null;
   }
 }
 
@@ -220,11 +206,18 @@ export class BufferLine implements IBufferLine {
   private cells: GhosttyCell[];
   private _isWrapped: boolean;
   private _length: number;
+  private graphemes: Array<string | undefined>;
 
-  constructor(cells: GhosttyCell[], isWrapped: boolean, length: number) {
+  constructor(
+    cells: GhosttyCell[],
+    isWrapped: boolean,
+    length: number,
+    graphemes: Array<string | undefined> = []
+  ) {
     this.cells = cells;
     this._isWrapped = isWrapped;
     this._length = length;
+    this.graphemes = graphemes;
   }
 
   get length(): number {
@@ -242,25 +235,22 @@ export class BufferLine implements IBufferLine {
 
     if (x >= this.cells.length) {
       // Cell beyond what was returned (empty/null cell)
-      return new BufferCell(
-        {
-          codepoint: 0,
-          fg_r: 204,
-          fg_g: 204,
-          fg_b: 204,
-          bg_r: 0,
-          bg_g: 0,
-          bg_b: 0,
-          flags: 0,
-          width: 1,
-          hyperlink_id: 0,
-          grapheme_len: 0,
-        },
-        x
-      );
+      return new BufferCell({
+        codepoint: 0,
+        fg_r: 204,
+        fg_g: 204,
+        fg_b: 204,
+        bg_r: 0,
+        bg_g: 0,
+        bg_b: 0,
+        flags: 0,
+        width: 1,
+        hyperlink_id: 0,
+        grapheme_len: 0,
+      });
     }
 
-    return new BufferCell(this.cells[x], x);
+    return new BufferCell(this.cells[x], this.graphemes[x]);
   }
 
   translateToString(trimRight = false, startColumn = 0, endColumn = this._length): string {
@@ -294,14 +284,15 @@ export class BufferLine implements IBufferLine {
  */
 export class BufferCell implements IBufferCell {
   private cell: GhosttyCell;
-  private x: number;
+  private chars?: string;
 
-  constructor(cell: GhosttyCell, x: number) {
+  constructor(cell: GhosttyCell, chars?: string) {
     this.cell = cell;
-    this.x = x;
+    this.chars = chars;
   }
 
   getChars(): string {
+    if (this.chars !== undefined) return this.chars;
     const codepoint = this.cell.codepoint;
 
     // Return empty string for null character or invalid codepoints

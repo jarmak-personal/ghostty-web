@@ -66,7 +66,7 @@ function trackListeners(target: EventTarget, failAdd?: (type: string) => boolean
 }
 
 describe('lifecycle disposal', () => {
-  test('releases viewport and grapheme scratch allocations on every native terminal free', () => {
+  test('releases viewport, grapheme, and buffer-info scratch allocations on every native terminal free', () => {
     const memory = new WebAssembly.Memory({ initial: 1 });
     const liveAllocations = new Map<number, number>();
     let nextPointer = 64;
@@ -95,6 +95,10 @@ describe('lifecycle disposal', () => {
         new Uint32Array(memory.buffer, pointer, 1)[0] = 'é'.codePointAt(0)!;
         return 1;
       },
+      ghostty_terminal_get_buffer_info: (_handle: number, _alternate: boolean, pointer: number) => {
+        new Uint32Array(memory.buffer, pointer, 5).set([0, 0, 0, 1, 1]);
+        return 5;
+      },
       ghostty_terminal_free: () => {
         terminalFrees++;
       },
@@ -104,7 +108,14 @@ describe('lifecycle disposal', () => {
       const terminal = new GhosttyTerminal(exports, memory, 1, 1);
       terminal.getViewport(false);
       expect(terminal.getGrapheme(0, 0, false)).toEqual(['é'.codePointAt(0)]);
-      expect(liveAllocations.size).toBe(2);
+      expect(terminal.getBufferInfo('normal')).toEqual({
+        scrollbackLength: 0,
+        cursorX: 0,
+        cursorY: 0,
+        rows: 1,
+        cols: 1,
+      });
+      expect(liveAllocations.size).toBe(3);
 
       terminal.free();
       terminal.free();

@@ -11,6 +11,14 @@ import type {
 export const TERMINAL_EVENT_HEADER_SIZE = 36;
 export const MAX_TERMINAL_EVENT_BYTES = 64 * 1024;
 
+/** Parser control record consumed by Terminal but not exposed on onTerminalEvent. */
+export interface BufferChangeRecord {
+  type: 'buffer-change';
+  active: 'normal' | 'alternate';
+}
+
+export type DecodedTerminalEvent = TerminalEvent | BufferChangeRecord;
+
 const semanticActions: readonly TerminalSemanticAction[] = [
   'fresh-line',
   'fresh-line-new-prompt',
@@ -80,7 +88,7 @@ function paletteRequest(
 }
 
 /** Decode one internal WASM record into the public typed event surface. */
-export function decodeTerminalEventRecord(record: Uint8Array): TerminalEvent | null {
+export function decodeTerminalEventRecord(record: Uint8Array): DecodedTerminalEvent | null {
   if (
     record.byteLength < TERMINAL_EVENT_HEADER_SIZE ||
     record.byteLength > MAX_TERMINAL_EVENT_BYTES
@@ -152,6 +160,10 @@ export function decodeTerminalEventRecord(record: Uint8Array): TerminalEvent | n
       if (action === 1) return { type: 'clipboard', operation: 'write', selection, data: dataA };
       return null;
     }
+    case 9:
+      return flags <= 1
+        ? { type: 'buffer-change', active: flags === 1 ? 'alternate' : 'normal' }
+        : null;
     default:
       return null;
   }
