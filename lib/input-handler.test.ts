@@ -186,6 +186,36 @@ function simulateKey(
   }
 }
 
+function withNavigatorPlatform(
+  platform: string,
+  callback: () => void,
+  userAgentPlatform?: string
+): void {
+  const platformDescriptor = Object.getOwnPropertyDescriptor(navigator, 'platform');
+  const userAgentDataDescriptor = Object.getOwnPropertyDescriptor(navigator, 'userAgentData');
+  Object.defineProperty(navigator, 'platform', { configurable: true, value: platform });
+  if (userAgentPlatform !== undefined) {
+    Object.defineProperty(navigator, 'userAgentData', {
+      configurable: true,
+      value: { platform: userAgentPlatform },
+    });
+  }
+  try {
+    callback();
+  } finally {
+    if (platformDescriptor) {
+      Object.defineProperty(navigator, 'platform', platformDescriptor);
+    } else {
+      Reflect.deleteProperty(navigator, 'platform');
+    }
+    if (userAgentDataDescriptor) {
+      Object.defineProperty(navigator, 'userAgentData', userAgentDataDescriptor);
+    } else {
+      Reflect.deleteProperty(navigator, 'userAgentData');
+    }
+  }
+}
+
 describe('InputHandler', () => {
   let ghostty: Ghostty;
   let container: ReturnType<typeof createMockContainer>;
@@ -1139,6 +1169,103 @@ describe('InputHandler', () => {
       expect(dataReceived.length).toBe(1);
       // Alt+A often produces ESC a or similar
       expect(dataReceived[0].length).toBeGreaterThan(0);
+    });
+
+    test('encodes every macOS Option letter from its physical key', () => {
+      const handler = new InputHandler(
+        ghostty,
+        container as any,
+        (data) => dataReceived.push(data),
+        () => {
+          bellCalled = true;
+        }
+      );
+
+      withNavigatorPlatform('MacIntel', () => {
+        for (let codepoint = 'A'.charCodeAt(0); codepoint <= 'Z'.charCodeAt(0); codepoint++) {
+          const letter = String.fromCharCode(codepoint);
+          simulateKey(container, createKeyEvent(`Key${letter}`, 'Dead', { alt: true }));
+        }
+      });
+
+      expect(dataReceived).toEqual(
+        Array.from(
+          { length: 26 },
+          (_, index) => `\x1b${String.fromCharCode('a'.charCodeAt(0) + index)}`
+        )
+      );
+    });
+
+    test('preserves Shift casing for macOS Option letters', () => {
+      const handler = new InputHandler(
+        ghostty,
+        container as any,
+        (data) => dataReceived.push(data),
+        () => {
+          bellCalled = true;
+        }
+      );
+
+      withNavigatorPlatform(
+        'Linux x86_64',
+        () => {
+          simulateKey(container, createKeyEvent('KeyA', 'Å', { alt: true, shift: true }));
+          simulateKey(container, createKeyEvent('KeyZ', '¸', { alt: true, shift: true }));
+        },
+        'macOS'
+      );
+
+      expect(dataReceived).toEqual(['\x1bA', '\x1bZ']);
+    });
+
+    test('defers macOS Option letters to negotiated Kitty encoding', () => {
+      const handler = new InputHandler(
+        ghostty,
+        container as any,
+        (data) => dataReceived.push(data),
+        () => {
+          bellCalled = true;
+        },
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        () => ({
+          kittyFlags: KittyKeyFlags.DISAMBIGUATE,
+          modifyOtherKeysState2: false,
+        })
+      );
+
+      withNavigatorPlatform('MacIntel', () => {
+        simulateKey(container, createKeyEvent('KeyT', '†', { alt: true }));
+      });
+
+      expect(dataReceived).toEqual(['\x1b[116;3u']);
+    });
+
+    test('leaves Ctrl/AltGr, Meta, non-macOS Option, and ordinary input unchanged', () => {
+      const handler = new InputHandler(
+        ghostty,
+        container as any,
+        (data) => dataReceived.push(data),
+        () => {
+          bellCalled = true;
+        }
+      );
+
+      withNavigatorPlatform('MacIntel', () => {
+        simulateKey(container, createKeyEvent('KeyQ', '@', { ctrl: true, alt: true }));
+        simulateKey(container, createKeyEvent('KeyA', 'å'));
+        simulateKey(container, createKeyEvent('KeyT', '†', { alt: true, meta: true }));
+        simulateKey(container, createKeyEvent('Digit2', '€', { alt: true }));
+      });
+      withNavigatorPlatform('Linux x86_64', () => {
+        simulateKey(container, createKeyEvent('KeyT', '†', { alt: true }));
+      });
+
+      expect(dataReceived).toEqual(['@', 'å']);
     });
   });
 
