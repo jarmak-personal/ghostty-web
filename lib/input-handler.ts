@@ -212,6 +212,8 @@ function getMacOSOptionLetter(event: KeyboardEvent): string | null {
 export interface MouseTrackingConfig {
   /** Check if any mouse tracking mode is enabled */
   hasMouseTracking: () => boolean;
+  /** Check whether this event is reserved for application mouse tracking */
+  shouldReportEvent?: (event: MouseEvent) => boolean;
   /** Check whether a mouse button may be forwarded to the terminal */
   shouldReportButton?: (button: number) => boolean;
   /** Check if SGR extended mouse mode is enabled (mode 1006) */
@@ -254,6 +256,7 @@ export class InputHandler {
   private isComposing = false;
   private isDisposed = false;
   private mouseButtonsPressed = 0; // Track which buttons are pressed for motion reporting
+  private locallyOwnedMouseButtons = 0; // Buttons reserved by a host/local-selection override
   private lastKeyDownData: string | null = null;
   private lastKeyDownTime = 0;
   private lastPasteData: string | null = null;
@@ -320,6 +323,44 @@ export class InputHandler {
    */
   setCustomKeyEventHandler(handler: (event: KeyboardEvent) => boolean): void {
     this.customKeyEventHandler = handler;
+  }
+
+  /**
+   * Emit synthesized arrow presses through Ghostty's negotiated key encoder.
+   * Used by alternate-screen wheel fallback so cursor and keyboard modes stay authoritative.
+   */
+  sendArrowKeys(direction: 'up' | 'down', count: number): void {
+    if (this.isDisposed || count <= 0) return;
+
+    try {
+      const keyboardProtocolState = this.getKeyboardProtocolStateCallback?.();
+      this.syncEncoderOptions(keyboardProtocolState);
+      const encoded = this.encoder.encode({
+        action: KeyAction.PRESS,
+        key: direction === 'up' ? Key.UP : Key.DOWN,
+        mods: Mods.NONE,
+      });
+      const data = new TextDecoder().decode(encoded);
+
+      if (data.length > 0) {
+        for (let index = 0; index < count; index++) this.onDataCallback(data);
+      }
+    } catch (error) {
+      console.warn(`Failed to encode ${direction} arrow wheel fallback:`, error);
+    }
+  }
+
+  private syncEncoderOptions(keyboardProtocolState?: KeyboardProtocolState): void {
+    if (this.getModeCallback) {
+      this.encoder.setOption(KeyEncoderOption.CURSOR_KEY_APPLICATION, this.getModeCallback(1));
+    }
+    if (keyboardProtocolState) {
+      this.encoder.setKittyFlags(keyboardProtocolState.kittyFlags);
+      this.encoder.setOption(
+        KeyEncoderOption.MODIFY_OTHER_KEYS_STATE_2,
+        keyboardProtocolState.modifyOtherKeysState2
+      );
+    }
   }
 
   /**
@@ -615,19 +656,8 @@ export class InputHandler {
 
     // For non-printable keys or keys with modifiers, encode using Ghostty
     try {
-      // Sync encoder options with terminal mode state
-      // Mode 1 (DECCKM) controls whether arrow keys send CSI or SS3 sequences
-      if (this.getModeCallback) {
-        const appCursorMode = this.getModeCallback(1);
-        this.encoder.setOption(KeyEncoderOption.CURSOR_KEY_APPLICATION, appCursorMode);
-      }
-      if (keyboardProtocolState) {
-        this.encoder.setKittyFlags(keyboardProtocolState.kittyFlags);
-        this.encoder.setOption(
-          KeyEncoderOption.MODIFY_OTHER_KEYS_STATE_2,
-          keyboardProtocolState.modifyOtherKeysState2
-        );
-      }
+      // Sync negotiated terminal modes before every encoded key.
+      this.syncEncoderOptions(keyboardProtocolState);
 
       // For letter/number keys, even with modifiers, pass the base character
       // This helps the encoder produce correct control sequences (e.g., Ctrl+A = 0x01)
@@ -963,7 +993,16 @@ export class InputHandler {
   private handleMouseDown(event: MouseEvent): void {
     if (this.isDisposed) return;
     if (this.mouseConfig?.shouldReportButton?.(event.button) === false) return;
-    if (!this.mouseConfig?.hasMouseTracking()) return;
+    const buttonMask = 1 << event.button;
+    if (!this.mouseConfig?.hasMouseTracking()) {
+      this.locallyOwnedMouseButtons &= ~buttonMask;
+      return;
+    }
+    if (this.mouseConfig.shouldReportEvent?.(event) === false) {
+      this.locallyOwnedMouseButtons |= buttonMask;
+      this.mouseButtonsPressed &= ~buttonMask;
+      return;
+    }
 
     const cell = this.pixelToCell(event);
     if (!cell) return;
@@ -974,7 +1013,8 @@ export class InputHandler {
     const button = event.button;
 
     // Track pressed buttons for motion events
-    this.mouseButtonsPressed |= 1 << button;
+    this.locallyOwnedMouseButtons &= ~buttonMask;
+    this.mouseButtonsPressed |= buttonMask;
 
     this.sendMouseEvent(button, cell.col, cell.row, false, event);
 
@@ -989,7 +1029,17 @@ export class InputHandler {
   private handleMouseUp(event: MouseEvent): void {
     if (this.isDisposed) return;
     if (this.mouseConfig?.shouldReportButton?.(event.button) === false) return;
-    if (!this.mouseConfig?.hasMouseTracking()) return;
+    const buttonMask = 1 << event.button;
+    if ((this.locallyOwnedMouseButtons & buttonMask) !== 0) {
+      this.locallyOwnedMouseButtons &= ~buttonMask;
+      return;
+    }
+    if (!this.mouseConfig?.hasMouseTracking()) {
+      this.mouseButtonsPressed &= ~buttonMask;
+      return;
+    }
+    const pressWasReported = (this.mouseButtonsPressed & buttonMask) !== 0;
+    if (!pressWasReported && this.mouseConfig.shouldReportEvent?.(event) === false) return;
 
     const cell = this.pixelToCell(event);
     if (!cell) return;
@@ -997,7 +1047,7 @@ export class InputHandler {
     const button = event.button;
 
     // Clear pressed button
-    this.mouseButtonsPressed &= ~(1 << button);
+    this.mouseButtonsPressed &= ~buttonMask;
 
     this.sendMouseEvent(button, cell.col, cell.row, true, event);
   }
@@ -1008,6 +1058,15 @@ export class InputHandler {
   private handleMouseMove(event: MouseEvent): void {
     if (this.isDisposed) return;
     if (!this.mouseConfig?.hasMouseTracking()) return;
+    // A Shift-owned drag may end outside the container, where this handler's
+    // mouseup listener cannot observe it. Reconcile with the browser's button
+    // state so one missed release cannot suppress later any-motion reports.
+    if (event.buttons === 0) {
+      this.locallyOwnedMouseButtons = 0;
+      this.mouseButtonsPressed = 0;
+    }
+    if (this.locallyOwnedMouseButtons !== 0) return;
+    if (this.mouseConfig.shouldReportEvent?.(event) === false) return;
 
     // Check if button motion mode or any-event tracking is enabled
     // Mode 1002 = button motion, Mode 1003 = any motion
@@ -1039,6 +1098,13 @@ export class InputHandler {
   private handleWheel(event: WheelEvent): void {
     if (this.isDisposed) return;
     if (!this.mouseConfig?.hasMouseTracking()) return;
+    if (this.mouseConfig.shouldReportEvent?.(event) === false) return;
+
+    // Application mouse tracking owns the wheel even when stdin is disabled;
+    // the Terminal callback applies that input policy without exposing local scroll.
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.deltaY === 0) return;
 
     const cell = this.pixelToCell(event);
     if (!cell) return;
@@ -1047,9 +1113,6 @@ export class InputHandler {
     const button = event.deltaY < 0 ? 64 : 65;
 
     this.sendMouseEvent(button, cell.col, cell.row, false, event);
-
-    // Prevent default scrolling when mouse tracking is active
-    event.preventDefault();
   }
 
   /**
@@ -1235,6 +1298,9 @@ export class InputHandler {
       this.container.removeEventListener('wheel', this.wheelListener);
       this.wheelListener = null;
     }
+
+    this.mouseButtonsPressed = 0;
+    this.locallyOwnedMouseButtons = 0;
 
     this.encoder.dispose();
   }

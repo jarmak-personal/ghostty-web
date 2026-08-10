@@ -181,6 +181,13 @@ terminal mouse input. Selection remains available through side-effect-free `hasS
 `getSelection()` calls. Hosts can invoke `paste(text)`, `selectAll()`, `clear()`, and `reset()`;
 clear and reset mutate only client-side terminal state and never emit PTY input through `onData`.
 
+When an application enables terminal mouse tracking, unmodified pointer gestures and wheel events
+belong to that application. Hold Shift from mouse-down through mouse-up to select text locally, or
+hold Shift while using the wheel to use ghostty-web's normal scroll behavior instead. A custom wheel
+handler runs before either route: returning `true` consumes the event, while returning `false`
+delegates to application mouse reporting or local scrolling as appropriate. `disableStdin` blocks
+mouse reports and alternate-screen arrow fallback just like keyboard input.
+
 Literal search of one terminal's retained normal buffer is incremental and returns immutable,
 inclusive cell ranges. Exact extraction removes soft-wrap boundaries, preserves hard newlines, and
 contains no styling or ANSI data:
