@@ -11,6 +11,14 @@ import { CanvasRenderer, DEFAULT_THEME, type IRenderable } from './renderer';
 import type { SelectionManager } from './selection-manager';
 import { CellFlags, DirtyState, type GhosttyCell, type RenderStateSnapshot } from './types';
 
+type PathCommand = [string, ...number[]];
+
+function translatePathX(commands: PathCommand[], offset: number): PathCommand[] {
+  return commands.map(([operation, x, ...rest]) =>
+    x === undefined ? [operation] : [operation, x + offset, ...rest]
+  );
+}
+
 function makeCell(character: string, overrides: Partial<GhosttyCell> = {}): GhosttyCell {
   return {
     codepoint: character.codePointAt(0) ?? 0,
@@ -53,19 +61,33 @@ function makeState(cols: number, rows: number): RenderStateSnapshot {
 
 function createRenderHarness(
   lines: GhosttyCell[][],
-  options: { fontLigatures?: boolean; cursor?: Partial<RenderStateSnapshot['cursor']> } = {}
+  options: {
+    fontLigatures?: boolean;
+    cursor?: Partial<RenderStateSnapshot['cursor']>;
+    devicePixelRatio?: number;
+    fontSize?: number;
+  } = {}
 ): {
   renderer: CanvasRenderer;
   buffer: IRenderable;
   state: RenderStateSnapshot;
   fillTexts: Array<[string, number, number]>;
   clips: Array<[number, number, number, number]>;
+  paths: Array<{
+    operation: 'fill' | 'stroke';
+    commands: PathCommand[];
+    fillStyle: string | CanvasGradient | CanvasPattern;
+    strokeStyle: string | CanvasGradient | CanvasPattern;
+    alpha: number;
+    lineWidth: number;
+  }>;
   requestedFullFrames: boolean[];
 } {
   const canvas = document.createElement('canvas');
   const requestedFullFrames: boolean[] = [];
   const renderer = new CanvasRenderer(canvas, {
-    devicePixelRatio: 1,
+    devicePixelRatio: options.devicePixelRatio ?? 1,
+    fontSize: options.fontSize,
     fontLigatures: options.fontLigatures,
     requestRender: (forceAll) => requestedFullFrames.push(forceAll ?? false),
   });
@@ -88,14 +110,50 @@ function createRenderHarness(
   const context = (renderer as unknown as { ctx: CanvasRenderingContext2D }).ctx;
   const fillTexts: Array<[string, number, number]> = [];
   const clips: Array<[number, number, number, number]> = [];
+  const paths: Array<{
+    operation: 'fill' | 'stroke';
+    commands: PathCommand[];
+    fillStyle: string | CanvasGradient | CanvasPattern;
+    strokeStyle: string | CanvasGradient | CanvasPattern;
+    alpha: number;
+    lineWidth: number;
+  }> = [];
+  let pathCommands: PathCommand[] = [];
   context.fillText = ((text: string, x: number, y: number) => {
     fillTexts.push([text, x, y]);
   }) as CanvasRenderingContext2D['fillText'];
+  context.beginPath = () => {
+    pathCommands = [];
+  };
+  context.moveTo = (x, y) => {
+    pathCommands.push(['moveTo', x, y]);
+  };
+  context.lineTo = (x, y) => {
+    pathCommands.push(['lineTo', x, y]);
+  };
+  context.ellipse = (x, y, radiusX, radiusY, rotation, startAngle, endAngle) => {
+    pathCommands.push(['ellipse', x, y, radiusX, radiusY, rotation, startAngle, endAngle]);
+  };
+  context.closePath = () => {
+    pathCommands.push(['closePath']);
+  };
+  const recordPath = (operation: 'fill' | 'stroke') => {
+    paths.push({
+      operation,
+      commands: [...pathCommands],
+      fillStyle: context.fillStyle,
+      strokeStyle: context.strokeStyle,
+      alpha: context.globalAlpha,
+      lineWidth: context.lineWidth,
+    });
+  };
+  context.fill = (() => recordPath('fill')) as CanvasRenderingContext2D['fill'];
+  context.stroke = (() => recordPath('stroke')) as CanvasRenderingContext2D['stroke'];
   context.rect = ((x: number, y: number, width: number, height: number) => {
     clips.push([x, y, width, height]);
   }) as CanvasRenderingContext2D['rect'];
 
-  return { renderer, buffer, state, fillTexts, clips, requestedFullFrames };
+  return { renderer, buffer, state, fillTexts, clips, paths, requestedFullFrames };
 }
 
 describe('CanvasRenderer', () => {
@@ -234,11 +292,165 @@ describe('CanvasRenderer', () => {
         'e\u0301',
         '😀',
         '─',
-        '\ue0b0',
         'b',
       ]);
+      expect(harness.paths).toHaveLength(1);
+      expect(harness.paths[0].operation).toBe('fill');
       expect(harness.renderer.getFrameStats().maxRunCells).toBe(1);
       harness.renderer.dispose();
+    });
+
+    describe('Powerline separator geometry', () => {
+      const geometryMatrix = [
+        { fontSize: 11, devicePixelRatio: 1 },
+        { fontSize: 15, devicePixelRatio: 1.25 },
+        { fontSize: 19, devicePixelRatio: 2 },
+      ];
+
+      for (const options of geometryMatrix) {
+        test(`draws cell-bounded canonical shapes at ${options.fontSize}px / ${options.devicePixelRatio} DPR`, () => {
+          const separators = Array.from({ length: 8 }, (_, index) =>
+            makeCell(String.fromCodePoint(0xe0b0 + index))
+          );
+          const invisibleRow = separators.map(() => makeCell(' ', { flags: CellFlags.INVISIBLE }));
+          const harness = createRenderHarness([invisibleRow, separators, invisibleRow], options);
+          harness.renderer.render(harness.buffer, true);
+
+          const { width, height } = harness.renderer.getMetrics();
+          const rowY = height;
+          expect(harness.fillTexts).toEqual([]);
+          expect(harness.paths.map(({ operation }) => operation)).toEqual([
+            'fill',
+            'stroke',
+            'fill',
+            'stroke',
+            'fill',
+            'stroke',
+            'fill',
+            'stroke',
+          ]);
+          expect(harness.clips).toEqual(
+            Array.from({ length: 8 }, (_, column) => [column * width, rowY, width, height])
+          );
+
+          expect(harness.paths[0].commands).toEqual([
+            ['moveTo', 0, rowY],
+            ['lineTo', width, rowY + height / 2],
+            ['lineTo', 0, rowY + height],
+            ['closePath'],
+          ]);
+          expect(harness.paths[2].commands).toEqual([
+            ['moveTo', width * 3, rowY],
+            ['lineTo', width * 2, rowY + height / 2],
+            ['lineTo', width * 3, rowY + height],
+            ['closePath'],
+          ]);
+          expect(harness.paths[4].commands).toEqual([
+            ['moveTo', width * 4, rowY],
+            [
+              'ellipse',
+              width * 4,
+              rowY + height / 2,
+              width,
+              height / 2,
+              0,
+              -Math.PI / 2,
+              Math.PI / 2,
+            ],
+            ['closePath'],
+          ]);
+          expect(harness.paths[6].commands).toEqual([
+            ['moveTo', width * 7, rowY + height],
+            [
+              'ellipse',
+              width * 7,
+              rowY + height / 2,
+              width,
+              height / 2,
+              0,
+              Math.PI / 2,
+              Math.PI * 1.5,
+            ],
+            ['closePath'],
+          ]);
+          expect(harness.paths[1].commands).toEqual(
+            translatePathX(harness.paths[0].commands.slice(0, -1), width)
+          );
+          expect(harness.paths[3].commands).toEqual(
+            translatePathX(harness.paths[2].commands.slice(0, -1), width)
+          );
+          expect(harness.paths[5].commands).toEqual(
+            translatePathX(harness.paths[4].commands.slice(0, -1), width)
+          );
+          expect(harness.paths[7].commands).toEqual(
+            translatePathX(harness.paths[6].commands.slice(0, -1), width)
+          );
+          for (const path of harness.paths) {
+            expect(path.fillStyle).toBe('rgb(212, 212, 212)');
+            expect(path.alpha).toBe(1);
+            if (path.operation === 'stroke') {
+              expect(path.strokeStyle).toBe(path.fillStyle);
+              expect(path.lineWidth * options.devicePixelRatio).toBe(1);
+            }
+          }
+          harness.renderer.dispose();
+        });
+      }
+
+      test('preserves selection, inverse, faint, and block-cursor colors', () => {
+        const harness = createRenderHarness(
+          [
+            [
+              makeCell('\ue0b0', { fg_r: 1, fg_g: 2, fg_b: 3 }),
+              makeCell('\ue0b2', {
+                flags: CellFlags.INVERSE,
+                bg_r: 4,
+                bg_g: 5,
+                bg_b: 6,
+              }),
+              makeCell('\ue0b4', { flags: CellFlags.FAINT, fg_r: 7, fg_g: 8, fg_b: 9 }),
+            ],
+          ],
+          { cursor: { x: 1, visible: true, style: 'block' } }
+        );
+        harness.renderer.setSelectionManager({
+          hasSelection: () => true,
+          getSelectionCoords: () => ({ startCol: 0, startRow: 0, endCol: 0, endRow: 0 }),
+          getDirtySelectionRows: () => new Set<number>(),
+          clearDirtySelectionRows: () => {},
+        } as unknown as SelectionManager);
+        harness.renderer.render(harness.buffer, true);
+
+        expect(harness.paths.map(({ fillStyle, alpha }) => ({ fillStyle, alpha }))).toEqual([
+          { fillStyle: DEFAULT_THEME.selectionForeground, alpha: 1 },
+          { fillStyle: 'rgb(4, 5, 6)', alpha: 1 },
+          { fillStyle: 'rgb(7, 8, 9)', alpha: 0.5 },
+          { fillStyle: DEFAULT_THEME.cursorAccent, alpha: 1 },
+        ]);
+        harness.renderer.dispose();
+      });
+
+      test('leaves other private-use and grapheme cells on the font path', () => {
+        const harness = createRenderHarness([
+          [
+            makeCell('\ue0af'),
+            makeCell('\ue0b8'),
+            makeCell('\ue0a0'),
+            makeCell('\ue0b0', { grapheme_len: 1 }),
+          ],
+        ]);
+        harness.buffer.getGraphemeString = (_row, column) => (column === 3 ? '\ue0b0\ufe0f' : ' ');
+        harness.renderer.render(harness.buffer, true);
+
+        expect(harness.paths).toEqual([]);
+        expect(harness.fillTexts.map(([text]) => text)).toEqual([
+          '\ue0af',
+          '\ue0b8',
+          '\ue0a0',
+          '\ue0b0\ufe0f',
+        ]);
+        harness.renderer.dispose();
+      });
     });
 
     test('splits cursor ownership without changing its exact cell geometry', () => {
