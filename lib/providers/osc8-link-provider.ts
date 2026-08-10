@@ -10,6 +10,8 @@
  * so we just need to scan for contiguous regions with the same ID.
  */
 
+import type { ILinkHandler } from '../interfaces';
+import { activateBuiltInLink, isLinkUriAllowed } from '../link-activation';
 import type { IBufferRange, ILink, ILinkProvider } from '../types';
 
 /**
@@ -20,7 +22,10 @@ import type { IBufferRange, ILink, ILinkProvider } from '../types';
  * hyperlink_id across wrapped lines.
  */
 export class OSC8LinkProvider implements ILinkProvider {
-  constructor(private terminal: ITerminalForOSC8Provider) {}
+  constructor(
+    private terminal: ITerminalForOSC8Provider,
+    private getLinkHandler: () => ILinkHandler | null = () => null
+  ) {}
 
   /**
    * Provide all OSC 8 links on the given row
@@ -68,7 +73,7 @@ export class OSC8LinkProvider implements ILinkProvider {
         uri = this.terminal.wasmTerm.getHyperlinkUri(viewportRow, x);
       }
 
-      if (uri) {
+      if (uri && isLinkUriAllowed(uri, this.getLinkHandler())) {
         // Find the end of this link by scanning forward until we hit a cell
         // without a hyperlink or with a different URI
         let endX = x;
@@ -100,10 +105,7 @@ export class OSC8LinkProvider implements ILinkProvider {
           text: uri,
           range,
           activate: (event) => {
-            // Open link if Ctrl/Cmd is pressed
-            if (event.ctrlKey || event.metaKey) {
-              window.open(uri, '_blank', 'noopener,noreferrer');
-            }
+            activateBuiltInLink(event, uri, range, this.getLinkHandler());
           },
         });
       }

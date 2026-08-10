@@ -202,6 +202,7 @@ export class Terminal implements ITerminalCore {
       focusOnOpen: options.focusOnOpen ?? true,
       disableContextMenu: options.disableContextMenu ?? false,
       resolveClipboardFilePaste: options.resolveClipboardFilePaste,
+      linkHandler: options.linkHandler ?? null,
       smoothScrollDuration: options.smoothScrollDuration ?? 100, // Default: 100ms smooth scroll
     };
 
@@ -280,6 +281,10 @@ export class Terminal implements ITerminalCore {
 
       case 'fontLigatures':
         this.renderer?.setFontLigatures(this.options.fontLigatures);
+        break;
+
+      case 'linkHandler':
+        this.linkDetector?.invalidateCache();
         break;
 
       case 'cols':
@@ -526,8 +531,12 @@ export class Terminal implements ITerminalCore {
 
       // Register built-ins in fallback order. Public custom providers are
       // intentionally prepended so applications can override both built-ins.
-      this.linkDetector.registerProvider(new OSC8LinkProvider(this));
-      this.linkDetector.registerProvider(new UrlRegexProvider(this));
+      this.linkDetector.registerProvider(
+        new OSC8LinkProvider(this, () => this.options.linkHandler)
+      );
+      this.linkDetector.registerProvider(
+        new UrlRegexProvider(this, () => this.options.linkHandler)
+      );
 
       // Setup mouse event handling for links and scrollbar
       // Use capture phase to intercept scrollbar clicks before SelectionManager

@@ -43,6 +43,15 @@ export interface ITerminalOptions {
    */
   resolveClipboardFilePaste?: ClipboardFilePasteResolver;
 
+  /**
+   * Host-owned activation for built-in terminal links.
+   *
+   * OSC 8 and plain-text links are restricted to HTTP(S) by default. Set a
+   * handler with `allowNonHttpProtocols` only when the host validates and owns
+   * navigation for every additional protocol it accepts.
+   */
+  linkHandler?: ILinkHandler | null;
+
   // Scrolling options
   smoothScrollDuration?: number; // Duration in ms for smooth scroll animation (default: 100, 0 = instant)
 
@@ -106,6 +115,13 @@ export interface ITerminalCore {
 export interface IBufferRange {
   start: { x: number; y: number };
   end: { x: number; y: number };
+}
+
+export interface ILinkHandler {
+  /** Activate one already-validated built-in link. */
+  activate(event: MouseEvent, text: string, range: IBufferRange): void;
+  /** Allow valid non-HTTP(S) URLs to reach this host-owned handler. */
+  allowNonHttpProtocols?: boolean;
 }
 
 /** Inclusive retained normal-buffer cell coordinates. */

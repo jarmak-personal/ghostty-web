@@ -133,6 +133,11 @@ glyphs, selection, cursor, hyperlinks, and rendition boundaries remain independe
 option to `false` for isolated cell glyph draws. Changing it after `open()` repaints the retained
 Canvas without replacing terminal state, scrollback, or PTY geometry.
 
+Built-in OSC 8 and plain-text links open only absolute HTTP(S) URLs by default. Applications that
+need additional protocols can provide a host-owned `linkHandler`; setting
+`allowNonHttpProtocols: true` makes that handler responsible for validating and activating those
+URLs. Custom link providers remain fully application-owned.
+
 The hvir compatibility artifact also exposes typed events sourced directly from Ghostty's parser:
 
 ```typescript
