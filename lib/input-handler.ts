@@ -307,8 +307,12 @@ export class InputHandler {
     this.getKeyboardProtocolStateCallback = getKeyboardProtocolState;
     this.resolveClipboardFilePasteCallback = resolveClipboardFilePaste;
 
-    // Attach event listeners
-    this.attach();
+    try {
+      this.attach();
+    } catch (error) {
+      this.dispose();
+      throw error;
+    }
   }
 
   /**
@@ -1172,6 +1176,7 @@ export class InputHandler {
    */
   dispose(): void {
     if (this.isDisposed) return;
+    this.isDisposed = true;
 
     if (this.keydownListener) {
       this.container.removeEventListener('keydown', this.keydownListener);
@@ -1231,7 +1236,7 @@ export class InputHandler {
       this.wheelListener = null;
     }
 
-    this.isDisposed = true;
+    this.encoder.dispose();
   }
 
   /**

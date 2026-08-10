@@ -63,6 +63,13 @@ export class SelectionManager {
   private contextMenuResetTimeout: number | null = null;
   private boundClickHandler: ((e: MouseEvent) => void) | null = null;
   private boundDocumentMouseMoveHandler: ((e: MouseEvent) => void) | null = null;
+  private boundDocumentMouseDownHandler: ((e: MouseEvent) => void) | null = null;
+  private boundCanvasMouseDownHandler: ((e: MouseEvent) => void) | null = null;
+  private boundCanvasMouseMoveHandler: ((e: MouseEvent) => void) | null = null;
+  private boundCanvasMouseLeaveHandler: ((e: MouseEvent) => void) | null = null;
+  private boundCanvasMouseEnterHandler: (() => void) | null = null;
+  private boundCanvasClickHandler: ((e: MouseEvent) => void) | null = null;
+  private isDisposed = false;
 
   // Auto-scroll state for drag selection
   private autoScrollInterval: ReturnType<typeof setInterval> | null = null;
@@ -113,8 +120,12 @@ export class SelectionManager {
     this.wasmTerm = wasmTerm;
     this.textarea = textarea;
 
-    // Attach mouse event listeners
-    this.attachEventListeners(contextMenuEnabled);
+    try {
+      this.attachEventListeners(contextMenuEnabled);
+    } catch (error) {
+      this.dispose();
+      throw error;
+    }
   }
 
   // ==========================================================================
@@ -400,6 +411,9 @@ export class SelectionManager {
    * Cleanup resources
    */
   dispose(): void {
+    if (this.isDisposed) return;
+    this.isDisposed = true;
+
     this.restoreContextMenuTextarea();
     this.selectionChangedEmitter.dispose();
 
@@ -418,9 +432,35 @@ export class SelectionManager {
       this.boundDocumentMouseMoveHandler = null;
     }
 
+    if (this.boundDocumentMouseDownHandler) {
+      document.removeEventListener('mousedown', this.boundDocumentMouseDownHandler);
+      this.boundDocumentMouseDownHandler = null;
+    }
+
+    const canvas = this.renderer.getCanvas();
+    if (this.boundCanvasMouseDownHandler) {
+      canvas.removeEventListener('mousedown', this.boundCanvasMouseDownHandler);
+      this.boundCanvasMouseDownHandler = null;
+    }
+    if (this.boundCanvasMouseMoveHandler) {
+      canvas.removeEventListener('mousemove', this.boundCanvasMouseMoveHandler);
+      this.boundCanvasMouseMoveHandler = null;
+    }
+    if (this.boundCanvasMouseLeaveHandler) {
+      canvas.removeEventListener('mouseleave', this.boundCanvasMouseLeaveHandler);
+      this.boundCanvasMouseLeaveHandler = null;
+    }
+    if (this.boundCanvasMouseEnterHandler) {
+      canvas.removeEventListener('mouseenter', this.boundCanvasMouseEnterHandler);
+      this.boundCanvasMouseEnterHandler = null;
+    }
+    if (this.boundCanvasClickHandler) {
+      canvas.removeEventListener('click', this.boundCanvasClickHandler);
+      this.boundCanvasClickHandler = null;
+    }
+
     // Clean up context menu event listener
     if (this.boundContextMenuHandler) {
-      const canvas = this.renderer.getCanvas();
       canvas.removeEventListener('contextmenu', this.boundContextMenuHandler);
       this.boundContextMenuHandler = null;
     }
@@ -430,8 +470,6 @@ export class SelectionManager {
       document.removeEventListener('click', this.boundClickHandler);
       this.boundClickHandler = null;
     }
-
-    // Canvas event listeners will be cleaned up when canvas is removed from DOM
   }
 
   // ==========================================================================
@@ -445,7 +483,7 @@ export class SelectionManager {
     const canvas = this.renderer.getCanvas();
 
     // Mouse down - start selection or clear existing
-    canvas.addEventListener('mousedown', (e: MouseEvent) => {
+    const canvasMouseDownHandler = (e: MouseEvent) => {
       if (e.button === 0) {
         // Left click only
 
@@ -472,10 +510,12 @@ export class SelectionManager {
         this.mouseDownY = e.offsetY;
         this.dragThresholdMet = false;
       }
-    });
+    };
+    canvas.addEventListener('mousedown', canvasMouseDownHandler);
+    this.boundCanvasMouseDownHandler = canvasMouseDownHandler;
 
     // Mouse move on canvas - update selection
-    canvas.addEventListener('mousemove', (e: MouseEvent) => {
+    const canvasMouseMoveHandler = (e: MouseEvent) => {
       if (this.isSelecting) {
         // Check if drag threshold has been met
         if (!this.dragThresholdMet) {
@@ -500,10 +540,12 @@ export class SelectionManager {
         // Check if near edges for auto-scroll
         this.updateAutoScroll(e.offsetY, canvas.clientHeight);
       }
-    });
+    };
+    canvas.addEventListener('mousemove', canvasMouseMoveHandler);
+    this.boundCanvasMouseMoveHandler = canvasMouseMoveHandler;
 
     // Mouse leave - check for auto-scroll when leaving canvas during drag
-    canvas.addEventListener('mouseleave', (e: MouseEvent) => {
+    const canvasMouseLeaveHandler = (e: MouseEvent) => {
       if (this.isSelecting) {
         // Determine scroll direction based on where mouse left
         const rect = canvas.getBoundingClientRect();
@@ -513,14 +555,18 @@ export class SelectionManager {
           this.startAutoScroll(1); // Scroll down
         }
       }
-    });
+    };
+    canvas.addEventListener('mouseleave', canvasMouseLeaveHandler);
+    this.boundCanvasMouseLeaveHandler = canvasMouseLeaveHandler;
 
     // Mouse enter - stop auto-scroll when mouse returns to canvas
-    canvas.addEventListener('mouseenter', () => {
+    const canvasMouseEnterHandler = () => {
       if (this.isSelecting) {
         this.stopAutoScroll();
       }
-    });
+    };
+    canvas.addEventListener('mouseenter', canvasMouseEnterHandler);
+    this.boundCanvasMouseEnterHandler = canvasMouseEnterHandler;
 
     // Document-level mousemove for tracking mouse position during drag outside canvas
     this.boundDocumentMouseMoveHandler = (e: MouseEvent) => {
@@ -579,9 +625,11 @@ export class SelectionManager {
     document.addEventListener('mousemove', this.boundDocumentMouseMoveHandler);
 
     // Track mousedown on document to know if a click started inside the canvas
-    document.addEventListener('mousedown', (e: MouseEvent) => {
+    const documentMouseDownHandler = (e: MouseEvent) => {
       this.mouseDownTarget = e.target;
-    });
+    };
+    document.addEventListener('mousedown', documentMouseDownHandler);
+    this.boundDocumentMouseDownHandler = documentMouseDownHandler;
 
     // CRITICAL FIX: Listen for mouseup on DOCUMENT, not just canvas
     // This catches mouseup events that happen outside the canvas (common during drag)
@@ -609,7 +657,7 @@ export class SelectionManager {
 
     // Handle click events for double-click (word) and triple-click (line) selection
     // Use event.detail which browsers set to click count (1, 2, 3, etc.)
-    canvas.addEventListener('click', (e: MouseEvent) => {
+    const canvasClickHandler = (e: MouseEvent) => {
       // event.detail: 1 = single, 2 = double, 3 = triple click
       if (e.detail === 2) {
         // Double-click - select word
@@ -670,7 +718,9 @@ export class SelectionManager {
           }
         }
       }
-    });
+    };
+    canvas.addEventListener('click', canvasClickHandler);
+    this.boundCanvasClickHandler = canvasClickHandler;
 
     if (contextMenuEnabled) {
       // Right-click (context menu) - position textarea to show browser's native menu

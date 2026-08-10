@@ -241,11 +241,14 @@ export class KeyEncoder {
   constructor(exports: GhosttyWasmExports) {
     this.exports = exports;
     const encoderPtrPtr = this.exports.ghostty_wasm_alloc_opaque();
-    const result = this.exports.ghostty_key_encoder_new(0, encoderPtrPtr);
-    if (result !== 0) throw new Error(`Failed to create key encoder: ${result}`);
-    const view = new DataView(this.exports.memory.buffer);
-    this.encoder = view.getUint32(encoderPtrPtr, true);
-    this.exports.ghostty_wasm_free_opaque(encoderPtrPtr);
+    try {
+      const result = this.exports.ghostty_key_encoder_new(0, encoderPtrPtr);
+      if (result !== 0) throw new Error(`Failed to create key encoder: ${result}`);
+      const view = new DataView(this.exports.memory.buffer);
+      this.encoder = view.getUint32(encoderPtrPtr, true);
+    } finally {
+      this.exports.ghostty_wasm_free_opaque(encoderPtrPtr);
+    }
   }
 
   setOption(option: KeyEncoderOption, value: boolean | number): void {
@@ -467,11 +470,8 @@ export class GhosttyTerminal {
   }
 
   free(): void {
+    this.invalidateBuffers();
     if (!this.handle) return;
-    if (this.viewportBufferPtr) {
-      this.exports.ghostty_wasm_free_u8_array(this.viewportBufferPtr, this.viewportBufferSize);
-      this.viewportBufferPtr = 0;
-    }
     this.exports.ghostty_terminal_free(this.handle);
     this.handle = 0;
   }
