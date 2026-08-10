@@ -376,7 +376,7 @@ export class GhosttyTerminal {
         const view = new DataView(this.memory.buffer);
         let offset = configPtr;
 
-        // scrollback_limit (u32)
+        // scrollback_limit (u32 line count; WASM converts it to a byte budget)
         view.setUint32(offset, config.scrollbackLimit ?? 10000, true);
         offset += 4;
         offset = writeColorConfig(view, offset, config);
@@ -838,7 +838,9 @@ export class GhosttyTerminal {
    * Get ALL viewport cells in ONE WASM call - the key performance optimization!
    * Returns a reusable cell array (zero allocation after warmup).
    */
-  getViewport(): GhosttyCell[] {
+  getViewport(refreshRenderState: boolean = true): GhosttyCell[] {
+    if (refreshRenderState) this.update();
+
     const totalCells = this._cols * this._rows;
     const neededSize = totalCells * GhosttyTerminal.CELL_SIZE;
 
@@ -879,7 +881,7 @@ export class GhosttyTerminal {
     // Call update() to ensure render state is fresh.
     // This is safe to call multiple times - dirty state persists until markClean().
     this.update();
-    const viewport = this.getViewport();
+    const viewport = this.getViewport(false);
     const start = y * this._cols;
     // Return deep copies to avoid cell pool reference issues
     return viewport.slice(start, start + this._cols).map((cell) => ({ ...cell }));
@@ -1217,12 +1219,14 @@ export class GhosttyTerminal {
    * (Hindi, emoji with ZWJ, etc.) it returns multiple codepoints.
    * @returns Array of codepoints, or null on error
    */
-  getGrapheme(row: number, col: number): number[] | null {
+  getGrapheme(row: number, col: number, refreshRenderState: boolean = true): number[] | null {
     // Allocate buffer on first use (16 codepoints should be enough for any grapheme)
     if (!this.graphemeBuffer) {
       this.graphemeBufferPtr = this.exports.ghostty_wasm_alloc_u8_array(16 * 4);
       this.graphemeBuffer = new Uint32Array(this.memory.buffer, this.graphemeBufferPtr, 16);
     }
+
+    if (refreshRenderState) this.update();
 
     const count = this.exports.ghostty_render_state_get_grapheme(
       this.handle,
@@ -1243,8 +1247,8 @@ export class GhosttyTerminal {
    * Get a string representation of the grapheme at the given position.
    * This properly handles complex scripts like Hindi, emoji with ZWJ, etc.
    */
-  getGraphemeString(row: number, col: number): string {
-    const codepoints = this.getGrapheme(row, col);
+  getGraphemeString(row: number, col: number, refreshRenderState: boolean = true): string {
+    const codepoints = this.getGrapheme(row, col, refreshRenderState);
     if (!codepoints || codepoints.length === 0) return ' ';
     return String.fromCodePoint(...codepoints);
   }
