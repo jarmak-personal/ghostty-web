@@ -261,57 +261,77 @@ export class KeyEncoder {
   }
 
   encode(event: KeyEvent): Uint8Array {
-    const eventPtrPtr = this.exports.ghostty_wasm_alloc_opaque();
-    const createResult = this.exports.ghostty_key_event_new(0, eventPtrPtr);
-    if (createResult !== 0) throw new Error(`Failed to create key event: ${createResult}`);
+    const cleanups: Array<() => void> = [];
+    const releaseTemporaryResources = (preserveActiveError: boolean): void => {
+      let cleanupFailed = false;
+      let cleanupError: unknown;
+      for (let index = cleanups.length - 1; index >= 0; index--) {
+        try {
+          cleanups[index]();
+        } catch (error) {
+          if (!cleanupFailed) {
+            cleanupFailed = true;
+            cleanupError = error;
+          }
+        }
+      }
 
-    const view = new DataView(this.exports.memory.buffer);
-    const eventPtr = view.getUint32(eventPtrPtr, true);
-    this.exports.ghostty_wasm_free_opaque(eventPtrPtr);
+      if (!preserveActiveError && cleanupFailed) throw cleanupError;
+    };
+    let encodingFailed = true;
 
-    this.exports.ghostty_key_event_set_action(eventPtr, event.action);
-    this.exports.ghostty_key_event_set_key(eventPtr, event.key);
-    this.exports.ghostty_key_event_set_mods(eventPtr, event.mods);
-    if (event.unshiftedCodepoint !== undefined) {
-      this.exports.ghostty_key_event_set_unshifted_codepoint(eventPtr, event.unshiftedCodepoint);
+    try {
+      const eventPtrPtr = this.exports.ghostty_wasm_alloc_opaque();
+      cleanups.push(() => this.exports.ghostty_wasm_free_opaque(eventPtrPtr));
+
+      const createResult = this.exports.ghostty_key_event_new(0, eventPtrPtr);
+      if (createResult !== 0) throw new Error(`Failed to create key event: ${createResult}`);
+
+      // Native calls can grow memory, so acquire a fresh view after creating the event.
+      const eventPtr = new DataView(this.exports.memory.buffer).getUint32(eventPtrPtr, true);
+      cleanups.push(() => this.exports.ghostty_key_event_free(eventPtr));
+
+      this.exports.ghostty_key_event_set_action(eventPtr, event.action);
+      this.exports.ghostty_key_event_set_key(eventPtr, event.key);
+      this.exports.ghostty_key_event_set_mods(eventPtr, event.mods);
+      if (event.unshiftedCodepoint !== undefined) {
+        this.exports.ghostty_key_event_set_unshifted_codepoint(eventPtr, event.unshiftedCodepoint);
+      }
+
+      if (event.utf8) {
+        const utf8Bytes = new TextEncoder().encode(event.utf8);
+        const utf8Ptr = this.exports.ghostty_wasm_alloc_u8_array(utf8Bytes.length);
+        cleanups.push(() => this.exports.ghostty_wasm_free_u8_array(utf8Ptr, utf8Bytes.length));
+        new Uint8Array(this.exports.memory.buffer).set(utf8Bytes, utf8Ptr);
+        this.exports.ghostty_key_event_set_utf8(eventPtr, utf8Ptr, utf8Bytes.length);
+      }
+
+      const bufferSize = 32;
+      const bufPtr = this.exports.ghostty_wasm_alloc_u8_array(bufferSize);
+      cleanups.push(() => this.exports.ghostty_wasm_free_u8_array(bufPtr, bufferSize));
+      const writtenPtr = this.exports.ghostty_wasm_alloc_usize();
+      cleanups.push(() => this.exports.ghostty_wasm_free_usize(writtenPtr));
+
+      const encodeResult = this.exports.ghostty_key_encoder_encode(
+        this.encoder,
+        eventPtr,
+        bufPtr,
+        bufferSize,
+        writtenPtr
+      );
+
+      if (encodeResult !== 0) throw new Error(`Failed to encode key: ${encodeResult}`);
+
+      // Encoding may grow WASM memory and detach every view of the old buffer.
+      const bytesWritten = new DataView(this.exports.memory.buffer).getUint32(writtenPtr, true);
+      const encoded = new Uint8Array(this.exports.memory.buffer, bufPtr, bytesWritten).slice();
+      encodingFailed = false;
+      return encoded;
+    } finally {
+      // A cleanup failure should be visible after a successful encode, but must not
+      // replace the original exception when encoding itself failed.
+      releaseTemporaryResources(encodingFailed);
     }
-
-    if (event.utf8) {
-      const encoder = new TextEncoder();
-      const utf8Bytes = encoder.encode(event.utf8);
-      const utf8Ptr = this.exports.ghostty_wasm_alloc_u8_array(utf8Bytes.length);
-      new Uint8Array(this.exports.memory.buffer).set(utf8Bytes, utf8Ptr);
-      this.exports.ghostty_key_event_set_utf8(eventPtr, utf8Ptr, utf8Bytes.length);
-      this.exports.ghostty_wasm_free_u8_array(utf8Ptr, utf8Bytes.length);
-    }
-
-    const bufferSize = 32;
-    const bufPtr = this.exports.ghostty_wasm_alloc_u8_array(bufferSize);
-    const writtenPtr = this.exports.ghostty_wasm_alloc_usize();
-
-    const encodeResult = this.exports.ghostty_key_encoder_encode(
-      this.encoder,
-      eventPtr,
-      bufPtr,
-      bufferSize,
-      writtenPtr
-    );
-
-    if (encodeResult !== 0) {
-      this.exports.ghostty_wasm_free_u8_array(bufPtr, bufferSize);
-      this.exports.ghostty_wasm_free_usize(writtenPtr);
-      this.exports.ghostty_key_event_free(eventPtr);
-      throw new Error(`Failed to encode key: ${encodeResult}`);
-    }
-
-    const bytesWritten = view.getUint32(writtenPtr, true);
-    const encoded = new Uint8Array(this.exports.memory.buffer, bufPtr, bytesWritten).slice();
-
-    this.exports.ghostty_wasm_free_u8_array(bufPtr, bufferSize);
-    this.exports.ghostty_wasm_free_usize(writtenPtr);
-    this.exports.ghostty_key_event_free(eventPtr);
-
-    return encoded;
   }
 
   dispose(): void {
