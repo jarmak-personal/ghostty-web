@@ -8,6 +8,13 @@ import { Ghostty } from './ghostty';
 
 // Module-level Ghostty instance (initialized by init())
 let ghosttyInstance: Ghostty | null = null;
+let ghosttyInitialization: Promise<Ghostty> | null = null;
+let initializedWasmUrl: string | null = null;
+
+export interface InitOptions {
+  /** Exact URL or file path of the Ghostty WebAssembly binary. */
+  wasmUrl?: string | URL;
+}
 
 /**
  * Initialize the ghostty-web library by loading the WASM module.
@@ -25,11 +32,30 @@ let ghosttyInstance: Ghostty | null = null;
  * term.open(document.getElementById('terminal'));
  * ```
  */
-export async function init(): Promise<void> {
-  if (ghosttyInstance) {
-    return; // Already initialized
+export async function init(options: InitOptions = {}): Promise<void> {
+  const requestedWasmUrl = options.wasmUrl === undefined ? null : String(options.wasmUrl);
+  if (ghosttyInitialization) {
+    if (requestedWasmUrl !== null && requestedWasmUrl !== initializedWasmUrl) {
+      throw new Error(
+        'ghostty-web is already initializing or initialized with a different WASM URL.'
+      );
+    }
+    ghosttyInstance = await ghosttyInitialization;
+    return;
   }
-  ghosttyInstance = await Ghostty.load();
+
+  initializedWasmUrl = requestedWasmUrl ?? Ghostty.defaultWasmUrl;
+  const initialization = Ghostty.load(options.wasmUrl);
+  ghosttyInitialization = initialization;
+  try {
+    ghosttyInstance = await initialization;
+  } catch (error) {
+    if (ghosttyInitialization === initialization) {
+      ghosttyInitialization = null;
+      initializedWasmUrl = null;
+    }
+    throw error;
+  }
 }
 
 /**

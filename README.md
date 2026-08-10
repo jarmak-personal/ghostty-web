@@ -73,6 +73,34 @@ term.onData((data) => websocket.send(data));
 websocket.onmessage = (e) => term.write(e.data);
 ```
 
+### WASM loading and Content Security Policy
+
+The production build emits `ghostty-vt.wasm` beside the ESM and UMD bundles and loads that external
+asset by default. Deploy the JavaScript bundle and WASM file together. If your bundler or asset
+pipeline puts the binary elsewhere, pass its exact URL during initialization:
+
+```javascript
+import { init } from 'ghostty-web';
+import wasmUrl from 'ghostty-web/ghostty-vt.wasm?url';
+
+await init({ wasmUrl });
+```
+
+A public URL or a module-relative `URL` works too, including in workers:
+
+```javascript
+await init({ wasmUrl: new URL('./assets/ghostty-vt.wasm', import.meta.url) });
+```
+
+Serve the binary as `application/wasm`. A same-origin strict CSP needs `connect-src 'self'` and
+`script-src 'self' 'wasm-unsafe-eval'`; cross-origin hosting must also be allowed by `connect-src`
+and CORS. `init()` without options remains supported and uses the emitted module-relative asset.
+Concurrent calls for the same source share one load; a later conflicting `wasmUrl` is rejected because
+the first successful initialization owns the shared instance. Load failures include the exact
+attempted URL and the fetch or WebAssembly error.
+Run `bun run dev` and open [`/demo/csp-demo.html`](./demo/csp-demo.html) for a separately served
+WASM example with a strict script and connection policy.
+
 `open()` focuses the terminal by default. Set `focusOnOpen: false` to mount or prewarm a terminal
 without moving focus from another control; an explicit later call to `term.focus()` still focuses
 the terminal normally.

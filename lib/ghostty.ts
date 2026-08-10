@@ -6,6 +6,7 @@
  * snapshot of all render data in a single update call.
  */
 
+import defaultWasmUrl from '../ghostty-vt.wasm?url&no-inline';
 import { decodeTerminalEventRecord, MAX_TERMINAL_EVENT_BYTES } from './terminal-events';
 import {
   CellFlags,
@@ -120,6 +121,10 @@ export class Ghostty {
   private exports: GhosttyWasmExports;
   private memory: WebAssembly.Memory;
 
+  static get defaultWasmUrl(): string {
+    return defaultWasmUrl;
+  }
+
   constructor(wasmInstance: WebAssembly.Instance) {
     this.exports = wasmInstance.exports as GhosttyWasmExports;
     this.memory = this.exports.memory;
@@ -137,43 +142,16 @@ export class Ghostty {
     return new GhosttyTerminal(this.exports, this.memory, cols, rows, config);
   }
 
-  static async load(wasmPath?: string): Promise<Ghostty> {
-    // If explicit path provided, use it
-    if (wasmPath) {
-      return Ghostty.loadFromPath(wasmPath);
+  static async load(wasmPath: string | URL = defaultWasmUrl): Promise<Ghostty> {
+    try {
+      return await Ghostty.loadFromPath(wasmPath);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`Failed to load Ghostty WASM from ${String(wasmPath)}: ${detail}`);
     }
-
-    // Resolve path relative to this module
-    const moduleUrl = new URL('../ghostty-vt.wasm', import.meta.url);
-
-    // Build paths to try, prioritizing file system paths for Node/Bun
-    const defaultPaths: string[] = [];
-
-    // For Node/Bun: try absolute file path first (strip file:// protocol)
-    if (moduleUrl.protocol === 'file:') {
-      let filePath = moduleUrl.pathname;
-      // Remove leading slash on Windows paths (e.g., /C:/ -> C:/)
-      if (filePath.match(/^\/[A-Za-z]:\//)) {
-        filePath = filePath.slice(1);
-      }
-      defaultPaths.push(filePath);
-    }
-
-    // Also try other common paths
-    defaultPaths.push(moduleUrl.href, './ghostty-vt.wasm', '/ghostty-vt.wasm');
-
-    let lastError: Error | null = null;
-    for (const path of defaultPaths) {
-      try {
-        return await Ghostty.loadFromPath(path);
-      } catch (e) {
-        lastError = e instanceof Error ? e : new Error(String(e));
-      }
-    }
-    throw lastError || new Error('Failed to load Ghostty WASM');
   }
 
-  private static async loadFromPath(path: string): Promise<Ghostty> {
+  private static async loadFromPath(path: string | URL): Promise<Ghostty> {
     let wasmBytes: ArrayBuffer | undefined;
 
     // Try Bun.file first (for Bun environments)
@@ -188,11 +166,17 @@ export class Ghostty {
       }
     }
 
-    // Try Node.js fs module if Bun.file didn't work
-    if (!wasmBytes) {
+    // Try Node.js fs module if Bun.file didn't work. The runtime guard keeps
+    // browsers and workers from attempting to resolve a node: URL.
+    if (!wasmBytes && typeof process !== 'undefined' && process.versions?.node) {
       try {
-        const fs = await import('fs/promises');
-        const buffer = await fs.readFile(path);
+        const nodeFsSpecifier = ['node', 'fs/promises'].join(':');
+        const fs = (await import(
+          /* @vite-ignore */ nodeFsSpecifier
+        )) as typeof import('node:fs/promises');
+        const filePath =
+          typeof path === 'string' && path.startsWith('file:') ? new URL(path) : path;
+        const buffer = await fs.readFile(filePath);
         wasmBytes = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
       } catch {
         // fs failed, try fetch

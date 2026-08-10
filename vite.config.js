@@ -2,6 +2,9 @@ import { defineConfig } from 'vite';
 import dts from 'vite-plugin-dts';
 
 export default defineConfig({
+  // Emit module-relative asset URLs so consumers can host the bundle and WASM
+  // together at any public path.
+  base: './',
   server: {
     port: 8000,
     allowedHosts: ['.coder'],
@@ -26,7 +29,9 @@ export default defineConfig({
     rollupOptions: {
       external: [], // No external dependencies
       output: {
-        assetFileNames: 'assets/[name][extname]',
+        // Keep the WASM beside the bundles so module-relative loading works in
+        // browsers, workers, and Node/Bun without an inlined data URI.
+        assetFileNames: '[name][extname]',
         globals: {},
       },
     },
