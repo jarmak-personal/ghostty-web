@@ -63,8 +63,8 @@ for (const bundlePath of [esmPath, cjsPath]) {
   if (bundle.includes('data:application/wasm')) {
     throw new Error(`${bundlePath} inlines the WASM binary instead of loading the external asset.`);
   }
-  if (!bundle.includes('ghostty-vt.wasm')) {
-    throw new Error(`${bundlePath} does not reference the external WASM build artifact.`);
+  if (!/new URL\(["']ghostty-vt\.wasm["'],/.test(bundle)) {
+    throw new Error(`${bundlePath} does not reference the sibling WASM build artifact.`);
   }
 }
 

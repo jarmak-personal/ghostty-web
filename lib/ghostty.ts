@@ -45,9 +45,10 @@ const CURSOR_STYLE_VALUES: Readonly<Record<CursorStyle, number>> = {
   underline: 3,
 };
 
-/** @internal Shared with init() so repeated initialization compares the resolved default. */
-export function getDefaultWasmUrl(): string {
-  return defaultWasmUrl;
+function isFileSystemSource(path: string | URL): boolean {
+  if (path instanceof URL) return path.protocol === 'file:';
+  if (path.startsWith('file:') || /^[A-Za-z]:[\\/]/.test(path)) return true;
+  return !/^[A-Za-z][A-Za-z\d+.-]*:/.test(path);
 }
 
 function encodedCursorStyle(style: CursorStyle | undefined): number {
@@ -144,16 +145,22 @@ export class Ghostty {
   }
 
   static async load(wasmPath: string | URL = defaultWasmUrl): Promise<Ghostty> {
+    if (wasmPath === '') {
+      throw new TypeError('Ghostty WASM path must not be empty.');
+    }
     try {
       return await Ghostty.loadFromPath(wasmPath);
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
-      throw new Error(`Failed to load Ghostty WASM from ${String(wasmPath)}: ${detail}`);
+      const wrapped = new Error(`Failed to load Ghostty WASM from ${String(wasmPath)}: ${detail}`);
+      Object.defineProperty(wrapped, 'cause', { configurable: true, value: error });
+      throw wrapped;
     }
   }
 
   private static async loadFromPath(path: string | URL): Promise<Ghostty> {
     let wasmBytes: ArrayBuffer | undefined;
+    let fileSystemError: unknown;
 
     // Try Bun.file first (for Bun environments)
     if (typeof Bun !== 'undefined' && typeof Bun.file === 'function') {
@@ -173,15 +180,22 @@ export class Ghostty {
       try {
         const nodeFsSpecifier = ['node', 'fs/promises'].join(':');
         const fs = (await import(
-          /* @vite-ignore */ nodeFsSpecifier
+          /* @vite-ignore */
+          /* webpackIgnore: true */
+          nodeFsSpecifier
         )) as typeof import('node:fs/promises');
         const filePath =
           typeof path === 'string' && path.startsWith('file:') ? new URL(path) : path;
         const buffer = await fs.readFile(filePath);
         wasmBytes = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
-      } catch {
+      } catch (error) {
+        fileSystemError = error;
         // fs failed, try fetch
       }
+    }
+
+    if (!wasmBytes && fileSystemError && isFileSystemSource(path)) {
+      throw fileSystemError;
     }
 
     // Fall back to fetch (for browser environments)

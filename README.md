@@ -75,9 +75,21 @@ websocket.onmessage = (e) => term.write(e.data);
 
 ### WASM loading and Content Security Policy
 
-The production build emits `ghostty-vt.wasm` beside the ESM and UMD bundles and loads that external
-asset by default. Deploy the JavaScript bundle and WASM file together. If your bundler or asset
-pipeline puts the binary elsewhere, pass its exact URL during initialization:
+**Migration from earlier releases:** the production JavaScript no longer contains an inlined WASM
+copy. Deploying only `ghostty-web.js` or `ghostty-web.umd.cjs` is no longer sufficient.
+
+The production build emits `ghostty-vt.wasm` beside both bundles. `init()` loads that sibling asset
+when the emitted files remain together. Deploy the JavaScript and WASM atomically, and avoid caching
+the stable WASM filename across incompatible releases. If a bundler, CDN, or asset pipeline moves
+the binary, pass its exact public URL:
+
+```javascript
+import { init } from 'ghostty-web';
+
+await init({ wasmUrl: '/assets/ghostty-vt.wasm' });
+```
+
+Vite can emit and fingerprint the package export for you:
 
 ```javascript
 import { init } from 'ghostty-web';
@@ -86,7 +98,11 @@ import wasmUrl from 'ghostty-web/ghostty-vt.wasm?url';
 await init({ wasmUrl });
 ```
 
-A public URL or a module-relative `URL` works too, including in workers:
+The `?url` suffix is Vite-specific. Prefer that explicit recipe in Vite applications because
+dependency pre-bundling can relocate the JavaScript during development without copying its sibling
+WASM. Alternatively, add `ghostty-web` to `optimizeDeps.exclude` when relying on bare `init()`.
+Webpack applications should configure the exported `.wasm` subpath as `asset/resource`, or use a
+copied public URL. A module-relative `URL` also works, including in workers:
 
 ```javascript
 await init({ wasmUrl: new URL('./assets/ghostty-vt.wasm', import.meta.url) });
@@ -94,10 +110,11 @@ await init({ wasmUrl: new URL('./assets/ghostty-vt.wasm', import.meta.url) });
 
 Serve the binary as `application/wasm`. A same-origin strict CSP needs `connect-src 'self'` and
 `script-src 'self' 'wasm-unsafe-eval'`; cross-origin hosting must also be allowed by `connect-src`
-and CORS. `init()` without options remains supported and uses the emitted module-relative asset.
-Concurrent calls for the same source share one load; a later conflicting `wasmUrl` is rejected because
-the first successful initialization owns the shared instance. Load failures include the exact
-attempted URL and the fetch or WebAssembly error.
+and CORS. The loader compiles an `ArrayBuffer`, so it does not depend on streaming compilation or a
+correct MIME type, but `application/wasm` is the interoperable server configuration. Concurrent
+calls for the same source share one load; after initialization, bare `init()` reuses that shared
+instance, while a conflicting explicit `wasmUrl` is rejected. Load failures include the exact
+attempted URL and preserve the underlying fetch, filesystem, or WebAssembly error as their cause.
 Run `bun run dev` and open [`/demo/csp-demo.html`](./demo/csp-demo.html) for a separately served
 WASM example with a strict script and connection policy.
 
