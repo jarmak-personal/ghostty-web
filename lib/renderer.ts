@@ -102,6 +102,45 @@ const MAX_GLYPH_ADVANCE_CACHE_ENTRIES = 512;
 const ADVANCE_EPSILON = 0.01;
 const POWERLINE_SEPARATOR_START = 0xe0b0;
 const POWERLINE_SEPARATOR_END = 0xe0b7;
+const BOX_UP = 1;
+const BOX_RIGHT = 2;
+const BOX_DOWN = 4;
+const BOX_LEFT = 8;
+
+interface BoxDrawingGlyph {
+  directions: number;
+  physicalStrokeWidth: 1 | 3;
+  rounded?: true;
+}
+
+const BOX_DRAWING_GLYPHS: ReadonlyMap<number, BoxDrawingGlyph> = new Map([
+  [0x2500, { directions: BOX_LEFT | BOX_RIGHT, physicalStrokeWidth: 1 }], // ─
+  [0x2501, { directions: BOX_LEFT | BOX_RIGHT, physicalStrokeWidth: 3 }], // ━
+  [0x2502, { directions: BOX_UP | BOX_DOWN, physicalStrokeWidth: 1 }], // │
+  [0x2503, { directions: BOX_UP | BOX_DOWN, physicalStrokeWidth: 3 }], // ┃
+  [0x250c, { directions: BOX_RIGHT | BOX_DOWN, physicalStrokeWidth: 1 }], // ┌
+  [0x250f, { directions: BOX_RIGHT | BOX_DOWN, physicalStrokeWidth: 3 }], // ┏
+  [0x2510, { directions: BOX_LEFT | BOX_DOWN, physicalStrokeWidth: 1 }], // ┐
+  [0x2513, { directions: BOX_LEFT | BOX_DOWN, physicalStrokeWidth: 3 }], // ┓
+  [0x2514, { directions: BOX_UP | BOX_RIGHT, physicalStrokeWidth: 1 }], // └
+  [0x2517, { directions: BOX_UP | BOX_RIGHT, physicalStrokeWidth: 3 }], // ┗
+  [0x2518, { directions: BOX_UP | BOX_LEFT, physicalStrokeWidth: 1 }], // ┘
+  [0x251b, { directions: BOX_UP | BOX_LEFT, physicalStrokeWidth: 3 }], // ┛
+  [0x251c, { directions: BOX_UP | BOX_RIGHT | BOX_DOWN, physicalStrokeWidth: 1 }], // ├
+  [0x2523, { directions: BOX_UP | BOX_RIGHT | BOX_DOWN, physicalStrokeWidth: 3 }], // ┣
+  [0x2524, { directions: BOX_UP | BOX_LEFT | BOX_DOWN, physicalStrokeWidth: 1 }], // ┤
+  [0x252b, { directions: BOX_UP | BOX_LEFT | BOX_DOWN, physicalStrokeWidth: 3 }], // ┫
+  [0x252c, { directions: BOX_LEFT | BOX_RIGHT | BOX_DOWN, physicalStrokeWidth: 1 }], // ┬
+  [0x2533, { directions: BOX_LEFT | BOX_RIGHT | BOX_DOWN, physicalStrokeWidth: 3 }], // ┳
+  [0x2534, { directions: BOX_UP | BOX_LEFT | BOX_RIGHT, physicalStrokeWidth: 1 }], // ┴
+  [0x253b, { directions: BOX_UP | BOX_LEFT | BOX_RIGHT, physicalStrokeWidth: 3 }], // ┻
+  [0x253c, { directions: BOX_UP | BOX_RIGHT | BOX_DOWN | BOX_LEFT, physicalStrokeWidth: 1 }], // ┼
+  [0x254b, { directions: BOX_UP | BOX_RIGHT | BOX_DOWN | BOX_LEFT, physicalStrokeWidth: 3 }], // ╋
+  [0x256d, { directions: BOX_RIGHT | BOX_DOWN, physicalStrokeWidth: 1, rounded: true }], // ╭
+  [0x256e, { directions: BOX_LEFT | BOX_DOWN, physicalStrokeWidth: 1, rounded: true }], // ╮
+  [0x256f, { directions: BOX_UP | BOX_LEFT, physicalStrokeWidth: 1, rounded: true }], // ╯
+  [0x2570, { directions: BOX_UP | BOX_RIGHT, physicalStrokeWidth: 1, rounded: true }], // ╰
+]);
 
 const EMPTY_FRAME_STATS: RendererFrameStats = {
   renderedRows: 0,
@@ -123,6 +162,10 @@ function isPowerlineSeparator(cell: GhosttyCell): boolean {
     cell.codepoint >= POWERLINE_SEPARATOR_START &&
     cell.codepoint <= POWERLINE_SEPARATOR_END
   );
+}
+
+function getBoxDrawingGlyph(cell: GhosttyCell): BoxDrawingGlyph | undefined {
+  return cell.grapheme_len === 0 ? BOX_DRAWING_GLYPHS.get(cell.codepoint) : undefined;
 }
 
 // ============================================================================
@@ -222,16 +265,21 @@ export class CanvasRenderer {
 
     // Measure width using 'M' (typically widest character)
     const widthMetrics = ctx.measureText('M');
-    const width = Math.ceil(widthMetrics.width);
 
     // Measure height using ascent + descent with padding for glyph overflow
     const ascent = widthMetrics.actualBoundingBoxAscent || this.fontSize * 0.8;
     const descent = widthMetrics.actualBoundingBoxDescent || this.fontSize * 0.2;
 
-    // Add 2px padding to height to account for glyphs that overflow (like 'f', 'd', 'g', 'p')
-    // and anti-aliasing pixels
-    const height = Math.ceil(ascent + descent) + 2;
-    const baseline = Math.ceil(ascent) + 1; // Offset baseline by half the padding
+    // Keep every cell edge on the physical-pixel grid. CSS-pixel rounding creates
+    // fractional backing-store coordinates at zoom DPRs such as 1.25 and 1.5,
+    // which can leave partially covered pixels where neighboring strokes meet.
+    // Preserve the previous CSS-ceiled metrics as minimums so this correction
+    // never fits extra columns or clips fallback glyphs into a smaller cell.
+    const alignToDevicePixel = (value: number) =>
+      Math.ceil(value * this.devicePixelRatio) / this.devicePixelRatio;
+    const width = alignToDevicePixel(Math.ceil(widthMetrics.width));
+    const height = alignToDevicePixel(Math.ceil(ascent + descent) + 2);
+    const baseline = alignToDevicePixel(Math.ceil(ascent) + 1);
 
     return { width, height, baseline };
   }
@@ -270,8 +318,8 @@ export class CanvasRenderer {
     this.canvas.style.height = `${cssHeight}px`;
 
     // Set actual canvas size (scaled for DPI)
-    this.canvas.width = cssWidth * this.devicePixelRatio;
-    this.canvas.height = cssHeight * this.devicePixelRatio;
+    this.canvas.width = this.toDevicePixels(cssWidth);
+    this.canvas.height = this.toDevicePixels(cssHeight);
 
     // Scale context to match DPI (setting canvas.width/height resets the context)
     this.ctx.scale(this.devicePixelRatio, this.devicePixelRatio);
@@ -287,6 +335,10 @@ export class CanvasRenderer {
       this.effectiveColors.background.b
     );
     this.ctx.fillRect(0, 0, cssWidth, cssHeight);
+  }
+
+  private toDevicePixels(cssPixels: number): number {
+    return Math.round(cssPixels * this.devicePixelRatio);
   }
 
   // ==========================================================================
@@ -322,8 +374,8 @@ export class CanvasRenderer {
 
     // Resize canvas if dimensions changed
     const needsResize =
-      this.canvas.width !== dims.cols * this.metrics.width * this.devicePixelRatio ||
-      this.canvas.height !== dims.rows * this.metrics.height * this.devicePixelRatio;
+      this.canvas.width !== this.toDevicePixels(dims.cols * this.metrics.width) ||
+      this.canvas.height !== this.toDevicePixels(dims.rows * this.metrics.height);
 
     if (needsResize) {
       this.resize(dims.cols, dims.rows);
@@ -759,13 +811,14 @@ export class CanvasRenderer {
     const cellY = y * this.metrics.height;
     const powerlineSeparator =
       run.cells.length === 1 && isPowerlineSeparator(first.cell) ? first.cell.codepoint : null;
+    const boxDrawingGlyph = run.cells.length === 1 ? getBoxDrawingGlyph(first.cell) : undefined;
+    const ownsCellGeometry = powerlineSeparator !== null || boxDrawingGlyph !== undefined;
 
     this.ctx.save();
     this.ctx.beginPath();
-    if (powerlineSeparator !== null) {
-      // Powerline geometry owns the entire cell but must never bleed into a
-      // neighboring row. Ordinary text retains the established vertical
-      // overflow behavior for complex scripts below.
+    if (ownsCellGeometry) {
+      // Custom geometry must never bleed into a neighboring cell. Ordinary text
+      // retains the established vertical overflow behavior for complex scripts.
       this.ctx.rect(startX, cellY, ownedWidth, this.metrics.height);
     } else {
       // Clip horizontally to the Ghostty-owned columns while retaining the
@@ -778,6 +831,8 @@ export class CanvasRenderer {
     this.ctx.globalAlpha = first.alpha;
     if (powerlineSeparator !== null) {
       this.drawPowerlineSeparator(powerlineSeparator, startX, cellY, ownedWidth);
+    } else if (boxDrawingGlyph) {
+      this.drawBoxDrawingGlyph(boxDrawingGlyph, startX, cellY, ownedWidth);
     } else if (run.cells.length > 1 && run.measuredWidth !== null) {
       this.ctx.translate(startX, 0);
       this.ctx.scale(ownedWidth / run.measuredWidth, 1);
@@ -786,6 +841,63 @@ export class CanvasRenderer {
       this.ctx.fillText(run.text, startX, cellY + this.metrics.baseline);
     }
     this.ctx.restore();
+  }
+
+  /** Draw a focused set of uniform light/heavy box glyphs on the device-pixel grid. */
+  private drawBoxDrawingGlyph(
+    glyph: BoxDrawingGlyph,
+    cellX: number,
+    cellY: number,
+    cellWidth: number
+  ): void {
+    const cellHeight = this.metrics.height;
+    const right = cellX + cellWidth;
+    const bottom = cellY + cellHeight;
+    const centerX = this.snapStrokeCenter(cellX + cellWidth / 2);
+    const centerY = this.snapStrokeCenter(cellY + cellHeight / 2);
+    const thickness = glyph.physicalStrokeWidth / this.devicePixelRatio;
+    const halfThickness = thickness / 2;
+    const { directions } = glyph;
+
+    if (glyph.rounded) {
+      const turnsUp = (directions & BOX_UP) !== 0;
+      const turnsLeft = (directions & BOX_LEFT) !== 0;
+      const radius = Math.min(cellWidth, cellHeight) / 4;
+
+      this.ctx.beginPath();
+      this.ctx.moveTo(centerX, turnsUp ? cellY : bottom);
+      this.ctx.lineTo(centerX, centerY + (turnsUp ? -radius : radius));
+      this.ctx.quadraticCurveTo(
+        centerX,
+        centerY,
+        centerX + (turnsLeft ? -radius : radius),
+        centerY
+      );
+      this.ctx.lineTo(turnsLeft ? cellX : right, centerY);
+      this.ctx.strokeStyle = this.ctx.fillStyle;
+      this.ctx.lineWidth = thickness;
+      this.ctx.lineCap = 'butt';
+      this.ctx.lineJoin = 'round';
+      this.ctx.stroke();
+      return;
+    }
+
+    this.ctx.beginPath();
+    if (directions & (BOX_LEFT | BOX_RIGHT)) {
+      const left = directions & BOX_LEFT ? cellX : centerX - halfThickness;
+      const horizontalRight = directions & BOX_RIGHT ? right : centerX + halfThickness;
+      this.ctx.rect(left, centerY - halfThickness, horizontalRight - left, thickness);
+    }
+    if (directions & (BOX_UP | BOX_DOWN)) {
+      const top = directions & BOX_UP ? cellY : centerY - halfThickness;
+      const verticalBottom = directions & BOX_DOWN ? bottom : centerY + halfThickness;
+      this.ctx.rect(centerX - halfThickness, top, thickness, verticalBottom - top);
+    }
+    this.ctx.fill();
+  }
+
+  private snapStrokeCenter(cssCoordinate: number): number {
+    return (Math.floor(cssCoordinate * this.devicePixelRatio) + 0.5) / this.devicePixelRatio;
   }
 
   /** Draw the canonical Powerline separators as cell-sized vector geometry. */
