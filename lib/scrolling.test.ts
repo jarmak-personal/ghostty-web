@@ -9,6 +9,48 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import type { Terminal } from './terminal';
 import { createIsolatedTerminal } from './test-helpers';
 
+function installScrollFrameHarness(): {
+  callbacks: Map<number, FrameRequestCallback>;
+  peekNext: () => FrameRequestCallback;
+  runNext: (timestamp: number) => void;
+  restore: () => void;
+} {
+  const originalRequest = globalThis.requestAnimationFrame;
+  const originalCancel = globalThis.cancelAnimationFrame;
+  const callbacks = new Map<number, FrameRequestCallback>();
+  let nextFrame = 1;
+
+  globalThis.requestAnimationFrame = ((callback: FrameRequestCallback) => {
+    const id = nextFrame++;
+    callbacks.set(id, callback);
+    return id;
+  }) as typeof requestAnimationFrame;
+  globalThis.cancelAnimationFrame = ((id: number) => {
+    callbacks.delete(id);
+  }) as typeof cancelAnimationFrame;
+
+  const nextCallback = (): FrameRequestCallback => {
+    const next = callbacks.entries().next().value as [number, FrameRequestCallback] | undefined;
+    if (!next) throw new Error('Expected a pending scroll animation frame');
+    return next[1];
+  };
+
+  return {
+    callbacks,
+    peekNext: nextCallback,
+    runNext: (timestamp: number) => {
+      const next = callbacks.entries().next().value as [number, FrameRequestCallback] | undefined;
+      if (!next) throw new Error('Expected a pending scroll animation frame');
+      callbacks.delete(next[0]);
+      next[1](timestamp);
+    },
+    restore: () => {
+      globalThis.requestAnimationFrame = originalRequest;
+      globalThis.cancelAnimationFrame = originalCancel;
+    },
+  };
+}
+
 describe('Terminal Scrolling', () => {
   let terminal: Terminal;
   let container: HTMLElement;
@@ -532,6 +574,224 @@ describe('Scrolling Methods', () => {
 
     // Should be clamped to 0 (bottom)
     expect((term as any).viewportY).toBe(0);
+  });
+});
+
+describe('Smooth Scrolling', () => {
+  let term: Terminal;
+  let container: HTMLDivElement;
+
+  beforeEach(async () => {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    term = await createIsolatedTerminal({ cols: 80, rows: 24, scrollback: 1000 });
+    term.open(container);
+    for (let i = 0; i < 80; i++) {
+      term.write(`Line ${i}\r\n`);
+    }
+    // Keep scroll animation tests focused on viewport frames rather than the
+    // independently animated scrollbar fade.
+    (term as any).scrollbarVisible = true;
+  });
+
+  afterEach(() => {
+    term.dispose();
+    container.remove();
+  });
+
+  for (const duration of [1, 10, 1000 / 60, 17, 100]) {
+    test(`settles exactly after a ${duration}ms duration`, () => {
+      const frames = installScrollFrameHarness();
+      try {
+        term.options.smoothScrollDuration = duration;
+        (term as any).smoothScrollTo(10);
+
+        const startTime = (term as any).scrollAnimationStartTime as number;
+        if (duration <= 1) {
+          expect(term.getViewportY()).toBe(10);
+          expect((term as any).targetViewportY).toBe(10);
+          expect((term as any).scrollAnimationStartTime).toBeUndefined();
+          expect(frames.callbacks.size).toBe(0);
+          return;
+        }
+
+        expect(frames.callbacks.size).toBe(1);
+
+        frames.runNext(startTime + duration / 2);
+        expect(term.getViewportY()).toBeGreaterThan(0);
+        expect(term.getViewportY()).toBeLessThan(10);
+        expect(frames.callbacks.size).toBe(1);
+
+        frames.runNext(startTime + duration);
+        expect(term.getViewportY()).toBe(10);
+        expect((term as any).targetViewportY).toBe(10);
+        expect((term as any).scrollAnimationStartTime).toBeUndefined();
+        expect((term as any).scrollAnimationFrame).toBeUndefined();
+        expect(frames.callbacks.size).toBe(0);
+      } finally {
+        frames.restore();
+      }
+    });
+  }
+
+  test('high-frequency target updates cannot restart the active time window', () => {
+    const frames = installScrollFrameHarness();
+    try {
+      term.options.smoothScrollDuration = 100;
+      (term as any).smoothScrollTo(10);
+      const startTime = (term as any).scrollAnimationStartTime as number;
+      const initialViewport = term.getViewportY();
+
+      for (let target = 11; target <= 20; target++) {
+        (term as any).smoothScrollTo(target);
+      }
+
+      expect((term as any).scrollAnimationStartTime).toBe(startTime);
+      expect(frames.callbacks.size).toBe(1);
+      frames.runNext(startTime + 50);
+      expect(term.getViewportY()).toBeGreaterThan(initialViewport);
+
+      frames.runNext(startTime + 100);
+      expect(term.getViewportY()).toBe(20);
+      expect(frames.callbacks.size).toBe(0);
+    } finally {
+      frames.restore();
+    }
+  });
+
+  test('a reentrant direct scroll prevents the old callback from rescheduling', () => {
+    const frames = installScrollFrameHarness();
+    try {
+      term.options.smoothScrollDuration = 100;
+      let cancelReentrantly = true;
+      term.onScroll(() => {
+        if (!cancelReentrantly) return;
+        cancelReentrantly = false;
+        term.scrollToBottom();
+      });
+
+      (term as any).smoothScrollTo(10);
+      expect(term.getViewportY()).toBe(0);
+      expect((term as any).targetViewportY).toBe(0);
+      expect((term as any).scrollAnimationFrame).toBeUndefined();
+      expect(frames.callbacks.size).toBe(0);
+
+      (term as any).smoothScrollTo(10);
+      expect((term as any).scrollAnimationFrame).toBeDefined();
+      expect(frames.callbacks.size).toBe(1);
+      term.scrollToBottom();
+      expect(frames.callbacks.size).toBe(0);
+    } finally {
+      frames.restore();
+    }
+  });
+
+  test('normalizes invalid durations and handles zero duration immediately', () => {
+    (term.options as any).smoothScrollDuration = -5;
+    expect(term.options.smoothScrollDuration).toBe(0);
+
+    const frames = installScrollFrameHarness();
+    try {
+      (term as any).smoothScrollTo(10);
+      expect(term.getViewportY()).toBe(10);
+      expect(frames.callbacks.size).toBe(0);
+    } finally {
+      frames.restore();
+    }
+
+    (term.options as any).smoothScrollDuration = Number.NaN;
+    expect(term.options.smoothScrollDuration).toBe(100);
+    (term.options as any).smoothScrollDuration = Number.POSITIVE_INFINITY;
+    expect(term.options.smoothScrollDuration).toBe(100);
+  });
+
+  test('every direct scrolling method revokes a pending animation', () => {
+    const frames = installScrollFrameHarness();
+    try {
+      term.options.smoothScrollDuration = 100;
+      const cases = [
+        {
+          name: 'scrollLines',
+          run: () => term.scrollLines(-2),
+          expected: (before: number) => before + 2,
+        },
+        {
+          name: 'scrollPages',
+          run: () => term.scrollPages(-1),
+          expected: (before: number) => before + term.rows,
+        },
+        {
+          name: 'scrollToTop',
+          run: () => term.scrollToTop(),
+          expected: (_before: number) => term.getScrollbackLength(),
+        },
+        {
+          name: 'scrollToBottom',
+          run: () => term.scrollToBottom(),
+          expected: (_before: number) => 0,
+        },
+        {
+          name: 'scrollToLine',
+          run: () => term.scrollToLine(7),
+          expected: (_before: number) => 7,
+        },
+      ];
+
+      for (const directScroll of cases) {
+        term.scrollToBottom();
+        (term as any).smoothScrollTo(10);
+        const staleFrame = frames.peekNext();
+        expect(frames.callbacks.size).toBe(1);
+
+        const viewportBefore = term.getViewportY();
+        directScroll.run();
+        const directViewport = directScroll.expected(viewportBefore);
+        expect(term.getViewportY()).toBe(directViewport);
+        expect((term as any).targetViewportY).toBe(directViewport);
+        expect(frames.callbacks.size).toBe(0);
+
+        staleFrame(Number.MAX_SAFE_INTEGER);
+        expect(term.getViewportY()).toBe(directViewport);
+        expect(frames.callbacks.size).toBe(0);
+      }
+    } finally {
+      frames.restore();
+    }
+  });
+
+  test('normal and alternate screen transitions revoke stale animation frames', () => {
+    const frames = installScrollFrameHarness();
+    try {
+      term.options.smoothScrollDuration = 100;
+      (term as any).smoothScrollTo(10);
+      const staleNormalFrame = frames.peekNext();
+
+      term.write('\x1B[?1049h');
+      expect(term.wasmTerm?.isAlternateScreen()).toBe(true);
+      expect(term.getViewportY()).toBe(0);
+      expect((term as any).targetViewportY).toBe(0);
+      expect(frames.callbacks.size).toBe(0);
+      staleNormalFrame(Number.MAX_SAFE_INTEGER);
+      expect(term.getViewportY()).toBe(0);
+
+      Object.assign(term as any, {
+        targetViewportY: 10,
+        scrollAnimationStartViewportY: 0,
+        scrollAnimationStartTime: performance.now(),
+      });
+      (term as any).scheduleScrollAnimationFrame();
+      const staleAlternateFrame = frames.peekNext();
+      term.write('\x1B[?1049l');
+      expect(term.wasmTerm?.isAlternateScreen()).toBe(false);
+      expect(term.getViewportY()).toBe(0);
+      expect((term as any).targetViewportY).toBe(0);
+      expect(frames.callbacks.size).toBe(0);
+      staleAlternateFrame(Number.MAX_SAFE_INTEGER);
+      expect(term.getViewportY()).toBe(0);
+      expect(frames.callbacks.size).toBe(0);
+    } finally {
+      frames.restore();
+    }
   });
 });
 

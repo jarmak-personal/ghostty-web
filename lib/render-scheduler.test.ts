@@ -79,6 +79,8 @@ function createSchedulerHarness(): Terminal & {
     animationFrameId: undefined,
     scrollAnimationFrame: undefined,
     scrollAnimationStartTime: undefined,
+    scrollAnimationStartViewportY: 0,
+    scrollAnimationGeneration: 0,
     targetViewportY: 0,
     scrollbarVisible: false,
     scrollbarOpacity: 0,
