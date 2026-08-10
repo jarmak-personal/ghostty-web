@@ -612,6 +612,56 @@ export class GhosttyTerminal {
     }
   }
 
+  /** Track one absolute cell on the active screen across scrollback trimming. */
+  captureRetainedBufferPosition(row: number, column: number): TerminalEventProvenance | null {
+    if (
+      !this.handle ||
+      !Number.isInteger(row) ||
+      !Number.isInteger(column) ||
+      row < 0 ||
+      column < 0 ||
+      row > 0xffffffff ||
+      column > 0xffffffff
+    ) {
+      return null;
+    }
+
+    const byteLength = 4 * Uint32Array.BYTES_PER_ELEMENT;
+    const ptr = this.exports.ghostty_wasm_alloc_u8_array(byteLength);
+    if (ptr === 0) return null;
+    try {
+      const count = this.exports.ghostty_terminal_capture_retained_buffer_position(
+        this.handle,
+        row,
+        column,
+        ptr,
+        4
+      );
+      if (count !== 4) return null;
+      const values = new Uint32Array(this.memory.buffer, ptr, 4);
+      const provenance: TerminalEventProvenance = Object.freeze({
+        id: values[0],
+        screen: values[1] === 1 ? 'alternate' : 'normal',
+        row: values[2],
+        column: values[3],
+      });
+      this.rememberProvenance(provenance);
+      return provenance;
+    } finally {
+      this.exports.ghostty_wasm_free_u8_array(ptr, byteLength);
+    }
+  }
+
+  /** Release a short-lived tracked boundary without waiting for registry eviction. */
+  releaseRetainedBufferBoundary(provenance: TerminalEventProvenance): void {
+    if (!this.handle || !this.ownsProvenance(provenance)) return;
+    this.exports.ghostty_terminal_release_retained_buffer_boundary(
+      this.handle,
+      provenance.id,
+      provenance.screen === 'alternate'
+    );
+  }
+
   createRetainedRange(start: TerminalEventProvenance, end: TerminalEventProvenance): number {
     if (!this.handle || start.screen !== end.screen) return 0;
     if (!this.ownsProvenance(start) || !this.ownsProvenance(end)) return 0;

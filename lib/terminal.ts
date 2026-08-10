@@ -686,6 +686,7 @@ export class Terminal implements ITerminalCore {
 
     const viewportBefore = this.viewportY;
     const wasAlternateScreen = this.wasmTerm!.isAlternateScreen();
+    const selectionAnchors = this.selectionManager?.captureWriteAnchors() ?? null;
     const preserveViewport = viewportBefore > 0 && !wasAlternateScreen;
     const scrollbackBefore = preserveViewport ? this.getScrollbackLength() : 0;
     const smoothScrollWasActive =
@@ -697,10 +698,19 @@ export class Terminal implements ITerminalCore {
     // Write directly to WASM terminal (handles VT parsing internally)
     const synchronizationCompleted = this.writeToWasm(data);
     const isAlternateScreen = this.wasmTerm!.isAlternateScreen();
+    const screenChanged = isAlternateScreen !== wasAlternateScreen;
+
+    // Native tracked pins follow retained rows when history is trimmed. If a
+    // selected boundary was evicted, fail closed instead of silently selecting
+    // unrelated content at the old numeric row. Reconcile before parser-event
+    // listeners run: they may reenter write(), and must never observe or replace
+    // unresolved anchors. Selection rows are absolute, so later viewport
+    // preservation does not alter the reconciled public coordinates.
+    this.selectionManager?.reconcileWriteAnchors(selectionAnchors, screenChanged);
 
     // A screen switch owns the live viewport. Revoke the old screen's
     // animation before listeners can observe or reenter with stale state.
-    if (isAlternateScreen !== wasAlternateScreen) {
+    if (screenChanged) {
       this.resetViewport();
     }
 
@@ -816,6 +826,12 @@ export class Terminal implements ITerminalCore {
     if (cols === this.cols && rows === this.rows) {
       return; // No change
     }
+
+    // Ghostty reflows retained rows during width changes and may move active
+    // rows during height changes. Until the native bridge exposes a complete
+    // selection mapping for both operations, clearing is safer than returning
+    // text from obsolete row/column endpoints.
+    this.selectionManager?.clearSelection();
 
     // Cancel render loop before resize to prevent accessing detached TypedArray
     // views while WASM reallocates buffers. We restart it after resize completes.

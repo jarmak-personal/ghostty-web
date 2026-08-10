@@ -15,7 +15,7 @@ import type { GhosttyTerminal } from './ghostty';
 import type { IEvent } from './interfaces';
 import type { CanvasRenderer } from './renderer';
 import type { Terminal } from './terminal';
-import type { GhosttyCell } from './types';
+import type { GhosttyCell, TerminalEventProvenance } from './types';
 
 // ============================================================================
 // Type Definitions
@@ -26,6 +26,11 @@ export interface SelectionCoordinates {
   startRow: number;
   endCol: number;
   endRow: number;
+}
+
+interface SelectionWriteAnchors {
+  start: TerminalEventProvenance | null;
+  end: TerminalEventProvenance | null;
 }
 
 // ============================================================================
@@ -251,7 +256,14 @@ export class SelectionManager {
    * Clear the selection
    */
   clearSelection(): void {
-    if (!this.selectionStart && !this.selectionEnd && !this.isSelecting) return;
+    if (this.clearSelectionState()) this.selectionChangedEmitter.fire();
+  }
+
+  /** Clear owned state and report whether an externally visible selection changed. */
+  private clearSelectionState(): boolean {
+    if (!this.selectionStart && !this.selectionEnd && !this.isSelecting) return false;
+
+    const wasVisible = this.hasSelection();
 
     // Mark current or pending selection rows as dirty for redraw. This also
     // revokes a below-threshold drag, which is intentionally not yet exposed
@@ -269,6 +281,7 @@ export class SelectionManager {
 
     // Force redraw of previously selected lines to clear the overlay
     this.requestRender();
+    return wasVisible;
   }
 
   /**
@@ -291,33 +304,81 @@ export class SelectionManager {
     this.wasmTerm = wasmTerm;
   }
 
+  /** Capture native pins so retained rows can be resolved after one parser write. */
+  captureWriteAnchors(): SelectionWriteAnchors | null {
+    if (!this.selectionStart || !this.selectionEnd) return null;
+    return {
+      start: this.wasmTerm.captureRetainedBufferPosition(
+        this.selectionStart.absoluteRow,
+        this.selectionStart.col
+      ),
+      end: this.wasmTerm.captureRetainedBufferPosition(
+        this.selectionEnd.absoluteRow,
+        this.selectionEnd.col
+      ),
+    };
+  }
+
+  /** Rebase a selection after output, or fail closed if either retained row expired. */
+  reconcileWriteAnchors(anchors: SelectionWriteAnchors | null, screenChanged: boolean): void {
+    if (!anchors) return;
+    try {
+      if (!this.selectionStart || !this.selectionEnd) return;
+      if (screenChanged || !anchors.start || !anchors.end) {
+        this.clearSelection();
+        return;
+      }
+
+      const start = this.wasmTerm.resolveEventBoundary(anchors.start);
+      const end = this.wasmTerm.resolveEventBoundary(anchors.end);
+      if (!start || !end) {
+        this.clearSelection();
+        return;
+      }
+
+      if (
+        start.row === this.selectionStart.absoluteRow &&
+        start.column === this.selectionStart.col &&
+        end.row === this.selectionEnd.absoluteRow &&
+        end.column === this.selectionEnd.col
+      ) {
+        return;
+      }
+
+      this.markCurrentSelectionDirty();
+      this.selectionStart = { col: start.column, absoluteRow: start.row };
+      this.selectionEnd = { col: end.column, absoluteRow: end.row };
+      this.requestRender();
+      this.selectionChangedEmitter.fire();
+    } finally {
+      if (anchors.start) this.wasmTerm.releaseRetainedBufferBoundary(anchors.start);
+      if (anchors.end) this.wasmTerm.releaseRetainedBufferBoundary(anchors.end);
+    }
+  }
+
   /**
    * Select text at specific column and row with length
    * xterm.js compatible API
    */
   select(column: number, row: number, length: number): void {
-    // Clamp to valid ranges
     const dims = this.wasmTerm.getDimensions();
-    row = Math.max(0, Math.min(row, dims.rows - 1));
-    column = Math.max(0, Math.min(column, dims.cols - 1));
-
-    // Calculate end position
-    let endRow = row;
-    let endCol = column + length - 1;
-
-    // Handle wrapping if selection extends past end of line
-    while (endCol >= dims.cols) {
-      endCol -= dims.cols;
-      endRow++;
+    const bufferRows = this.wasmTerm.getScrollbackLength() + dims.rows;
+    if (length <= 0 || bufferRows <= 0 || dims.cols <= 0) {
+      this.clearSelection();
+      return;
     }
 
-    // Clamp end row
-    endRow = Math.min(endRow, dims.rows - 1);
+    row = Math.max(0, Math.min(Math.trunc(row), bufferRows - 1));
+    column = Math.max(0, Math.min(Math.trunc(column), dims.cols - 1));
 
-    // Convert viewport rows to absolute rows
-    const viewportY = this.getViewportY();
-    this.selectionStart = { col: column, absoluteRow: viewportY + row };
-    this.selectionEnd = { col: endCol, absoluteRow: viewportY + endRow };
+    const startOffset = row * dims.cols + column;
+    const lastOffset = bufferRows * dims.cols - 1;
+    const endOffset = Math.min(startOffset + Math.trunc(length) - 1, lastOffset);
+    const endRow = Math.floor(endOffset / dims.cols);
+    const endCol = endOffset % dims.cols;
+
+    this.selectionStart = { col: column, absoluteRow: row };
+    this.selectionEnd = { col: endCol, absoluteRow: endRow };
     this.requestRender();
     this.selectionChangedEmitter.fire();
   }
@@ -328,19 +389,23 @@ export class SelectionManager {
    */
   selectLines(start: number, end: number): void {
     const dims = this.wasmTerm.getDimensions();
+    const bufferRows = this.wasmTerm.getScrollbackLength() + dims.rows;
+    if (bufferRows <= 0 || dims.cols <= 0) {
+      this.clearSelection();
+      return;
+    }
 
-    // Clamp to valid row ranges
-    start = Math.max(0, Math.min(start, dims.rows - 1));
-    end = Math.max(0, Math.min(end, dims.rows - 1));
+    // Public rows are absolute indices into scrollback + the active grid.
+    start = Math.max(0, Math.min(Math.trunc(start), bufferRows - 1));
+    end = Math.max(0, Math.min(Math.trunc(end), bufferRows - 1));
 
     // Ensure start <= end
     if (start > end) {
       [start, end] = [end, start];
     }
 
-    // Convert viewport rows to absolute rows
-    this.selectionStart = { col: 0, absoluteRow: this.viewportRowToAbsolute(start) };
-    this.selectionEnd = { col: dims.cols - 1, absoluteRow: this.viewportRowToAbsolute(end) };
+    this.selectionStart = { col: 0, absoluteRow: start };
+    this.selectionEnd = { col: dims.cols - 1, absoluteRow: end };
     this.requestRender();
     this.selectionChangedEmitter.fire();
   }
@@ -351,7 +416,7 @@ export class SelectionManager {
    */
   getSelectionPosition():
     { start: { x: number; y: number }; end: { x: number; y: number } } | undefined {
-    const coords = this.normalizeSelection();
+    const coords = this.normalizeBufferSelection();
     if (!coords) return undefined;
 
     return {
@@ -366,7 +431,6 @@ export class SelectionManager {
    */
   deselect(): void {
     this.clearSelection();
-    this.selectionChangedEmitter.fire();
   }
 
   /**
@@ -635,14 +699,17 @@ export class SelectionManager {
     // This catches mouseup events that happen outside the canvas (common during drag)
     this.boundMouseUpHandler = (e: MouseEvent) => {
       if (this.isSelecting) {
-        this.isSelecting = false;
         this.stopAutoScroll();
 
         // Check if this was a click without drag (threshold never met).
         if (!this.dragThresholdMet) {
+          // Clear while isSelecting still identifies this as a pending,
+          // never-visible selection, so no selection-change event is emitted.
           this.clearSelection();
           return;
         }
+
+        this.isSelecting = false;
 
         if (this.hasSelection()) {
           const text = this.getSelection();
@@ -945,16 +1012,10 @@ export class SelectionManager {
    * Returns coordinates in VIEWPORT space for rendering, clamped to visible area
    */
   private normalizeSelection(): SelectionCoordinates | null {
-    if (!this.selectionStart || !this.selectionEnd) return null;
+    const bufferCoords = this.normalizeBufferSelection();
+    if (!bufferCoords) return null;
 
-    let { col: startCol, absoluteRow: startAbsRow } = this.selectionStart;
-    let { col: endCol, absoluteRow: endAbsRow } = this.selectionEnd;
-
-    // Swap if selection goes backwards
-    if (startAbsRow > endAbsRow || (startAbsRow === endAbsRow && startCol > endCol)) {
-      [startCol, endCol] = [endCol, startCol];
-      [startAbsRow, endAbsRow] = [endAbsRow, startAbsRow];
-    }
+    let { startCol, startRow: startAbsRow, endCol, endRow: endAbsRow } = bufferCoords;
 
     // Convert to viewport coordinates
     let startRow = this.absoluteRowToViewport(startAbsRow);
@@ -979,6 +1040,19 @@ export class SelectionManager {
       endCol = dims.cols - 1; // Selection extends to end of last visible row
     }
 
+    return { startCol, startRow, endCol, endRow };
+  }
+
+  /** Normalize endpoints without converting away from public buffer coordinates. */
+  private normalizeBufferSelection(): SelectionCoordinates | null {
+    if (!this.selectionStart || !this.selectionEnd) return null;
+
+    let { col: startCol, absoluteRow: startRow } = this.selectionStart;
+    let { col: endCol, absoluteRow: endRow } = this.selectionEnd;
+    if (startRow > endRow || (startRow === endRow && startCol > endCol)) {
+      [startCol, endCol] = [endCol, startCol];
+      [startRow, endRow] = [endRow, startRow];
+    }
     return { startCol, startRow, endCol, endRow };
   }
 

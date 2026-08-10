@@ -1,6 +1,9 @@
 import { stat } from 'node:fs/promises';
 
-const MAX_WASM_BYTES = 512 * 1024;
+// Keep a small, explicit growth budget for native APIs while retaining a hard
+// ceiling that catches accidental debug or dependency bloat.
+const MAX_WASM_KIB = 520;
+const MAX_WASM_BYTES = MAX_WASM_KIB * 1024;
 
 async function main(): Promise<void> {
   const wasmPath = process.argv[2] ?? 'ghostty-vt.wasm';
@@ -8,7 +11,7 @@ async function main(): Promise<void> {
 
   console.log(`WASM size: ${size} bytes`);
   if (size > MAX_WASM_BYTES) {
-    throw new Error(`WASM exceeds the 512 KiB limit (${MAX_WASM_BYTES} bytes).`);
+    throw new Error(`WASM exceeds the ${MAX_WASM_KIB} KiB limit (${MAX_WASM_BYTES} bytes).`);
   }
 }
 
