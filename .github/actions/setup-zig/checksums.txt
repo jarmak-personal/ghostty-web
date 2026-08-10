@@ -1,0 +1,5 @@
+# Official archive digests from https://ziglang.org/download/index.json
+# version platform architecture sha256
+0.15.2 linux x86_64 02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239
+0.15.2 macos aarch64 3cc2bab367e185cdfb27501c4b30b1b0653c28d9f73df8dc91488e66ece5fa6b
+0.15.2 macos x86_64 375b6909fc1495d16fc2c7db9538f707456bfc3373b14ee83fdd3e22b3d43f7f
