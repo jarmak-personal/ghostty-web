@@ -12,6 +12,28 @@ function cellsToText(cells: readonly GhosttyCell[]): string {
 }
 
 describe('Ghostty v1.3 core compatibility', () => {
+  test('reuses WASM page buffers safely after multi-codepoint graphemes', async () => {
+    const ghostty = await Ghostty.load();
+
+    for (const grapheme of ['🇺🇸', 'e\u0301', '👨‍👩‍👧‍👦']) {
+      const first = ghostty.createTerminal(80, 24);
+      try {
+        first.write(grapheme);
+      } finally {
+        first.free();
+      }
+
+      const second = ghostty.createTerminal(80, 24);
+      try {
+        second.write('Hello');
+        second.update();
+        expect(cellsToText(second.getLine(0) ?? [])).toBe('Hello');
+      } finally {
+        second.free();
+      }
+    }
+  });
+
   test('encodes control letters from their unshifted codepoints', async () => {
     const ghostty = await Ghostty.load();
     const encoder = ghostty.createKeyEncoder();
