@@ -1,0 +1,35 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  min-height: 100vh;
+  margin: 0;
+  padding: 3rem 1.5rem;
+  background: #0f172a;
+  color: #e2e8f0;
+  font-family: system-ui, sans-serif;
+}
+
+main {
+  width: min(60rem, 100%);
+  margin: 0 auto;
+}
+
+h1 {
+  margin-top: 0;
+}
+
+#status {
+  color: #94a3b8;
+}
+
+#terminal-container {
+  height: 24rem;
+  margin-top: 1.5rem;
+  padding: 1rem;
+  overflow: hidden;
+  border: 1px solid #334155;
+  border-radius: 0.5rem;
+  background: #111827;
+}
