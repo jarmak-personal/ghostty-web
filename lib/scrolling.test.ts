@@ -30,6 +30,49 @@ describe('Terminal Scrolling', () => {
   });
 
   describe('Normal Screen Mode', () => {
+    test('keeps the same history row visible while output grows scrollback', () => {
+      for (let i = 0; i < 50; i++) {
+        terminal.write(`Line ${i}\r\n`);
+      }
+
+      terminal.scrollLines(-10);
+      const viewportBefore = terminal.getViewportY();
+      const scrollbackBefore = terminal.getScrollbackLength();
+      const offsetBefore = scrollbackBefore - Math.floor(viewportBefore);
+      const lineBefore = terminal.wasmTerm!.getScrollbackLine(offsetBefore);
+
+      terminal.write('New output\r\n');
+
+      const scrollbackAfter = terminal.getScrollbackLength();
+      const scrollbackGrowth = scrollbackAfter - scrollbackBefore;
+      expect(terminal.getViewportY()).toBe(viewportBefore + scrollbackGrowth);
+      expect(scrollbackAfter - Math.floor(terminal.getViewportY())).toBe(offsetBefore);
+      expect(terminal.wasmTerm!.getScrollbackLine(offsetBefore)).toEqual(lineBefore);
+    });
+
+    test('keeps a scrolled viewport stable for in-place output', () => {
+      for (let i = 0; i < 50; i++) {
+        terminal.write(`Line ${i}\r\n`);
+      }
+
+      terminal.scrollLines(-10);
+      const viewportBefore = terminal.getViewportY();
+      const scrollbackBefore = terminal.getScrollbackLength();
+
+      terminal.write('\rstatus update');
+
+      expect(terminal.getScrollbackLength()).toBe(scrollbackBefore);
+      expect(terminal.getViewportY()).toBe(viewportBefore);
+    });
+
+    test('continues following output while already at the bottom', () => {
+      terminal.write('first\r\n');
+      expect(terminal.getViewportY()).toBe(0);
+
+      terminal.write('second\r\n');
+      expect(terminal.getViewportY()).toBe(0);
+    });
+
     test('should scroll viewport on wheel event in normal mode', async () => {
       // Fill with enough lines to create scrollback
       for (let i = 0; i < 50; i++) {

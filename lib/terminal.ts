@@ -577,6 +577,13 @@ export class Terminal implements ITerminalCore {
     // preserve selection when new data arrives. Selection is cleared by user actions
     // like clicking or typing, not by incoming data.
 
+    const viewportBefore = this.viewportY;
+    const preserveViewport = viewportBefore > 0 && !this.wasmTerm!.isAlternateScreen();
+    const scrollbackBefore = preserveViewport ? this.getScrollbackLength() : 0;
+    const smoothScrollWasActive =
+      this.scrollAnimationFrame !== undefined || this.scrollAnimationStartTime !== undefined;
+    const targetViewportBefore = this.targetViewportY;
+
     this.parsedWrites++;
 
     // Write directly to WASM terminal (handles VT parsing internally)
@@ -593,8 +600,27 @@ export class Terminal implements ITerminalCore {
     // Invalidate link cache (content changed)
     this.linkDetector?.invalidateCache();
 
-    // Phase 2: Auto-scroll to bottom on new output (xterm.js behavior)
-    if (this.viewportY !== 0) {
+    if (preserveViewport && !this.wasmTerm!.isAlternateScreen()) {
+      // Keep the same retained text under the user's eyes. As active rows move
+      // into history, the distance from the live bottom grows by the same amount.
+      const scrollbackAfter = this.getScrollbackLength();
+      const scrollbackGrowth = Math.max(0, scrollbackAfter - scrollbackBefore);
+      const restoredViewport = Math.max(
+        0,
+        Math.min(scrollbackAfter, viewportBefore + scrollbackGrowth)
+      );
+      if (restoredViewport !== this.viewportY) {
+        this.viewportY = restoredViewport;
+        this.scrollEmitter.fire(this.viewportY);
+      }
+      if (smoothScrollWasActive) {
+        this.targetViewportY = Math.max(
+          0,
+          Math.min(scrollbackAfter, targetViewportBefore + scrollbackGrowth)
+        );
+      }
+    } else if (this.viewportY !== 0) {
+      // Alternate-screen applications always own the live viewport.
       this.scrollToBottom();
     }
 

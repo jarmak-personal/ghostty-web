@@ -38,7 +38,7 @@ export interface IRenderable {
    * For cells with grapheme_len > 0, this returns all codepoints combined.
    * For simple cells, returns the single character.
    */
-  getGraphemeString?(row: number, col: number): string;
+  getGraphemeString?(row: number, col: number, refreshRenderState?: boolean): string;
 }
 
 export interface IScrollbackProvider {
@@ -489,14 +489,14 @@ export class CanvasRenderer {
           const screenRow = viewportY > 0 ? y - Math.floor(viewportY) : y;
           line = buffer.getLine(screenRow);
           if (buffer.getGraphemeString) {
-            getGraphemeString = (column) => buffer.getGraphemeString!(screenRow, column);
+            getGraphemeString = (column) => buffer.getGraphemeString!(screenRow, column, false);
           }
         }
       } else {
         // At bottom - fetch from visible screen
         line = buffer.getLine(y);
         if (buffer.getGraphemeString) {
-          getGraphemeString = (column) => buffer.getGraphemeString!(y, column);
+          getGraphemeString = (column) => buffer.getGraphemeString!(y, column, false);
         }
       }
 

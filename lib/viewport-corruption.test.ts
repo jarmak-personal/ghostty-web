@@ -137,7 +137,62 @@ function getLineText(term: Terminal, row: number): string {
   return cellsToText(line!);
 }
 
+function buildPageBoundaryBatch(rep: number, firstLine: number, markers: string[]): string {
+  const parts: string[] = [];
+  for (let line = 1; line <= 68; line++) {
+    const index = firstLine + line - 1;
+    const marker = `rep=${String(rep).padStart(2, '0')} line=${String(line).padStart(
+      3,
+      '0'
+    )} marker=${String(index).padStart(4, '0')} ${'#'.repeat(52)}`;
+    parts.push(
+      `${markers.length === 0 ? '' : '\r\n'}${ESC}[1;3;38;5;${
+        (rep * 17 + line) % 256
+      }m${marker}${ESC}[0m`
+    );
+    markers.push(marker);
+  }
+  return parts.join('');
+}
+
 describe('viewport scroll-growth corruption', () => {
+  test('retains a coherent line-budgeted history across page boundaries', async () => {
+    const term = await createIsolatedTerminal({ cols: 130, rows: 39, scrollback: 10_000 });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+
+    try {
+      term.open(container);
+      const markers: string[] = [];
+      let previousScrollbackLength = 0;
+      let scrollbackDrop: { rep: number; before: number; after: number } | undefined;
+
+      for (let rep = 1; rep <= 14; rep++) {
+        term.write(buildPageBoundaryBatch(rep, markers.length, markers));
+        const scrollbackLength = term.getScrollbackLength();
+        if (scrollbackLength < previousScrollbackLength) {
+          scrollbackDrop ??= {
+            rep,
+            before: previousScrollbackLength,
+            after: scrollbackLength,
+          };
+        }
+        previousScrollbackLength = scrollbackLength;
+      }
+
+      const expectedRows = markers.slice(-term.rows);
+      expect(getViewportText(term)).toEqual(expectedRows);
+      for (const row of [0, Math.floor(term.rows / 2), term.rows - 1]) {
+        expect(getLineText(term, row)).toBe(expectedRows[row]);
+      }
+      expect(scrollbackDrop).toBeUndefined();
+      expect(previousScrollbackLength).toBeGreaterThanOrEqual(markers.length - term.rows);
+    } finally {
+      term.dispose();
+      document.body.removeChild(container);
+    }
+  });
+
   test('does not expose stale cells after ESC[0m reset-heavy scrolling', async () => {
     const data = buildStressPayload();
     const term = await createIsolatedTerminal({ cols: 160, rows: 39, scrollback: 10_000_000 });
