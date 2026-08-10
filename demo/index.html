@@ -3,6 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="referrer" content="no-referrer" />
     <title>ghostty-web</title>
     <style>
       * {
@@ -137,6 +138,8 @@
       let term;
       let ws;
       let fitAddon;
+      let sessionReady = false;
+      let bootstrapToken;
 
       async function initTerminal() {
         // Initialize WASM
@@ -166,16 +169,16 @@
         });
 
         // Handle terminal resize
-        term.onResize((size) => {
-          if (ws && ws.readyState === WebSocket.OPEN) {
+        term.onResize(() => {
+          if (sessionReady && ws && ws.readyState === WebSocket.OPEN) {
             // Send resize as control sequence (server expects this format)
-            ws.send(JSON.stringify({ type: 'resize', cols: size.cols, rows: size.rows }));
+            ws.send(JSON.stringify({ type: 'resize', ...getTerminalDimensions() }));
           }
         });
 
         // Handle user input
         term.onData((data) => {
-          if (ws && ws.readyState === WebSocket.OPEN) {
+          if (sessionReady && ws && ws.readyState === WebSocket.OPEN) {
             ws.send(data);
           }
         });
@@ -191,51 +194,86 @@
         connectWebSocket();
       }
 
-      async function fetchAuthToken() {
-        const response = await fetch('/api/token', { cache: 'no-store' });
-        if (!response.ok) {
-          throw new Error(`Token request failed with HTTP ${response.status}`);
+      function readBootstrapToken() {
+        const params = new URLSearchParams(window.location.hash.slice(1));
+        let token = params.get('token');
+        if (token) {
+          try {
+            sessionStorage.setItem('ghostty-web-demo-token', token);
+          } catch (_error) {
+            // The in-memory token still works when storage is unavailable.
+          }
+          try {
+            history.replaceState(null, '', window.location.pathname + window.location.search);
+          } catch (_error) {
+            // URL fragments are never included in HTTP requests or referrer URLs.
+          }
+        } else {
+          try {
+            token = sessionStorage.getItem('ghostty-web-demo-token');
+          } catch (_error) {
+            // Fall through to the missing-capability error.
+          }
         }
-
-        const body = await response.json();
-        if (!body || typeof body.token !== 'string' || body.token.length === 0) {
-          throw new Error('Token response did not include a token');
-        }
-
-        return body.token;
+        if (!token) throw new Error('Open the complete launch URL printed by the demo server');
+        return token;
       }
 
-      function buildWebSocketUrl(token) {
+      function buildWebSocketUrl() {
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const params = new URLSearchParams();
-        params.set('cols', String(term.cols));
-        params.set('rows', String(term.rows));
-        params.set('token', token);
-        return `${protocol}//${window.location.host}/ws?${params.toString()}`;
+        return `${protocol}//${window.location.host}/ws`;
       }
 
-      async function connectWebSocket() {
-        updateConnectionStatus(false, 'Authenticating...');
+      function getTerminalDimensions() {
+        const clamp = (value, minimum) => {
+          const integer = Number.isFinite(value) ? Math.trunc(value) : minimum;
+          return Math.min(1000, Math.max(minimum, integer));
+        };
+        return { cols: clamp(term.cols, 2), rows: clamp(term.rows, 1) };
+      }
+
+      function connectWebSocket() {
+        sessionReady = false;
 
         let token;
         try {
-          token = await fetchAuthToken();
+          bootstrapToken ??= readBootstrapToken();
+          token = bootstrapToken;
         } catch (error) {
           console.error('Authentication failed:', error);
           updateConnectionStatus(false, 'Auth error');
-          setTimeout(connectWebSocket, 3000);
           return;
         }
 
         updateConnectionStatus(false, 'Connecting...');
-        ws = new WebSocket(buildWebSocketUrl(token));
+        ws = new WebSocket(buildWebSocketUrl());
 
         ws.onopen = () => {
           console.log('WebSocket connected');
-          updateConnectionStatus(true);
+          updateConnectionStatus(false, 'Authenticating...');
+          const dimensions = getTerminalDimensions();
+          ws.send(
+            JSON.stringify({
+              type: 'authenticate',
+              token,
+              ...dimensions,
+            })
+          );
         };
 
         ws.onmessage = (event) => {
+          if (!sessionReady) {
+            try {
+              const message = JSON.parse(event.data);
+              if (message.type === 'authenticated') {
+                sessionReady = true;
+                updateConnectionStatus(true);
+                return;
+              }
+            } catch (_error) {
+              // The server sends only the authentication acknowledgement first.
+            }
+          }
           // Server sends raw strings, not JSON
           term.write(event.data);
         };
@@ -245,8 +283,13 @@
           updateConnectionStatus(false, 'Error');
         };
 
-        ws.onclose = () => {
+        ws.onclose = (event) => {
+          sessionReady = false;
           console.log('WebSocket disconnected');
+          if (event.code === 1008) {
+            updateConnectionStatus(false, 'Auth error');
+            return;
+          }
           updateConnectionStatus(false);
 
           // Attempt to reconnect after 3 seconds

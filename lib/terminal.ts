@@ -26,6 +26,7 @@ import type {
   IDisposable,
   IEvent,
   IKeyEvent,
+  ILinkHandler,
   IRetainedBufferExtractionOptions,
   IRetainedBufferRange,
   IRetainedBufferSearchOptions,
@@ -109,6 +110,8 @@ export class Terminal implements ITerminalCore {
   // Link detection system
   private linkDetector?: LinkDetector;
   private currentHoveredLink?: ILink;
+  private observedLinkHandler: ILinkHandler | null;
+  private observedAllowNonHttpProtocols: boolean;
   private mouseMoveThrottleTimeout?: number;
   private pendingMouseMove?: MouseEvent;
 
@@ -202,6 +205,7 @@ export class Terminal implements ITerminalCore {
       focusOnOpen: options.focusOnOpen ?? true,
       disableContextMenu: options.disableContextMenu ?? false,
       resolveClipboardFilePaste: options.resolveClipboardFilePaste,
+      linkHandler: options.linkHandler ?? null,
       smoothScrollDuration: options.smoothScrollDuration ?? 100, // Default: 100ms smooth scroll
     };
 
@@ -237,6 +241,8 @@ export class Terminal implements ITerminalCore {
 
     this.cols = this.options.cols;
     this.rows = this.options.rows;
+    this.observedLinkHandler = this.options.linkHandler;
+    this.observedAllowNonHttpProtocols = this.options.linkHandler?.allowNonHttpProtocols === true;
 
     // Initialize buffer API
     this.buffer = new BufferNamespace(this);
@@ -282,12 +288,32 @@ export class Terminal implements ITerminalCore {
         this.renderer?.setFontLigatures(this.options.fontLigatures);
         break;
 
+      case 'linkHandler':
+        this.synchronizeLinkHandlerPolicy();
+        break;
+
       case 'cols':
       case 'rows':
         // Redirect to resize method
         this.resize(this.options.cols, this.options.rows);
         break;
     }
+  }
+
+  /** Keep cached hit-testing aligned with both handler replacement and policy mutation. */
+  private synchronizeLinkHandlerPolicy(): void {
+    const handler = this.options.linkHandler;
+    const allowNonHttpProtocols = handler?.allowNonHttpProtocols === true;
+    if (
+      handler === this.observedLinkHandler &&
+      allowNonHttpProtocols === this.observedAllowNonHttpProtocols
+    ) {
+      return;
+    }
+
+    this.observedLinkHandler = handler;
+    this.observedAllowNonHttpProtocols = allowNonHttpProtocols;
+    this.linkDetector?.invalidateCache();
   }
 
   /**
@@ -526,8 +552,12 @@ export class Terminal implements ITerminalCore {
 
       // Register built-ins in fallback order. Public custom providers are
       // intentionally prepended so applications can override both built-ins.
-      this.linkDetector.registerProvider(new OSC8LinkProvider(this));
-      this.linkDetector.registerProvider(new UrlRegexProvider(this));
+      this.linkDetector.registerProvider(
+        new OSC8LinkProvider(this, () => this.options.linkHandler)
+      );
+      this.linkDetector.registerProvider(
+        new UrlRegexProvider(this, () => this.options.linkHandler)
+      );
 
       // Setup mouse event handling for links and scrollbar
       // Use capture phase to intercept scrollbar clicks before SelectionManager
@@ -1635,6 +1665,7 @@ export class Terminal implements ITerminalCore {
    */
   private processMouseMove(e: MouseEvent): void {
     if (!this.canvas || !this.renderer || !this.linkDetector || !this.wasmTerm) return;
+    this.synchronizeLinkHandlerPolicy();
 
     // Convert mouse coordinates to terminal cell position
     const rect = this.canvas.getBoundingClientRect();
@@ -1807,6 +1838,7 @@ export class Terminal implements ITerminalCore {
     // For more reliable clicking, detect the link at click time
     // rather than relying on cached hover state (avoids async races)
     if (!this.canvas || !this.renderer || !this.linkDetector || !this.wasmTerm) return;
+    this.synchronizeLinkHandlerPolicy();
 
     // Get click position
     const rect = this.canvas.getBoundingClientRect();

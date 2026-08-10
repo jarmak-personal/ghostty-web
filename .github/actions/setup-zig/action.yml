@@ -1,64 +1,108 @@
 name: 'Setup Zig'
-description: 'Install Zig compiler'
+description: 'Install a checksum-verified Zig compiler'
 inputs:
   version:
-    description: 'Zig version to install'
+    description: 'Pinned Zig version to install; must be listed in checksums.txt'
     required: true
     default: '0.15.2'
 runs:
   using: 'composite'
   steps:
-    - name: Cache Zig
-      uses: actions/cache@v4
-      id: cache-zig
-      with:
-        path: |
-          ~/zig
-        key: zig-${{ runner.os }}-${{ inputs.version }}
-
-    - name: Download and install Zig
-      if: steps.cache-zig.outputs.cache-hit != 'true'
+    - name: Resolve pinned Zig archive
+      id: archive
       shell: bash
+      env:
+        ZIG_VERSION: ${{ inputs.version }}
       run: |
-        set -e
-        VERSION="${{ inputs.version }}"
+        set -euo pipefail
+        VERSION="$ZIG_VERSION"
 
-        # Determine platform
-        if [[ "$OSTYPE" == "linux-gnu"* ]]; then
-          PLATFORM="linux"
-          ARCH="x86_64"
-        elif [[ "$OSTYPE" == "darwin"* ]]; then
-          PLATFORM="macos"
-          if [[ "$(uname -m)" == "arm64" ]]; then
-            ARCH="aarch64"
-          else
+        case "${RUNNER_OS}-${RUNNER_ARCH}" in
+          Linux-X64)
+            PLATFORM="linux"
             ARCH="x86_64"
-          fi
-        else
-          echo "Unsupported OS: $OSTYPE"
+            ;;
+          macOS-ARM64)
+            PLATFORM="macos"
+            ARCH="aarch64"
+            ;;
+          macOS-X64)
+            PLATFORM="macos"
+            ARCH="x86_64"
+            ;;
+          *)
+            echo "::error::Unsupported runner: ${RUNNER_OS}-${RUNNER_ARCH}"
+            exit 1
+            ;;
+        esac
+
+        CHECKSUMS="${{ github.action_path }}/checksums.txt"
+        SHA256=$(awk -v version="$VERSION" -v platform="$PLATFORM" -v arch="$ARCH" \
+          '$1 == version && $2 == platform && $3 == arch { print $4 }' "$CHECKSUMS")
+        if [[ ! "$SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+          echo "::error::No unique pinned checksum for Zig ${VERSION} ${PLATFORM}-${ARCH}"
           exit 1
         fi
 
-        # Download from ziglang.org
-        # Note: Format changed in 0.14.1+ from zig-linux-x86_64 to zig-x86_64-linux
         TARBALL="zig-${ARCH}-${PLATFORM}-${VERSION}.tar.xz"
-        URL="https://ziglang.org/download/${VERSION}/${TARBALL}"
+        echo "platform=$PLATFORM" >> "$GITHUB_OUTPUT"
+        echo "arch=$ARCH" >> "$GITHUB_OUTPUT"
+        echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
+        echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+        echo "url=https://ziglang.org/download/${VERSION}/${TARBALL}" >> "$GITHUB_OUTPUT"
 
-        echo "Downloading Zig ${VERSION} for ${PLATFORM}-${ARCH}..."
-        curl --retry 3 --retry-delay 5 -L -o "/tmp/${TARBALL}" "${URL}"
+    - name: Cache pinned Zig archive
+      uses: actions/cache@v4
+      id: cache-zig
+      with:
+        path: ${{ runner.temp }}/ghostty-web-zig-cache/${{ steps.archive.outputs.tarball }}
+        key: zig-archive-${{ runner.os }}-${{ runner.arch }}-${{ inputs.version }}-${{ steps.archive.outputs.sha256 }}
 
-        # Extract to home directory
-        mkdir -p ~/zig
-        tar -xf "/tmp/${TARBALL}" -C ~/zig --strip-components=1
-
-        echo "Zig ${VERSION} installed to ~/zig"
-
-    - name: Add Zig to PATH
+    - name: Download pinned Zig archive
+      if: steps.cache-zig.outputs.cache-hit != 'true'
       shell: bash
       run: |
-        echo "$HOME/zig" >> $GITHUB_PATH
+        set -euo pipefail
+        ARCHIVE="${{ runner.temp }}/ghostty-web-zig-cache/${{ steps.archive.outputs.tarball }}"
+        mkdir -p "$(dirname "$ARCHIVE")"
+        curl \
+          --fail \
+          --location \
+          --proto '=https' \
+          --retry 3 \
+          --retry-delay 5 \
+          --show-error \
+          --silent \
+          --tlsv1.2 \
+          --output "${ARCHIVE}.download" \
+          "${{ steps.archive.outputs.url }}"
+        mv "${ARCHIVE}.download" "$ARCHIVE"
 
-    - name: Verify Zig installation
+    - name: Verify and install Zig
       shell: bash
+      env:
+        ZIG_VERSION: ${{ inputs.version }}
       run: |
-        zig version
+        set -euo pipefail
+        ARCHIVE="${{ runner.temp }}/ghostty-web-zig-cache/${{ steps.archive.outputs.tarball }}"
+        INSTALL_DIR="${RUNNER_TEMP}/ghostty-web-zig-${ZIG_VERSION}-${{ steps.archive.outputs.platform }}-${{ steps.archive.outputs.arch }}"
+
+        bash "${{ github.action_path }}/verify-archive.sh" \
+          "${{ steps.archive.outputs.sha256 }}" \
+          "$ARCHIVE"
+
+        mkdir -p "$INSTALL_DIR"
+        tar -xf "$ARCHIVE" -C "$INSTALL_DIR" --strip-components=1
+        echo "$INSTALL_DIR" >> "$GITHUB_PATH"
+
+    - name: Verify Zig version
+      shell: bash
+      env:
+        EXPECTED_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        ACTUAL_VERSION=$(zig version)
+        if [[ "$ACTUAL_VERSION" != "$EXPECTED_VERSION" ]]; then
+          echo "::error::Expected Zig ${EXPECTED_VERSION}, got ${ACTUAL_VERSION}"
+          exit 1
+        fi

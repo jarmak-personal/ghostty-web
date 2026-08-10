@@ -101,6 +101,7 @@ export type {
   IDisposable,
   IEvent,
   IKeyEvent,
+  ILinkHandler,
   IRetainedBufferExtractionOptions,
   IRetainedBufferRange,
   IRetainedBufferSearchOptions,

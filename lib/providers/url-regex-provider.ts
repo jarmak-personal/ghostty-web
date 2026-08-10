@@ -8,6 +8,8 @@
  * take precedence over regex-detected URLs.
  */
 
+import type { ILinkHandler } from '../interfaces';
+import { activateBuiltInLink, isLinkUriAllowed } from '../link-activation';
 import type { IBufferRange, ILink, ILinkProvider } from '../types';
 
 /**
@@ -16,14 +18,15 @@ import type { IBufferRange, ILink, ILinkProvider } from '../types';
  * Detects plain text URLs on a single line using regex.
  * Does not support multi-line URLs or file paths.
  *
- * Supported protocols:
- * - https://, http://
- * - mailto:
- * - ftp://, ssh://, git://
- * - tel:, magnet:
- * - gemini://, gopher://, news:
+ * HTTP(S) is enabled by default. Other recognized protocols are returned only
+ * to an explicit host-owned link handler that opts into them.
  */
 export class UrlRegexProvider implements ILinkProvider {
+  constructor(
+    private terminal: ITerminalForUrlProvider,
+    private getLinkHandler: () => ILinkHandler | null = () => null
+  ) {}
+
   /**
    * URL regex pattern
    * Matches common protocols followed by valid URL characters
@@ -37,8 +40,6 @@ export class UrlRegexProvider implements ILinkProvider {
    * Common punctuation that's unlikely to be part of the URL
    */
   private static readonly TRAILING_PUNCTUATION = /[.,;!?)\]]+$/;
-
-  constructor(private terminal: ITerminalForUrlProvider) {}
 
   /**
    * Provide all regex-detected URLs on the given row
@@ -73,18 +74,16 @@ export class UrlRegexProvider implements ILinkProvider {
       }
 
       // Skip if URL is too short (e.g., just "http://")
-      if (url.length > 8) {
+      if (url.length > 8 && isLinkUriAllowed(url, this.getLinkHandler())) {
+        const range: IBufferRange = {
+          start: { x: startX, y },
+          end: { x: endX, y },
+        };
         links.push({
           text: url,
-          range: {
-            start: { x: startX, y },
-            end: { x: endX, y },
-          },
+          range,
           activate: (event) => {
-            // Open link if Ctrl/Cmd is pressed
-            if (event.ctrlKey || event.metaKey) {
-              window.open(url, '_blank', 'noopener,noreferrer');
-            }
+            activateBuiltInLink(event, url, range, this.getLinkHandler());
           },
         });
       }

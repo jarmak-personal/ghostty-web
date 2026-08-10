@@ -28,7 +28,7 @@ Originally created for [Mux](https://github.com/coder/mux) (a desktop app for is
   npx @ghostty-web/demo@next
   ```
 
-  This starts a loopback-only HTTP server with a real shell on `http://127.0.0.1:8080`. The demo protects `/ws` with a per-run same-origin token and rejects cross-origin WebSocket handshakes. Works best on Linux and macOS.
+  This starts a loopback-only HTTP server with a real shell and prints a per-run capability URL. Open that complete URL to authenticate before the demo creates a PTY. Cross-origin WebSocket handshakes are also rejected. Works best on Linux and macOS.
 
   To intentionally bind somewhere else, set `HOST=<host>`. If you serve the demo through extra hostnames or a wildcard bind such as `HOST=0.0.0.0`, also set `GHOSTTY_ALLOWED_HOSTS=host1,host2`. Avoid remote exposure unless you understand the risk: the demo starts a real local shell.
 
@@ -132,6 +132,14 @@ runs without changing Ghostty's cell grid, while Unicode graphemes, wide and fal
 glyphs, selection, cursor, hyperlinks, and rendition boundaries remain independently owned. Set the
 option to `false` for isolated cell glyph draws. Changing it after `open()` repaints the retained
 Canvas without replacing terminal state, scrollback, or PTY geometry.
+
+Built-in OSC 8 and plain-text links open only absolute HTTP(S) URLs by default. This is a behavior
+change for embedders that previously relied on built-in activation of protocols such as `mailto:`
+or `ssh:`. Applications that need additional protocols can provide a host-owned `linkHandler` and
+set `allowNonHttpProtocols: true`. Once configured, that handler owns activation for every built-in
+link, including HTTP(S), and must validate and navigate allowed URLs itself. Browser-executable
+and browser-managed content protocols remain blocked. Custom link providers remain fully
+application-owned.
 
 The hvir compatibility artifact also exposes typed events sourced directly from Ghostty's parser:
 

@@ -6,6 +6,7 @@
  */
 
 import { describe, expect, test } from 'bun:test';
+import type { ILinkHandler } from './interfaces';
 import { UrlRegexProvider } from './providers/url-regex-provider';
 import type { ILink } from './types';
 
@@ -35,9 +36,12 @@ function createMockTerminal(lineText: string) {
 /**
  * Helper to get links from provider
  */
-function getLinks(lineText: string): Promise<ILink[] | undefined> {
+function getLinks(
+  lineText: string,
+  handler: ILinkHandler | null = null
+): Promise<ILink[] | undefined> {
   const terminal = createMockTerminal(lineText) as any;
-  const provider = new UrlRegexProvider(terminal);
+  const provider = new UrlRegexProvider(terminal, () => handler);
 
   return new Promise((resolve) => {
     provider.provideLinks(0, resolve);
@@ -45,6 +49,11 @@ function getLinks(lineText: string): Promise<ILink[] | undefined> {
 }
 
 describe('URL Detection', () => {
+  const nonHttpHandler: ILinkHandler = {
+    allowNonHttpProtocols: true,
+    activate: () => {},
+  };
+
   test('detects HTTPS URLs', async () => {
     const links = await getLinks('Visit https://github.com for code');
     expect(links).toBeDefined();
@@ -62,29 +71,29 @@ describe('URL Detection', () => {
     expect(links?.[0].text).toBe('http://example.com');
   });
 
-  test('detects mailto: links', async () => {
-    const links = await getLinks('Email: mailto:test@example.com');
+  test('detects mailto: links when the host opts in', async () => {
+    const links = await getLinks('Email: mailto:test@example.com', nonHttpHandler);
     expect(links).toBeDefined();
     expect(links?.length).toBe(1);
     expect(links?.[0].text).toBe('mailto:test@example.com');
   });
 
-  test('detects ssh:// URLs', async () => {
-    const links = await getLinks('Connect via ssh://user@server.com');
+  test('detects ssh:// URLs when the host opts in', async () => {
+    const links = await getLinks('Connect via ssh://user@server.com', nonHttpHandler);
     expect(links).toBeDefined();
     expect(links?.length).toBe(1);
     expect(links?.[0].text).toBe('ssh://user@server.com');
   });
 
-  test('detects git:// URLs', async () => {
-    const links = await getLinks('Clone git://github.com/repo.git');
+  test('detects git:// URLs when the host opts in', async () => {
+    const links = await getLinks('Clone git://github.com/repo.git', nonHttpHandler);
     expect(links).toBeDefined();
     expect(links?.length).toBe(1);
     expect(links?.[0].text).toBe('git://github.com/repo.git');
   });
 
-  test('detects ftp:// URLs', async () => {
-    const links = await getLinks('Download ftp://files.example.com/file');
+  test('detects ftp:// URLs when the host opts in', async () => {
+    const links = await getLinks('Download ftp://files.example.com/file', nonHttpHandler);
     expect(links).toBeDefined();
     expect(links?.length).toBe(1);
     expect(links?.[0].text).toBe('ftp://files.example.com/file');
@@ -171,17 +180,22 @@ describe('URL Detection', () => {
     expect(typeof links?.[0].activate).toBe('function');
   });
 
-  test('detects tel: URLs', async () => {
-    const links = await getLinks('Call tel:+1234567890');
+  test('detects tel: URLs when the host opts in', async () => {
+    const links = await getLinks('Call tel:+1234567890', nonHttpHandler);
     expect(links).toBeDefined();
     expect(links?.length).toBe(1);
     expect(links?.[0].text).toBe('tel:+1234567890');
   });
 
-  test('detects magnet: URLs', async () => {
-    const links = await getLinks('Download magnet:?xt=urn:btih:abc123');
+  test('detects magnet: URLs when the host opts in', async () => {
+    const links = await getLinks('Download magnet:?xt=urn:btih:abc123', nonHttpHandler);
     expect(links).toBeDefined();
     expect(links?.length).toBe(1);
     expect(links?.[0].text).toContain('magnet:?xt=urn:btih:abc123');
+  });
+
+  test('does not expose non-HTTP links without a host-owned handler', async () => {
+    expect(await getLinks('Email: mailto:test@example.com')).toBeUndefined();
+    expect(await getLinks('Connect via ssh://user@server.com')).toBeUndefined();
   });
 });

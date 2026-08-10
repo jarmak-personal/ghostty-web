@@ -10,6 +10,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import type { ILinkHandler } from './interfaces';
 import type { Terminal } from './terminal';
 import { createIsolatedTerminal } from './test-helpers';
 
@@ -2572,6 +2573,45 @@ describe('Options Proxy handleOptionChange', () => {
     }).not.toThrow();
 
     expect(term.options.cursorStyle).toBe('underline');
+  });
+
+  test('keeps the link cache aligned with handler replacement and policy mutation', async () => {
+    if (!container) return;
+
+    const handler: ILinkHandler = {
+      activate: () => {},
+    };
+    const term = await createIsolatedTerminal({ linkHandler: handler });
+    term.open(container);
+
+    const detector = (term as unknown as { linkDetector: { invalidateCache(): void } })
+      .linkDetector;
+    const originalInvalidate = detector.invalidateCache.bind(detector);
+    let invalidations = 0;
+    detector.invalidateCache = () => {
+      invalidations++;
+      originalInvalidate();
+    };
+
+    handler.allowNonHttpProtocols = true;
+    (
+      term as unknown as {
+        synchronizeLinkHandlerPolicy(): void;
+      }
+    ).synchronizeLinkHandlerPolicy();
+    expect(invalidations).toBe(1);
+
+    (
+      term as unknown as {
+        synchronizeLinkHandlerPolicy(): void;
+      }
+    ).synchronizeLinkHandlerPolicy();
+    expect(invalidations).toBe(1);
+
+    term.options.linkHandler = null;
+    expect(invalidations).toBe(2);
+
+    term.dispose();
   });
 
   test('changing fontSize updates renderer and resizes canvas', async () => {

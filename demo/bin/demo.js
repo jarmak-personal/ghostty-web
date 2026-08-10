@@ -21,8 +21,9 @@ import {
   createAuthConfig,
   isLoopbackHost,
   isWildcardBindHost,
-  validateTokenRequest,
-  validateWebSocketRequest,
+  validateAuthenticationMessage,
+  validateTerminalDimensions,
+  validateWebSocketUpgrade,
 } from './auth.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -104,6 +105,7 @@ const HTML_TEMPLATE = `<!doctype html>
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="referrer" content="no-referrer" />
     <title>ghostty-web</title>
     <style>
       * {
@@ -259,55 +261,97 @@ const HTML_TEMPLATE = `<!doctype html>
       // Connect to WebSocket PTY server (use same origin as HTTP server)
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       let ws;
+      let sessionReady = false;
+      let bootstrapToken;
 
-      async function fetchAuthToken() {
-        const response = await fetch('/api/token', { cache: 'no-store' });
-        if (!response.ok) {
-          throw new Error('Token request failed with HTTP ' + response.status);
+      function readBootstrapToken() {
+        const params = new URLSearchParams(window.location.hash.slice(1));
+        let token = params.get('token');
+        if (token) {
+          try {
+            sessionStorage.setItem('ghostty-web-demo-token', token);
+          } catch (_error) {
+            // The in-memory token still works when storage is unavailable.
+          }
+          try {
+            history.replaceState(null, '', window.location.pathname + window.location.search);
+          } catch (_error) {
+            // URL fragments are never included in HTTP requests or referrer URLs.
+          }
+        } else {
+          try {
+            token = sessionStorage.getItem('ghostty-web-demo-token');
+          } catch (_error) {
+            // Fall through to the missing-capability error.
+          }
         }
-
-        const body = await response.json();
-        if (!body || typeof body.token !== 'string' || body.token.length === 0) {
-          throw new Error('Token response did not include a token');
-        }
-
-        return body.token;
+        if (!token) throw new Error('Open the complete launch URL printed by the demo server');
+        return token;
       }
 
-      function buildWebSocketUrl(token) {
-        const params = new URLSearchParams();
-        params.set('cols', String(term.cols));
-        params.set('rows', String(term.rows));
-        params.set('token', token);
-        return protocol + '//' + window.location.host + '/ws?' + params.toString();
+      function buildWebSocketUrl() {
+        return protocol + '//' + window.location.host + '/ws';
       }
 
-      async function connect() {
-        setStatus('connecting', 'Authenticating...');
+      function getTerminalDimensions() {
+        const clamp = (value, minimum) => {
+          const integer = Number.isFinite(value) ? Math.trunc(value) : minimum;
+          return Math.min(1000, Math.max(minimum, integer));
+        };
+        return { cols: clamp(term.cols, 2), rows: clamp(term.rows, 1) };
+      }
+
+      function connect() {
+        sessionReady = false;
 
         let token;
         try {
-          token = await fetchAuthToken();
+          bootstrapToken ??= readBootstrapToken();
+          token = bootstrapToken;
         } catch (error) {
           console.error('Authentication failed:', error);
           setStatus('disconnected', 'Auth error');
-          term.write('\\r\\n\\x1b[31mAuthentication failed. Retrying in 2s...\\x1b[0m\\r\\n');
-          setTimeout(connect, 2000);
+          term.write('\\r\\n\\x1b[31mAuthentication failed. Use the launch URL printed by the server.\\x1b[0m\\r\\n');
           return;
         }
 
         setStatus('connecting', 'Connecting...');
-        ws = new WebSocket(buildWebSocketUrl(token));
+        ws = new WebSocket(buildWebSocketUrl());
 
         ws.onopen = () => {
-          setStatus('connected', 'Connected');
+          setStatus('connecting', 'Authenticating...');
+          const dimensions = getTerminalDimensions();
+          ws.send(
+            JSON.stringify({
+              type: 'authenticate',
+              token,
+              ...dimensions,
+            })
+          );
         };
 
         ws.onmessage = (event) => {
+          if (!sessionReady) {
+            try {
+              const message = JSON.parse(event.data);
+              if (message.type === 'authenticated') {
+                sessionReady = true;
+                setStatus('connected', 'Connected');
+                return;
+              }
+            } catch (_error) {
+              // The server sends only the authentication acknowledgement first.
+            }
+          }
           term.write(event.data);
         };
 
-        ws.onclose = () => {
+        ws.onclose = (event) => {
+          sessionReady = false;
+          if (event.code === 1008) {
+            setStatus('disconnected', 'Auth error');
+            return;
+          }
           setStatus('disconnected', 'Disconnected');
           term.write('\\r\\n\\x1b[31mConnection closed. Reconnecting in 2s...\\x1b[0m\\r\\n');
           setTimeout(connect, 2000);
@@ -322,15 +366,15 @@ const HTML_TEMPLATE = `<!doctype html>
 
       // Send terminal input to server
       term.onData((data) => {
-        if (ws && ws.readyState === WebSocket.OPEN) {
+        if (sessionReady && ws && ws.readyState === WebSocket.OPEN) {
           ws.send(data);
         }
       });
 
       // Handle resize - notify PTY when terminal dimensions change
-      term.onResize(({ cols, rows }) => {
-        if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: 'resize', cols, rows }));
+      term.onResize(() => {
+        if (sessionReady && ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'resize', ...getTerminalDimensions() }));
         }
       });
 
@@ -396,10 +440,6 @@ const httpServer = http.createServer((req, res) => {
     return;
   }
 
-  if (handleTokenRequest(req, res, url)) {
-    return;
-  }
-
   const pathname = url.pathname;
 
   // Serve index page
@@ -458,44 +498,6 @@ function writeHttpDecision(res, decision) {
   res.end(decision.reason);
 }
 
-function writeTokenResponse(res) {
-  res.writeHead(200, {
-    'Content-Type': 'application/json',
-    'Cache-Control': 'no-store',
-    'X-Content-Type-Options': 'nosniff',
-  });
-  res.end(JSON.stringify({ token: AUTH_CONFIG.token }));
-}
-
-function handleTokenRequest(req, res, url) {
-  if (url.pathname !== '/api/token') {
-    return false;
-  }
-
-  if (req.method !== 'GET') {
-    res.writeHead(405, {
-      Allow: 'GET',
-      'Content-Type': 'text/plain; charset=utf-8',
-      'X-Content-Type-Options': 'nosniff',
-    });
-    res.end('Method Not Allowed');
-    return true;
-  }
-
-  const decision = validateTokenRequest(AUTH_CONFIG, {
-    host: req.headers.host,
-    origin: req.headers.origin,
-  });
-
-  if (!decision.ok) {
-    writeHttpDecision(res, decision);
-    return true;
-  }
-
-  writeTokenResponse(res);
-  return true;
-}
-
 // ============================================================================
 // WebSocket Server (using ws package)
 // ============================================================================
@@ -529,7 +531,7 @@ function createPtySession(cols, rows) {
 }
 
 // WebSocket server attached to HTTP server (same port)
-const wss = new WebSocketServer({ noServer: true });
+const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
 
 function rejectUpgrade(socket, decision) {
   if (socket.destroyed) {
@@ -560,10 +562,9 @@ function handleWebSocketUpgrade(req, socket, head) {
     return false;
   }
 
-  const decision = validateWebSocketRequest(AUTH_CONFIG, {
+  const decision = validateWebSocketUpgrade(AUTH_CONFIG, {
     host: req.headers.host,
     origin: req.headers.origin,
-    token: url.searchParams.get('token'),
   });
 
   if (!decision.ok) {
@@ -586,67 +587,9 @@ httpServer.on('upgrade', (req, socket, head) => {
   }
 });
 
-wss.on('connection', (ws, req) => {
-  const url = parseRequestUrl(req);
-  if (!url) {
-    ws.close();
-    return;
-  }
-  const cols = Number.parseInt(url.searchParams.get('cols') || '80');
-  const rows = Number.parseInt(url.searchParams.get('rows') || '24');
+const AUTHENTICATION_TIMEOUT_MS = 10_000;
 
-  // Create PTY
-  const ptyProcess = createPtySession(cols, rows);
-  sessions.set(ws, { pty: ptyProcess });
-
-  // PTY -> WebSocket
-  ptyProcess.onData((data) => {
-    if (ws.readyState === ws.OPEN) {
-      ws.send(data);
-    }
-  });
-
-  ptyProcess.onExit(({ exitCode }) => {
-    if (ws.readyState === ws.OPEN) {
-      ws.send(`\r\n\x1b[33mShell exited (code: ${exitCode})\x1b[0m\r\n`);
-      ws.close();
-    }
-  });
-
-  // WebSocket -> PTY
-  ws.on('message', (data) => {
-    const message = data.toString('utf8');
-
-    // Check for resize message
-    if (message.startsWith('{')) {
-      try {
-        const msg = JSON.parse(message);
-        if (msg.type === 'resize') {
-          ptyProcess.resize(msg.cols, msg.rows);
-          return;
-        }
-      } catch (e) {
-        // Not JSON, treat as input
-      }
-    }
-
-    // Send to PTY
-    ptyProcess.write(message);
-  });
-
-  ws.on('close', () => {
-    const session = sessions.get(ws);
-    if (session) {
-      session.pty.kill();
-      sessions.delete(ws);
-    }
-  });
-
-  ws.on('error', () => {
-    // Ignore socket errors (connection reset, etc.)
-  });
-
-  // Send welcome message
+function sendWelcomeMessage(ws) {
   const C = '\x1b[1;36m'; // Cyan
   const G = '\x1b[1;32m'; // Green
   const Y = '\x1b[1;33m'; // Yellow
@@ -661,6 +604,101 @@ wss.on('connection', (ws, req) => {
     `${C}║${R}  Try: ${Y}ls${R}, ${Y}cd${R}, ${Y}top${R}, ${Y}vim${R}, or any command!                      ${C}║${R}\r\n`
   );
   ws.send(`${C}╚══════════════════════════════════════════════════════════════╝${R}\r\n\r\n`);
+}
+
+function startAuthenticatedSession(ws, cols, rows) {
+  const ptyProcess = createPtySession(cols, rows);
+  sessions.set(ws, { pty: ptyProcess });
+
+  ptyProcess.onData((data) => {
+    if (ws.readyState === ws.OPEN) {
+      ws.send(data);
+    }
+  });
+
+  ptyProcess.onExit(({ exitCode }) => {
+    if (ws.readyState === ws.OPEN) {
+      ws.send(`\r\n\x1b[33mShell exited (code: ${exitCode})\x1b[0m\r\n`);
+      ws.close();
+    }
+  });
+
+  ws.send(JSON.stringify({ type: 'authenticated' }));
+  sendWelcomeMessage(ws);
+}
+
+wss.on('connection', (ws) => {
+  let authenticated = false;
+  const authenticationTimeout = setTimeout(() => {
+    if (!authenticated && ws.readyState === ws.OPEN) {
+      ws.close(1008, 'Authentication timeout');
+    }
+  }, AUTHENTICATION_TIMEOUT_MS);
+
+  ws.on('message', (data, isBinary) => {
+    if (isBinary) {
+      ws.close(1003, 'Text messages only');
+      return;
+    }
+
+    const message = data.toString('utf8');
+    if (!authenticated) {
+      let value;
+      try {
+        value = JSON.parse(message);
+      } catch (_error) {
+        ws.close(1008, 'Authentication required');
+        return;
+      }
+
+      const decision = validateAuthenticationMessage(AUTH_CONFIG, value);
+      if (!decision.ok) {
+        ws.close(1008, decision.reason);
+        return;
+      }
+
+      authenticated = true;
+      clearTimeout(authenticationTimeout);
+      startAuthenticatedSession(ws, decision.cols, decision.rows);
+      return;
+    }
+
+    const session = sessions.get(ws);
+    if (!session) {
+      ws.close(1011, 'Session unavailable');
+      return;
+    }
+
+    if (message.startsWith('{')) {
+      try {
+        const value = JSON.parse(message);
+        if (value.type === 'resize') {
+          const decision = validateTerminalDimensions(value.cols, value.rows);
+          if (decision.ok) {
+            session.pty.resize(decision.cols, decision.rows);
+          }
+          return;
+        }
+      } catch (_error) {
+        // Not a control message; pass it to the PTY as input.
+      }
+    }
+
+    session.pty.write(message);
+  });
+
+  ws.on('close', () => {
+    clearTimeout(authenticationTimeout);
+    const session = sessions.get(ws);
+    if (session) {
+      session.pty.kill();
+      sessions.delete(ws);
+    }
+  });
+
+  ws.on('error', () => {
+    // Ignore socket errors (connection reset, etc.)
+  });
 });
 
 // ============================================================================
@@ -677,7 +715,7 @@ function printBanner(url) {
   console.log('═'.repeat(60));
   console.log(`\n  📺 Open: ${url}`);
   console.log(`  📡 WebSocket PTY: same endpoint /ws`);
-  console.log('  🔐 WebSocket auth: per-run same-origin token');
+  console.log('  🔐 WebSocket auth: per-run launch capability');
   console.log(`  🐚 Shell: ${getShell()}`);
   console.log(`  📁 Home: ${homedir()}`);
   if (DEV_MODE) {
@@ -714,26 +752,6 @@ if (DEV_MODE) {
   const { createServer } = await import('vite');
   const vite = await createServer({
     root: repoRoot,
-    plugins: [
-      {
-        name: 'ghostty-demo-auth',
-        configureServer(server) {
-          server.middlewares.use((req, res, next) => {
-            const url = parseRequestUrl(req);
-            if (!url) {
-              writeHttpDecision(res, { status: 400, reason: 'Bad Request' });
-              return;
-            }
-
-            if (handleTokenRequest(req, res, url)) {
-              return;
-            }
-
-            next();
-          });
-        },
-      },
-    ],
     server: {
       host: HOST,
       port: HTTP_PORT,
@@ -760,10 +778,14 @@ if (DEV_MODE) {
     });
   }
 
-  printBanner(`http://${formatUrlHost(HOST)}:${HTTP_PORT}/demo/`);
+  printBanner(
+    `http://${formatUrlHost(HOST)}:${HTTP_PORT}/demo/#token=${encodeURIComponent(AUTH_CONFIG.token)}`
+  );
 } else {
   // Production mode: static file server
   httpServer.listen(HTTP_PORT, HOST, () => {
-    printBanner(`http://${formatUrlHost(HOST)}:${HTTP_PORT}`);
+    printBanner(
+      `http://${formatUrlHost(HOST)}:${HTTP_PORT}/#token=${encodeURIComponent(AUTH_CONFIG.token)}`
+    );
   });
 }
