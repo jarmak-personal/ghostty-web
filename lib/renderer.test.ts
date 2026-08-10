@@ -73,6 +73,14 @@ function createRenderHarness(
   state: RenderStateSnapshot;
   fillTexts: Array<[string, number, number]>;
   clips: Array<[number, number, number, number]>;
+  fillRects: Array<{
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    fillStyle: string | CanvasGradient | CanvasPattern;
+    alpha: number;
+  }>;
   paths: Array<{
     operation: 'fill' | 'stroke';
     commands: PathCommand[];
@@ -110,6 +118,14 @@ function createRenderHarness(
   const context = (renderer as unknown as { ctx: CanvasRenderingContext2D }).ctx;
   const fillTexts: Array<[string, number, number]> = [];
   const clips: Array<[number, number, number, number]> = [];
+  const fillRects: Array<{
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    fillStyle: string | CanvasGradient | CanvasPattern;
+    alpha: number;
+  }> = [];
   const paths: Array<{
     operation: 'fill' | 'stroke';
     commands: PathCommand[];
@@ -131,6 +147,9 @@ function createRenderHarness(
   context.lineTo = (x, y) => {
     pathCommands.push(['lineTo', x, y]);
   };
+  context.quadraticCurveTo = (controlX, controlY, x, y) => {
+    pathCommands.push(['quadraticCurveTo', controlX, controlY, x, y]);
+  };
   context.ellipse = (x, y, radiusX, radiusY, rotation, startAngle, endAngle) => {
     pathCommands.push(['ellipse', x, y, radiusX, radiusY, rotation, startAngle, endAngle]);
   };
@@ -149,11 +168,28 @@ function createRenderHarness(
   };
   context.fill = (() => recordPath('fill')) as CanvasRenderingContext2D['fill'];
   context.stroke = (() => recordPath('stroke')) as CanvasRenderingContext2D['stroke'];
+  context.fillRect = (x, y, width, height) => {
+    fillRects.push({
+      x,
+      y,
+      width,
+      height,
+      fillStyle: context.fillStyle,
+      alpha: context.globalAlpha,
+    });
+  };
   context.rect = ((x: number, y: number, width: number, height: number) => {
-    clips.push([x, y, width, height]);
+    pathCommands.push(['rect', x, y, width, height]);
   }) as CanvasRenderingContext2D['rect'];
+  context.clip = (() => {
+    for (const [operation, ...values] of pathCommands) {
+      if (operation === 'rect') {
+        clips.push(values as [number, number, number, number]);
+      }
+    }
+  }) as CanvasRenderingContext2D['clip'];
 
-  return { renderer, buffer, state, fillTexts, clips, paths, requestedFullFrames };
+  return { renderer, buffer, state, fillTexts, clips, fillRects, paths, requestedFullFrames };
 }
 
 describe('CanvasRenderer', () => {
@@ -286,16 +322,9 @@ describe('CanvasRenderer', () => {
       harness.buffer.getGraphemeString = (_row, column) => (column === 3 ? 'e\u0301' : ' ');
       harness.renderer.render(harness.buffer, true);
 
-      expect(harness.fillTexts.map(([text]) => text)).toEqual([
-        'a',
-        '界',
-        'e\u0301',
-        '😀',
-        '─',
-        'b',
-      ]);
-      expect(harness.paths).toHaveLength(1);
-      expect(harness.paths[0].operation).toBe('fill');
+      expect(harness.fillTexts.map(([text]) => text)).toEqual(['a', '界', 'e\u0301', '😀', 'b']);
+      expect(harness.paths).toHaveLength(2);
+      expect(harness.paths.map(({ operation }) => operation)).toEqual(['fill', 'fill']);
       expect(harness.renderer.getFrameStats().maxRunCells).toBe(1);
       harness.renderer.dispose();
     });
@@ -449,6 +478,241 @@ describe('CanvasRenderer', () => {
           '\ue0a0',
           '\ue0b0\ufe0f',
         ]);
+        harness.renderer.dispose();
+      });
+    });
+
+    describe('box-drawing geometry', () => {
+      const boxGlyphs = [
+        { character: '─', directions: 'lr', strokeWidth: 1 },
+        { character: '━', directions: 'lr', strokeWidth: 3 },
+        { character: '│', directions: 'ud', strokeWidth: 1 },
+        { character: '┃', directions: 'ud', strokeWidth: 3 },
+        { character: '┌', directions: 'rd', strokeWidth: 1 },
+        { character: '┏', directions: 'rd', strokeWidth: 3 },
+        { character: '┐', directions: 'ld', strokeWidth: 1 },
+        { character: '┓', directions: 'ld', strokeWidth: 3 },
+        { character: '└', directions: 'ur', strokeWidth: 1 },
+        { character: '┗', directions: 'ur', strokeWidth: 3 },
+        { character: '┘', directions: 'ul', strokeWidth: 1 },
+        { character: '┛', directions: 'ul', strokeWidth: 3 },
+        { character: '├', directions: 'urd', strokeWidth: 1 },
+        { character: '┣', directions: 'urd', strokeWidth: 3 },
+        { character: '┤', directions: 'uld', strokeWidth: 1 },
+        { character: '┫', directions: 'uld', strokeWidth: 3 },
+        { character: '┬', directions: 'lrd', strokeWidth: 1 },
+        { character: '┳', directions: 'lrd', strokeWidth: 3 },
+        { character: '┴', directions: 'ulr', strokeWidth: 1 },
+        { character: '┻', directions: 'ulr', strokeWidth: 3 },
+        { character: '┼', directions: 'ulrd', strokeWidth: 1 },
+        { character: '╋', directions: 'ulrd', strokeWidth: 3 },
+        { character: '╭', directions: 'rd', strokeWidth: 1, rounded: true },
+        { character: '╮', directions: 'ld', strokeWidth: 1, rounded: true },
+        { character: '╯', directions: 'ul', strokeWidth: 1, rounded: true },
+        { character: '╰', directions: 'ur', strokeWidth: 1, rounded: true },
+      ] as const;
+      const geometryMatrix = [
+        { fontSize: 11, devicePixelRatio: 1 },
+        { fontSize: 15, devicePixelRatio: 1.25 },
+        { fontSize: 19, devicePixelRatio: 1.5 },
+        { fontSize: 21, devicePixelRatio: 2 },
+      ];
+
+      test('snaps legacy cell metrics without shrinking them', () => {
+        for (const options of geometryMatrix) {
+          const context = document.createElement('canvas').getContext('2d')!;
+          context.font = `${options.fontSize}px monospace`;
+          const measured = context.measureText('M');
+          const ascent = measured.actualBoundingBoxAscent || options.fontSize * 0.8;
+          const descent = measured.actualBoundingBoxDescent || options.fontSize * 0.2;
+          const legacyMetrics = {
+            width: Math.ceil(measured.width),
+            height: Math.ceil(ascent + descent) + 2,
+            baseline: Math.ceil(ascent) + 1,
+          };
+          const harness = createRenderHarness([[makeCell('─')]], options);
+          const metrics = harness.renderer.getMetrics();
+
+          expect(metrics.width).toBeGreaterThanOrEqual(legacyMetrics.width);
+          expect(metrics.height).toBeGreaterThanOrEqual(legacyMetrics.height);
+          expect(metrics.baseline).toBeGreaterThanOrEqual(legacyMetrics.baseline);
+          expect(metrics.width * options.devicePixelRatio).toBeCloseTo(
+            Math.round(metrics.width * options.devicePixelRatio),
+            10
+          );
+          expect(metrics.height * options.devicePixelRatio).toBeCloseTo(
+            Math.round(metrics.height * options.devicePixelRatio),
+            10
+          );
+          expect(metrics.baseline * options.devicePixelRatio).toBeCloseTo(
+            Math.round(metrics.baseline * options.devicePixelRatio),
+            10
+          );
+          harness.renderer.dispose();
+        }
+      });
+
+      for (const options of geometryMatrix) {
+        test(`joins representative light and heavy strokes at ${options.fontSize}px / ${options.devicePixelRatio} DPR`, () => {
+          for (const glyph of boxGlyphs) {
+            const invisible = makeCell(' ', { flags: CellFlags.INVISIBLE });
+            const harness = createRenderHarness(
+              [[invisible], [makeCell(glyph.character)], [invisible]],
+              options
+            );
+            harness.renderer.render(harness.buffer, true);
+
+            const { width, height, baseline } = harness.renderer.getMetrics();
+            const rowY = height;
+            const thickness = glyph.strokeWidth / options.devicePixelRatio;
+            const centerX =
+              (Math.floor((width / 2) * options.devicePixelRatio) + 0.5) / options.devicePixelRatio;
+            const centerY =
+              (Math.floor((rowY + height / 2) * options.devicePixelRatio) + 0.5) /
+              options.devicePixelRatio;
+            const halfThickness = thickness / 2;
+
+            expect(width * options.devicePixelRatio).toBeCloseTo(
+              Math.round(width * options.devicePixelRatio),
+              10
+            );
+            expect(height * options.devicePixelRatio).toBeCloseTo(
+              Math.round(height * options.devicePixelRatio),
+              10
+            );
+            expect(baseline * options.devicePixelRatio).toBeCloseTo(
+              Math.round(baseline * options.devicePixelRatio),
+              10
+            );
+            expect(harness.fillTexts).toEqual([]);
+            expect(harness.clips).toEqual([[0, rowY, width, height]]);
+
+            if (glyph.rounded) {
+              expect(harness.paths).toHaveLength(1);
+              expect(harness.paths[0]).toMatchObject({
+                operation: 'stroke',
+                strokeStyle: 'rgb(212, 212, 212)',
+                alpha: 1,
+                lineWidth: thickness,
+              });
+              const commands = harness.paths[0].commands;
+              expect(commands[0]).toEqual([
+                'moveTo',
+                centerX,
+                glyph.directions.includes('u') ? rowY : rowY + height,
+              ]);
+              expect(commands.at(-1)).toEqual([
+                'lineTo',
+                glyph.directions.includes('l') ? 0 : width,
+                centerY,
+              ]);
+            } else {
+              const expectedRects: PathCommand[] = [];
+              if (glyph.directions.includes('l') || glyph.directions.includes('r')) {
+                const left = glyph.directions.includes('l') ? 0 : centerX - halfThickness;
+                const right = glyph.directions.includes('r') ? width : centerX + halfThickness;
+                expectedRects.push([
+                  'rect',
+                  left,
+                  centerY - halfThickness,
+                  right - left,
+                  thickness,
+                ]);
+              }
+              if (glyph.directions.includes('u') || glyph.directions.includes('d')) {
+                const top = glyph.directions.includes('u') ? rowY : centerY - halfThickness;
+                const bottom = glyph.directions.includes('d')
+                  ? rowY + height
+                  : centerY + halfThickness;
+                expectedRects.push(['rect', centerX - halfThickness, top, thickness, bottom - top]);
+              }
+              expect(harness.paths).toHaveLength(1);
+              expect(harness.paths[0]).toMatchObject({
+                operation: 'fill',
+                fillStyle: 'rgb(212, 212, 212)',
+                alpha: 1,
+                commands: expectedRects,
+              });
+            }
+            harness.renderer.dispose();
+          }
+        });
+      }
+
+      test('keeps fractional-DPR backing dimensions stable across frames', () => {
+        const harness = createRenderHarness([[makeCell('─')]], {
+          fontSize: 17,
+          devicePixelRatio: 1.5,
+        });
+        const originalResize = harness.renderer.resize.bind(harness.renderer);
+        let resizeCalls = 0;
+        harness.renderer.resize = (cols, rows) => {
+          resizeCalls++;
+          originalResize(cols, rows);
+        };
+
+        harness.renderer.render(harness.buffer, true);
+        harness.renderer.render(harness.buffer, true);
+
+        const { width, height } = harness.renderer.getMetrics();
+        expect(harness.renderer.getCanvas().width).toBe(Math.round(width * 1.5));
+        expect(harness.renderer.getCanvas().height).toBe(Math.round(height * 1.5));
+        expect(resizeCalls).toBe(0);
+        harness.renderer.dispose();
+      });
+
+      test('preserves selection, inverse, faint, and block-cursor colors', () => {
+        const harness = createRenderHarness(
+          [
+            [
+              makeCell('─', { fg_r: 1, fg_g: 2, fg_b: 3 }),
+              makeCell('━', {
+                flags: CellFlags.INVERSE,
+                bg_r: 4,
+                bg_g: 5,
+                bg_b: 6,
+              }),
+              makeCell('┼', { flags: CellFlags.FAINT, fg_r: 7, fg_g: 8, fg_b: 9 }),
+            ],
+          ],
+          { cursor: { x: 1, visible: true, style: 'block' } }
+        );
+        harness.renderer.setSelectionManager({
+          hasSelection: () => true,
+          getSelectionCoords: () => ({ startCol: 0, startRow: 0, endCol: 0, endRow: 0 }),
+          getDirtySelectionRows: () => new Set<number>(),
+          clearDirtySelectionRows: () => {},
+        } as unknown as SelectionManager);
+        harness.renderer.render(harness.buffer, true);
+
+        expect(harness.paths.map(({ fillStyle, alpha }) => ({ fillStyle, alpha }))).toEqual([
+          { fillStyle: DEFAULT_THEME.selectionForeground, alpha: 1 },
+          { fillStyle: 'rgb(4, 5, 6)', alpha: 1 },
+          { fillStyle: 'rgb(7, 8, 9)', alpha: 0.5 },
+          { fillStyle: DEFAULT_THEME.cursorAccent, alpha: 1 },
+        ]);
+        expect(harness.paths[2].commands).toHaveLength(2);
+        harness.renderer.dispose();
+      });
+
+      test('leaves mixed, dashed, double, block-element, and grapheme glyphs on the font path', () => {
+        const harness = createRenderHarness([
+          [
+            makeCell('┍'),
+            makeCell('┄'),
+            makeCell('═'),
+            makeCell('▀'),
+            makeCell('─', { grapheme_len: 1 }),
+          ],
+        ]);
+        harness.buffer.getGraphemeString = (_row, column) => (column === 4 ? '─\ufe0f' : ' ');
+        harness.renderer.render(harness.buffer, true);
+
+        expect(harness.paths).toEqual([]);
+        expect(
+          harness.fillRects.filter(({ fillStyle }) => fillStyle === 'rgb(212, 212, 212)')
+        ).toEqual([]);
+        expect(harness.fillTexts.map(([text]) => text)).toEqual(['┍', '┄', '═', '▀', '─\ufe0f']);
         harness.renderer.dispose();
       });
     });
