@@ -4,7 +4,7 @@
  * Main entry point following xterm.js conventions
  */
 
-import { Ghostty } from './ghostty';
+import { Ghostty, getDefaultWasmUrl } from './ghostty';
 
 // Module-level Ghostty instance (initialized by init())
 let ghosttyInstance: Ghostty | null = null;
@@ -44,7 +44,7 @@ export async function init(options: InitOptions = {}): Promise<void> {
     return;
   }
 
-  initializedWasmUrl = requestedWasmUrl ?? Ghostty.defaultWasmUrl;
+  initializedWasmUrl = requestedWasmUrl ?? getDefaultWasmUrl();
   const initialization = Ghostty.load(options.wasmUrl);
   ghosttyInitialization = initialization;
   try {

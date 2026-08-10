@@ -30,8 +30,11 @@ export default defineConfig({
       external: [], // No external dependencies
       output: {
         // Keep the WASM beside the bundles so module-relative loading works in
-        // browsers, workers, and Node/Bun without an inlined data URI.
-        assetFileNames: '[name][extname]',
+        // browsers, workers, and Node/Bun without moving unrelated assets.
+        assetFileNames: (assetInfo) =>
+          assetInfo.names.includes('ghostty-vt.wasm')
+            ? '[name][extname]'
+            : 'assets/[name][extname]',
         globals: {},
       },
     },

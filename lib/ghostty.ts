@@ -45,6 +45,11 @@ const CURSOR_STYLE_VALUES: Readonly<Record<CursorStyle, number>> = {
   underline: 3,
 };
 
+/** @internal Shared with init() so repeated initialization compares the resolved default. */
+export function getDefaultWasmUrl(): string {
+  return defaultWasmUrl;
+}
+
 function encodedCursorStyle(style: CursorStyle | undefined): number {
   return CURSOR_STYLE_VALUES[style ?? 'block'];
 }
@@ -120,10 +125,6 @@ export {
 export class Ghostty {
   private exports: GhosttyWasmExports;
   private memory: WebAssembly.Memory;
-
-  static get defaultWasmUrl(): string {
-    return defaultWasmUrl;
-  }
 
   constructor(wasmInstance: WebAssembly.Instance) {
     this.exports = wasmInstance.exports as GhosttyWasmExports;
