@@ -129,6 +129,42 @@ function createCompositionEvent(
     stopPropagation: mock(() => {}),
   };
 }
+
+function dispatchRealBeforeInput(
+  textarea: HTMLTextAreaElement,
+  inputType: string,
+  data: string | null,
+  isComposing = false
+): InputEvent {
+  const event = new InputEvent('beforeinput', {
+    bubbles: true,
+    cancelable: true,
+    data,
+    inputType,
+    isComposing,
+  });
+  textarea.dispatchEvent(event);
+  return event;
+}
+
+function dispatchRealComposition(
+  textarea: HTMLTextAreaElement,
+  type: 'compositionstart' | 'compositionupdate' | 'compositionend',
+  data: string
+): CompositionEvent {
+  // Happy DOM does not currently retain CompositionEventInit.data, so define
+  // the browser event's readonly payload explicitly while keeping real DOM
+  // dispatch and bubbling semantics.
+  const event = new CompositionEvent(type, { bubbles: true, cancelable: true });
+  Object.defineProperty(event, 'data', { configurable: true, value: data });
+  textarea.dispatchEvent(event);
+  return event;
+}
+
+function waitForInputStateReset(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 // Helper to create mock container
 function createMockContainer(): MockHTMLElement & {
   _listeners: Map<string, ((e: any) => void)[]>;
@@ -503,6 +539,212 @@ describe('InputHandler', () => {
       container.dispatchEvent(createCompositionEvent('compositionend', '你好'));
 
       expect(dataReceived).toEqual(['你好']);
+    });
+  });
+
+  describe('Textarea input transactions', () => {
+    function createTextareaHandler(): {
+      handler: InputHandler;
+      host: HTMLDivElement;
+      textarea: HTMLTextAreaElement;
+    } {
+      const host = document.createElement('div');
+      const textarea = document.createElement('textarea');
+      host.appendChild(textarea);
+      const handler = new InputHandler(
+        ghostty,
+        host,
+        (data) => dataReceived.push(data),
+        () => {
+          bellCalled = true;
+        },
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        textarea
+      );
+      return { handler, host, textarea };
+    }
+
+    test('emits a CJK commit once and clears browser-owned textarea state after the event chain', async () => {
+      const { handler, textarea } = createTextareaHandler();
+
+      dispatchRealComposition(textarea, 'compositionstart', '');
+      dispatchRealComposition(textarea, 'compositionupdate', 'ni');
+      textarea.value = '你好';
+      textarea.setSelectionRange(2, 2);
+      dispatchRealComposition(textarea, 'compositionend', '你好');
+      const trailingInput = dispatchRealBeforeInput(textarea, 'insertText', '你好');
+
+      expect(dataReceived).toEqual(['你好']);
+      expect(trailingInput.defaultPrevented).toBe(false);
+      // Reset is deliberately deferred until native composition commit work is done.
+      expect(textarea.value).toBe('你好');
+      await waitForInputStateReset();
+      expect(textarea.value).toBe('');
+      expect(textarea.selectionStart).toBe(0);
+      expect(textarea.selectionEnd).toBe(0);
+      handler.dispose();
+    });
+
+    test('deduplicates a beforeinput composition commit that precedes compositionend', async () => {
+      const { handler, textarea } = createTextareaHandler();
+
+      dispatchRealComposition(textarea, 'compositionstart', '');
+      const commit = dispatchRealBeforeInput(textarea, 'insertFromComposition', 'こんにちは');
+      dispatchRealComposition(textarea, 'compositionend', 'こんにちは');
+
+      expect(commit.defaultPrevented).toBe(false);
+      expect(dataReceived).toEqual(['こんにちは']);
+      await waitForInputStateReset();
+      expect(textarea.value).toBe('');
+      handler.dispose();
+    });
+
+    test('ignores browser-owned pre-edit input and handles compositionend without a trailing commit', async () => {
+      const { handler, textarea } = createTextareaHandler();
+
+      dispatchRealComposition(textarea, 'compositionstart', '');
+      const preedit = dispatchRealBeforeInput(textarea, 'insertCompositionText', 'zhong', true);
+      textarea.value = '中';
+      textarea.setSelectionRange(1, 1);
+      dispatchRealComposition(textarea, 'compositionend', '中');
+
+      expect(preedit.defaultPrevented).toBe(false);
+      expect(dataReceived).toEqual(['中']);
+      await waitForInputStateReset();
+      expect(textarea.value).toBe('');
+      expect(textarea.selectionStart).toBe(0);
+      expect(textarea.selectionEnd).toBe(0);
+      handler.dispose();
+    });
+
+    test('emits segmented commits once and deduplicates the aggregate compositionend payload', async () => {
+      const { handler, textarea } = createTextareaHandler();
+
+      dispatchRealComposition(textarea, 'compositionstart', '');
+      dispatchRealBeforeInput(textarea, 'insertFromComposition', 'に');
+      dispatchRealBeforeInput(textarea, 'insertFromComposition', 'ほん');
+      dispatchRealComposition(textarea, 'compositionend', 'にほん');
+      dispatchRealBeforeInput(textarea, 'insertText', 'にほん');
+
+      expect(dataReceived).toEqual(['に', 'ほん']);
+      await waitForInputStateReset();
+      expect(textarea.value).toBe('');
+      handler.dispose();
+    });
+
+    test('leaves non-commit beforeinput browser-owned while composition remains active', async () => {
+      const { handler, textarea } = createTextareaHandler();
+
+      dispatchRealComposition(textarea, 'compositionstart', '');
+      const deletion = dispatchRealBeforeInput(textarea, 'deleteContentBackward', null);
+      dispatchRealComposition(textarea, 'compositionend', '語');
+
+      expect(deletion.defaultPrevented).toBe(false);
+      expect(dataReceived).toEqual(['語']);
+      await waitForInputStateReset();
+      handler.dispose();
+    });
+
+    test('allows repeated identical composition commits after each transaction reset', async () => {
+      const { handler, textarea } = createTextareaHandler();
+
+      for (let index = 0; index < 2; index++) {
+        dispatchRealComposition(textarea, 'compositionstart', '');
+        textarea.value = '你';
+        textarea.setSelectionRange(1, 1);
+        dispatchRealComposition(textarea, 'compositionend', '你');
+        dispatchRealBeforeInput(textarea, 'insertText', '你');
+        await waitForInputStateReset();
+        expect(textarea.value).toBe('');
+      }
+
+      expect(dataReceived).toEqual(['你', '你']);
+      handler.dispose();
+    });
+
+    test('handles replacement, autocorrect, and speech-style text as independent transactions', async () => {
+      const { handler, textarea } = createTextareaHandler();
+
+      textarea.value = 'helo';
+      textarea.setSelectionRange(0, 4);
+      const replacement = dispatchRealBeforeInput(textarea, 'insertReplacementText', 'hello');
+      await waitForInputStateReset();
+      const autocorrect = dispatchRealBeforeInput(textarea, 'insertText', 'world');
+      const speech = dispatchRealBeforeInput(textarea, 'insertText', 'world');
+
+      expect(replacement.defaultPrevented).toBe(true);
+      expect(autocorrect.defaultPrevented).toBe(true);
+      expect(speech.defaultPrevented).toBe(true);
+      expect(dataReceived).toEqual(['hello', 'world', 'world']);
+      await waitForInputStateReset();
+      expect(textarea.value).toBe('');
+      expect(textarea.selectionStart).toBe(0);
+      expect(textarea.selectionEnd).toBe(0);
+      handler.dispose();
+    });
+
+    test('deduplicates keydown with beforeinput for printable text and backspace', async () => {
+      const { handler, textarea } = createTextareaHandler();
+
+      textarea.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          bubbles: true,
+          cancelable: true,
+          code: 'KeyA',
+          key: 'a',
+        })
+      );
+      dispatchRealBeforeInput(textarea, 'insertText', 'a');
+      textarea.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          bubbles: true,
+          cancelable: true,
+          code: 'Backspace',
+          key: 'Backspace',
+        })
+      );
+      dispatchRealBeforeInput(textarea, 'deleteContentBackward', null);
+
+      expect(dataReceived).toEqual(['a', '\x7F']);
+      await waitForInputStateReset();
+      expect(textarea.value).toBe('');
+      handler.dispose();
+    });
+
+    test('emits mobile backspace and resets stale text without a keydown', async () => {
+      const { handler, textarea } = createTextareaHandler();
+      textarea.value = 'stale';
+      textarea.setSelectionRange(5, 5);
+
+      const backspace = dispatchRealBeforeInput(textarea, 'deleteContentBackward', null);
+
+      expect(backspace.defaultPrevented).toBe(true);
+      expect(dataReceived).toEqual(['\x7F']);
+      await waitForInputStateReset();
+      expect(textarea.value).toBe('');
+      expect(textarea.selectionStart).toBe(0);
+      expect(textarea.selectionEnd).toBe(0);
+      handler.dispose();
+    });
+
+    test('dispose cancels pending cleanup and synchronously resets textarea state', async () => {
+      const { handler, textarea } = createTextareaHandler();
+      textarea.value = 'dictated text';
+      textarea.setSelectionRange(13, 13);
+      dispatchRealBeforeInput(textarea, 'insertText', 'dictated text');
+
+      handler.dispose();
+
+      expect(dataReceived).toEqual(['dictated text']);
+      expect(textarea.value).toBe('');
+      expect(textarea.selectionStart).toBe(0);
+      expect(textarea.selectionEnd).toBe(0);
+      await waitForInputStateReset();
+      dispatchRealBeforeInput(textarea, 'insertText', 'late');
+      expect(dataReceived).toEqual(['dictated text']);
     });
   });
 
