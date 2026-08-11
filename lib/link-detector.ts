@@ -6,7 +6,15 @@
  * earlier in the resolved registration order take precedence over later ones.
  */
 
-import type { IBufferCellPosition, ILink, ILinkProvider } from './types';
+import type { ILink, ILinkProvider } from './types';
+
+const SCAN_REVOKED = Symbol('scan-revoked');
+
+interface InFlightScan {
+  generation: number;
+  promise: Promise<void>;
+  revoke(): void;
+}
 
 /**
  * Manages link detection across multiple providers with intelligent caching
@@ -20,8 +28,22 @@ export class LinkDetector {
   // Track which rows have been scanned to avoid redundant provider calls
   private scannedRows = new Set<number>();
 
+  // A row can have at most one provider scan in a content generation. Keeping
+  // this separate from scannedRows means a row is only considered complete
+  // after every provider has answered.
+  private inFlightScans = new Map<number, InFlightScan>();
+
+  // Every cache invalidation revokes work started against older content or an
+  // older provider set. This also gives callers a cheap way to validate an
+  // asynchronous result before applying UI state.
+  private generation = 0;
+  private disposed = false;
+
   // Terminal instance for buffer access
-  constructor(private terminal: ITerminalForLinkDetector) {}
+  constructor(
+    private terminal: ITerminalForLinkDetector,
+    private onInvalidate?: () => void
+  ) {}
 
   /**
    * Register a link provider. Normal providers retain registration order;
@@ -29,6 +51,11 @@ export class LinkDetector {
    * registration takes precedence over existing providers.
    */
   registerProvider(provider: ILinkProvider, highPriority: boolean = false): void {
+    if (this.disposed) {
+      provider.dispose?.();
+      return;
+    }
+
     if (highPriority) {
       this.providers.unshift(provider);
     } else {
@@ -44,6 +71,8 @@ export class LinkDetector {
    * @returns Link at position, or undefined if none
    */
   async getLinkAt(col: number, row: number): Promise<ILink | undefined> {
+    if (this.disposed) return undefined;
+
     const line = this.terminal.buffer.active.getLine(row);
     if (!line || col < 0 || col >= line.length) {
       return undefined;
@@ -54,25 +83,39 @@ export class LinkDetector {
       return undefined;
     }
 
-    // Check if any cached link contains this position (fast path)
-    for (const link of this.linkCache.values()) {
-      if (this.isPositionInLink(col, row, link)) {
-        return link;
-      }
-    }
+    const generation = this.generation;
+
+    const cached = this.findCachedLink(col, row);
+    if (cached) return cached;
 
     // Slow path: scan this row if not already scanned
     if (!this.scannedRows.has(row)) {
       await this.scanRow(row);
     }
 
-    // Check cache again after scanning
+    // A write, row invalidation, provider change, or disposal occurred while
+    // the providers were answering. The request belongs to the old content.
+    if (!this.isGenerationCurrent(generation)) return undefined;
+
+    return this.findCachedLink(col, row);
+  }
+
+  /** Capture the cache generation for asynchronous UI result validation. */
+  getGeneration(): number {
+    return this.generation;
+  }
+
+  /** Check whether content and providers still match a captured generation. */
+  isGenerationCurrent(generation: number): boolean {
+    return !this.disposed && generation === this.generation;
+  }
+
+  private findCachedLink(col: number, row: number): ILink | undefined {
     for (const link of this.linkCache.values()) {
       if (this.isPositionInLink(col, row, link)) {
         return link;
       }
     }
-
     return undefined;
   }
 
@@ -80,25 +123,57 @@ export class LinkDetector {
    * Scan a row for links using all registered providers
    */
   private async scanRow(row: number): Promise<void> {
-    this.scannedRows.add(row);
+    const generation = this.generation;
+    const existing = this.inFlightScans.get(row);
+    if (existing?.generation === generation) return existing.promise;
+
+    let revoke!: () => void;
+    const revoked = new Promise<typeof SCAN_REVOKED>((resolve) => {
+      revoke = () => resolve(SCAN_REVOKED);
+    });
+
+    let scan!: InFlightScan;
+    const promise = this.scanProviders(row, generation, revoked).finally(() => {
+      if (this.inFlightScans.get(row) === scan) this.inFlightScans.delete(row);
+    });
+    scan = { generation, promise, revoke };
+    this.inFlightScans.set(row, scan);
+
+    return promise;
+  }
+
+  private async scanProviders(
+    row: number,
+    generation: number,
+    revoked: Promise<typeof SCAN_REVOKED>
+  ): Promise<void> {
+    const providers = [...this.providers];
 
     const allLinks: ILink[] = [];
 
     // Query all providers
-    for (const provider of this.providers) {
-      const links = await new Promise<ILink[] | undefined>((resolve) => {
-        provider.provideLinks(row, resolve);
-      });
+    for (const provider of providers) {
+      const links = await Promise.race([
+        new Promise<ILink[] | undefined>((resolve) => {
+          provider.provideLinks(row, resolve);
+        }),
+        revoked,
+      ]);
+
+      if (links === SCAN_REVOKED || !this.isGenerationCurrent(generation)) return;
 
       if (links) {
         allLinks.push(...links);
       }
     }
 
+    if (!this.isGenerationCurrent(generation)) return;
+
     // Cache all discovered links
     for (const link of allLinks) {
       this.cacheLink(link);
     }
+    this.scannedRows.add(row);
   }
 
   /**
@@ -151,6 +226,7 @@ export class LinkDetector {
    * Should be called on terminal write, resize, or clear
    */
   invalidateCache(): void {
+    this.revokePendingScans();
     this.linkCache.clear();
     this.scannedRows.clear();
   }
@@ -160,6 +236,8 @@ export class LinkDetector {
    * Used when only part of the terminal changed
    */
   invalidateRows(startRow: number, endRow: number): void {
+    this.revokePendingScans();
+
     // Remove scanned markers
     for (let row = startRow; row <= endRow; row++) {
       this.scannedRows.delete(row);
@@ -188,6 +266,9 @@ export class LinkDetector {
    * Dispose and cleanup
    */
   dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.revokePendingScans();
     this.linkCache.clear();
     this.scannedRows.clear();
 
@@ -196,6 +277,13 @@ export class LinkDetector {
       provider.dispose?.();
     }
     this.providers = [];
+  }
+
+  private revokePendingScans(): void {
+    this.generation++;
+    for (const scan of this.inFlightScans.values()) scan.revoke();
+    this.inFlightScans.clear();
+    this.onInvalidate?.();
   }
 }
 

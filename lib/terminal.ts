@@ -142,7 +142,9 @@ export class Terminal implements ITerminalCore {
   private observedLinkHandler: ILinkHandler | null;
   private observedAllowNonHttpProtocols: boolean;
   private mouseMoveThrottleTimeout?: number;
-  private pendingMouseMove?: MouseEvent;
+  private pendingMouseMove?: { event: MouseEvent; requestSerial: number };
+  private linkHoverRequestSerial = 0;
+  private currentLinkHoverRequest?: { requestSerial: number; col: number; row: number };
 
   // Event emitters
   private dataEmitter = new EventEmitter<string>();
@@ -617,7 +619,7 @@ export class Terminal implements ITerminalCore {
       });
 
       // Initialize link detection system
-      this.linkDetector = new LinkDetector(this);
+      this.linkDetector = new LinkDetector(this, () => this.clearLinkHoverState());
 
       // Register built-ins in fallback order. Public custom providers are
       // intentionally prepended so applications can override both built-ins.
@@ -1842,21 +1844,23 @@ export class Terminal implements ITerminalCore {
     }
 
     if (!this.linkDetector) return;
+    this.synchronizeLinkHandlerPolicy();
+    const requestSerial = ++this.linkHoverRequestSerial;
 
     // Throttle to ~60fps (16ms) to avoid blocking scroll/other events
-    if (this.mouseMoveThrottleTimeout) {
-      this.pendingMouseMove = e;
+    if (this.mouseMoveThrottleTimeout !== undefined) {
+      this.pendingMouseMove = { event: e, requestSerial };
       return;
     }
 
-    this.processMouseMove(e);
+    this.processMouseMove(e, requestSerial);
 
     this.mouseMoveThrottleTimeout = window.setTimeout(() => {
       this.mouseMoveThrottleTimeout = undefined;
       if (this.pendingMouseMove) {
         const pending = this.pendingMouseMove;
         this.pendingMouseMove = undefined;
-        this.processMouseMove(pending);
+        this.processMouseMove(pending.event, pending.requestSerial);
       }
     }, 16);
   };
@@ -1864,18 +1868,22 @@ export class Terminal implements ITerminalCore {
   /**
    * Process mouse move for link detection (internal, called by throttled handler)
    */
-  private processMouseMove(e: MouseEvent): void {
+  private processMouseMove(e: MouseEvent, requestSerial?: number): void {
     if (!this.canvas || !this.renderer || !this.linkDetector || !this.wasmTerm) return;
-    this.synchronizeLinkHandlerPolicy();
+    if (requestSerial === undefined) {
+      this.synchronizeLinkHandlerPolicy();
+      requestSerial = ++this.linkHoverRequestSerial;
+    } else if (requestSerial !== this.linkHoverRequestSerial) {
+      return;
+    }
 
-    // Convert mouse coordinates to terminal cell position
-    const rect = this.canvas.getBoundingClientRect();
-    const x = Math.floor((e.clientX - rect.left) / this.renderer.charWidth);
-    const y = Math.floor((e.clientY - rect.top) / this.renderer.charHeight);
+    const position = this.getLinkBufferPosition(e);
+    if (!position) return;
+    const { col: x, viewportRow, bufferRow } = position;
+    this.currentLinkHoverRequest = { requestSerial, col: x, row: bufferRow };
 
     // Get hyperlink_id directly from the cell at this position
     // Must account for viewportY (scrollback position)
-    const viewportRow = y; // Row in the viewport (0 to rows-1)
     let hyperlinkId = 0;
 
     // When scrolled, fetch from scrollback or screen based on position
@@ -1915,35 +1923,30 @@ export class Terminal implements ITerminalCore {
       // No need to force a render - this keeps performance smooth
     }
 
-    // Check if there's a link at this position (for click handling and cursor)
-    // Buffer API expects absolute buffer coordinates (including scrollback)
-    // When scrolled, we need to adjust the buffer row based on viewportY
-    const scrollbackLength = this.wasmTerm.getScrollbackLength();
-    let bufferRow: number;
-
-    // Use floored viewportY for buffer mapping (must match renderer & selection)
-    const rawViewportYForBuffer = this.getViewportY();
-    const viewportYForBuffer = Math.max(0, Math.floor(rawViewportYForBuffer));
-
-    if (viewportYForBuffer > 0) {
-      // When scrolled, the buffer row depends on where in the viewport we are
-      if (viewportRow < viewportYForBuffer) {
-        // Mouse is over scrollback content
-        bufferRow = scrollbackLength - viewportYForBuffer + viewportRow;
-      } else {
-        // Mouse is over screen content (bottom part of viewport)
-        const screenRow = viewportRow - viewportYForBuffer;
-        bufferRow = scrollbackLength + screenRow;
-      }
-    } else {
-      // At bottom - buffer row is scrollback + screen row
-      bufferRow = scrollbackLength + viewportRow;
-    }
+    const detector = this.linkDetector;
+    const contentGeneration = detector.getGeneration();
 
     // Make async call non-blocking - don't await
-    this.linkDetector
+    detector
       .getLinkAt(x, bufferRow)
       .then((link) => {
+        const currentPosition = this.getLinkBufferPosition(e);
+        const currentRequest = this.currentLinkHoverRequest;
+        if (
+          this.isDisposed ||
+          !this.isOpen ||
+          this.linkDetector !== detector ||
+          !detector.isGenerationCurrent(contentGeneration) ||
+          requestSerial !== this.linkHoverRequestSerial ||
+          currentRequest?.requestSerial !== requestSerial ||
+          currentRequest.col !== x ||
+          currentRequest.row !== bufferRow ||
+          currentPosition?.col !== x ||
+          currentPosition?.bufferRow !== bufferRow
+        ) {
+          return;
+        }
+
         // Update hover state for cursor changes and click handling
         if (link !== this.currentHoveredLink) {
           // Notify old link we're leaving
@@ -1999,37 +2002,56 @@ export class Terminal implements ITerminalCore {
       });
   }
 
+  /** Map a pointer event to the absolute buffer cell currently under it. */
+  private getLinkBufferPosition(
+    e: MouseEvent
+  ): { col: number; viewportRow: number; bufferRow: number } | undefined {
+    if (!this.canvas || !this.renderer || !this.wasmTerm) return undefined;
+
+    const rect = this.canvas.getBoundingClientRect();
+    const col = Math.floor((e.clientX - rect.left) / this.renderer.charWidth);
+    const viewportRow = Math.floor((e.clientY - rect.top) / this.renderer.charHeight);
+    const scrollbackLength = this.wasmTerm.getScrollbackLength();
+    const viewportY = Math.max(0, Math.floor(this.getViewportY()));
+
+    let bufferRow: number;
+    if (viewportY > 0 && viewportRow < viewportY) {
+      bufferRow = scrollbackLength - viewportY + viewportRow;
+    } else if (viewportY > 0) {
+      bufferRow = scrollbackLength + viewportRow - viewportY;
+    } else {
+      bufferRow = scrollbackLength + viewportRow;
+    }
+
+    return { col, viewportRow, bufferRow };
+  }
+
+  /** Revoke pending hover work and remove every link-owned visual state. */
+  private clearLinkHoverState(): void {
+    this.linkHoverRequestSerial++;
+    this.currentLinkHoverRequest = undefined;
+    this.pendingMouseMove = undefined;
+
+    this.renderer?.setHoveredHyperlinkId(0);
+    this.renderer?.setHoveredLinkRange(null);
+
+    const hoveredLink = this.currentHoveredLink;
+    this.currentHoveredLink = undefined;
+    try {
+      hoveredLink?.hover?.(false);
+    } catch (err) {
+      console.warn('Link hover cleanup error:', err);
+    }
+
+    if (this.element) this.element.style.cursor = 'text';
+    if (this.canvas) this.canvas.style.cursor = 'text';
+  }
+
   /**
    * Handle mouse leave to clear link hover
    */
   private handleMouseLeave = (): void => {
-    // Clear hyperlink underline
-    if (this.renderer && this.wasmTerm) {
-      const previousHyperlinkId = (this.renderer as any).hoveredHyperlinkId || 0;
-      if (previousHyperlinkId > 0) {
-        this.renderer.setHoveredHyperlinkId(0);
-
-        // The 60fps render loop will pick up the change automatically
-      }
-      // Clear regex link underline
-      this.renderer.setHoveredLinkRange(null);
-    }
-
-    if (this.currentHoveredLink) {
-      // Notify link we're leaving
-      this.currentHoveredLink.hover?.(false);
-
-      // Clear hovered link
-      this.currentHoveredLink = undefined;
-
-      // Reset cursor
-      if (this.element) {
-        this.element.style.cursor = 'text';
-        if (this.canvas) {
-          this.canvas.style.cursor = 'text';
-        }
-      }
-    }
+    this.clearLinkHoverState();
   };
 
   /**
@@ -2041,35 +2063,25 @@ export class Terminal implements ITerminalCore {
     if (!this.canvas || !this.renderer || !this.linkDetector || !this.wasmTerm) return;
     this.synchronizeLinkHandlerPolicy();
 
-    // Get click position
-    const rect = this.canvas.getBoundingClientRect();
-    const x = Math.floor((e.clientX - rect.left) / this.renderer.charWidth);
-    const y = Math.floor((e.clientY - rect.top) / this.renderer.charHeight);
-
-    // Calculate buffer row (same logic as processMouseMove)
-    const viewportRow = y;
-    const scrollbackLength = this.wasmTerm.getScrollbackLength();
-    let bufferRow: number;
-
-    // Use floored viewportY for buffer mapping (must match renderer & selection)
-    const rawViewportYForClick = this.getViewportY();
-    const viewportYForClick = Math.max(0, Math.floor(rawViewportYForClick));
-
-    if (viewportYForClick > 0) {
-      if (viewportRow < viewportYForClick) {
-        bufferRow = scrollbackLength - viewportYForClick + viewportRow;
-      } else {
-        const screenRow = viewportRow - viewportYForClick;
-        bufferRow = scrollbackLength + screenRow;
-      }
-    } else {
-      bufferRow = scrollbackLength + viewportRow;
-    }
+    const position = this.getLinkBufferPosition(e);
+    if (!position) return;
+    const { col, bufferRow } = position;
+    const detector = this.linkDetector;
+    const contentGeneration = detector.getGeneration();
 
     // Get the link at this position
-    const link = await this.linkDetector.getLinkAt(x, bufferRow);
+    const link = await detector.getLinkAt(col, bufferRow);
+    const currentPosition = this.getLinkBufferPosition(e);
 
-    if (link) {
+    if (
+      link &&
+      !this.isDisposed &&
+      this.isOpen &&
+      this.linkDetector === detector &&
+      detector.isGenerationCurrent(contentGeneration) &&
+      currentPosition?.col === col &&
+      currentPosition.bufferRow === bufferRow
+    ) {
       // Activate link
       link.activate(e);
 
