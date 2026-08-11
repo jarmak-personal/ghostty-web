@@ -46,6 +46,32 @@ function deferredProvider(): ILinkProvider & {
 }
 
 describe('LinkDetector asynchronous scans', () => {
+  test('enumerates one row with shared provider priority and generation guards', async () => {
+    const detector = new LinkDetector(terminalWithRows());
+    const provider = deferredProvider();
+    detector.registerProvider(provider);
+
+    const rowLinks = detector.getLinksForRow(1);
+    const pointLink = detector.getLinkAt(1, 1);
+    expect(provider.requests).toHaveLength(1);
+
+    const single = linkAt(1, 'single');
+    const spanning: ILink = {
+      text: 'spanning',
+      range: { start: { x: 4, y: 0 }, end: { x: 8, y: 2 } },
+      activate: () => {},
+    };
+    provider.requests[0].resolve([single, spanning]);
+
+    expect(await rowLinks).toEqual([single, spanning]);
+    expect(await pointLink).toBe(single);
+    expect(provider.requests).toHaveLength(1);
+
+    const staleRows = detector.getLinksForRow(2);
+    detector.invalidateCache();
+    expect(await staleRows).toEqual([]);
+  });
+
   test('deduplicates concurrent scans for the same row', async () => {
     const detector = new LinkDetector(terminalWithRows());
     const provider = deferredProvider();

@@ -108,9 +108,13 @@ describe('Terminal asynchronous link results', () => {
     expect(firstHover).toEqual([]);
 
     await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(provider.requests).toHaveLength(2);
+    // The bounded accessibility viewport may enumerate other visible rows in
+    // the same presented frame. The detector still coalesces its row-1 scan
+    // with the pointer request, so only that row is relevant to this race.
+    const rowOneRequests = provider.requests.filter((request) => request.row === 1);
+    expect(rowOneRequests).toHaveLength(1);
     const second = linkAt(1, 'second', secondHover);
-    provider.requests[1].resolve([second]);
+    rowOneRequests[0].resolve([second]);
     await flushAsyncWork();
 
     expect(secondHover).toEqual([true]);

@@ -100,6 +100,25 @@ export class LinkDetector {
     return this.findCachedLink(col, row);
   }
 
+  /**
+   * Return every link intersecting one current buffer row.
+   *
+   * This shares the same provider scan and generation guards as point lookup,
+   * allowing bounded non-visual consumers to expose a row without probing each
+   * cell independently.
+   */
+  async getLinksForRow(row: number): Promise<ILink[]> {
+    if (this.disposed || !this.terminal.buffer.active.getLine(row)) return [];
+
+    const generation = this.generation;
+    if (!this.scannedRows.has(row)) await this.scanRow(row);
+    if (!this.isGenerationCurrent(generation)) return [];
+
+    return [...this.linkCache.values()].filter(
+      (link) => link.range.start.y <= row && link.range.end.y >= row
+    );
+  }
+
   /** Capture the cache generation for asynchronous UI result validation. */
   getGeneration(): number {
     return this.generation;

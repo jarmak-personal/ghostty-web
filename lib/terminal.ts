@@ -15,6 +15,7 @@
  * ```
  */
 
+import { AccessibilityManager } from './accessibility-manager';
 import { BufferNamespace } from './buffer';
 import { EventEmitter } from './event-emitter';
 import type { Ghostty, GhosttyCell, GhosttyTerminal, GhosttyTerminalConfig } from './ghostty';
@@ -114,6 +115,7 @@ export class Terminal implements ITerminalCore {
   private selectionManager?: SelectionManager;
   private retainedBufferSearch?: RetainedBufferSearchManager;
   private retainedBufferExtraction?: RetainedBufferExtractionManager;
+  private accessibilityManager?: AccessibilityManager;
   private canvas?: HTMLCanvasElement;
   private selectionChangeDisposable?: IDisposable;
 
@@ -376,6 +378,7 @@ export class Terminal implements ITerminalCore {
     this.observedLinkHandler = handler;
     this.observedAllowNonHttpProtocols = allowNonHttpProtocols;
     this.linkDetector?.invalidateCache();
+    this.requestRender(true);
   }
 
   /**
@@ -704,6 +707,16 @@ export class Terminal implements ITerminalCore {
       );
       this.linkDetector.registerProvider(
         new UrlRegexProvider(this, () => this.options.linkHandler)
+      );
+
+      // Mirror exactly the presented viewport for assistive technology. This
+      // is created after the canonical input and link providers, and before
+      // the initial frame, so open rollback can release it symmetrically.
+      this.accessibilityManager = new AccessibilityManager(
+        this,
+        this.textarea,
+        this.linkDetector,
+        parent
       );
 
       // Setup mouse event handling for links and scrollbar
@@ -1220,6 +1233,7 @@ export class Terminal implements ITerminalCore {
       throw new Error('Terminal must be opened before registering link providers');
     }
     this.linkDetector.registerProvider(provider, true);
+    this.requestRender(true);
   }
 
   // ==========================================================================
@@ -1768,6 +1782,11 @@ export class Terminal implements ITerminalCore {
       this.lastCursorAlternateScreen = alternateScreen;
       this.lastPresentedCursorScreenGeneration = this.cursorScreenGeneration;
 
+      // Keep the non-visual viewport on the same presentation boundary as the
+      // Canvas. The manager compares snapshots so adjacent overflow rows and
+      // repeated fractional smooth-scroll frames do not replay unchanged DOM.
+      this.accessibilityManager?.updateFrame(renderedRanges, cursor);
+
       if (cursorMoved) {
         this.cursorMoveEmitter.fire();
       }
@@ -1810,6 +1829,9 @@ export class Terminal implements ITerminalCore {
    * Clean up components (called on dispose or error)
    */
   private cleanupComponents(): void {
+    this.accessibilityManager?.dispose();
+    this.accessibilityManager = undefined;
+
     this.selectionChangeDisposable?.dispose();
     this.selectionChangeDisposable = undefined;
 
