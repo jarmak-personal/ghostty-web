@@ -188,7 +188,7 @@ describe('structured terminal event core', () => {
       core.write('\x1bc');
       expect(core.resolveEventProvenance(normal.provenance)).toBeNull();
       expect(core.resolveEventProvenance(alternate.provenance)).toBeNull();
-      expect(core.readEvents()).toEqual([]);
+      expect(core.readEvents()).toEqual([{ type: 'buffer-change', active: 'normal' }]);
     } finally {
       core.free();
     }

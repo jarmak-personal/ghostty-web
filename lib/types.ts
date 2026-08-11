@@ -598,6 +598,32 @@ export interface GhosttyWasmExports extends WebAssembly.Exports {
 
   // Terminal modes
   ghostty_terminal_is_alternate_screen(terminal: TerminalHandle): boolean;
+  ghostty_terminal_get_buffer_info(
+    terminal: TerminalHandle,
+    alternate: boolean,
+    bufPtr: number,
+    bufLen: number
+  ): number;
+  ghostty_terminal_get_buffer_line(
+    terminal: TerminalHandle,
+    alternate: boolean,
+    y: number,
+    bufPtr: number,
+    bufLen: number
+  ): number;
+  ghostty_terminal_get_buffer_grapheme(
+    terminal: TerminalHandle,
+    alternate: boolean,
+    y: number,
+    col: number,
+    bufPtr: number,
+    bufLen: number
+  ): number;
+  ghostty_terminal_is_buffer_row_wrapped(
+    terminal: TerminalHandle,
+    alternate: boolean,
+    y: number
+  ): boolean;
   ghostty_terminal_has_mouse_tracking(terminal: TerminalHandle): number;
   ghostty_terminal_get_synchronized_output_generation(terminal: TerminalHandle): number;
   ghostty_terminal_reset_synchronized_output(terminal: TerminalHandle): void;

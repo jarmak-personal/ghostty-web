@@ -49,6 +49,7 @@ import {
 } from './retained-buffer-extraction';
 import { RetainedBufferSearchManager } from './retained-buffer-search';
 import { SelectionManager } from './selection-manager';
+import type { DecodedTerminalEvent } from './terminal-events';
 import type {
   ILink,
   ILinkProvider,
@@ -1447,6 +1448,7 @@ export class Terminal implements ITerminalCore {
     this.renderEmitter.dispose();
     this.cursorMoveEmitter.dispose();
     this.terminalEventEmitter.dispose();
+    (this.buffer as BufferNamespace | undefined)?._dispose();
   }
 
   /** Request one coalesced presentation frame. */
@@ -2381,9 +2383,14 @@ export class Terminal implements ITerminalCore {
   /**
    * Emit typed parser events and derive legacy title/bell compatibility events.
    */
-  private processTerminalEvents(events: TerminalEvent[]): void {
+  private processTerminalEvents(events: DecodedTerminalEvent[]): void {
     let bell = false;
     for (const event of events) {
+      if (event.type === 'buffer-change') {
+        const buffer = event.active === 'alternate' ? this.buffer.alternate : this.buffer.normal;
+        (this.buffer as BufferNamespace)._fireBufferChange(buffer);
+        continue;
+      }
       this.terminalEventEmitter.fire(event);
       if (event.type === 'bell') {
         // Preserve the legacy event's once-per-write behavior.

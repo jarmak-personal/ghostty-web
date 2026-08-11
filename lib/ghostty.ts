@@ -7,7 +7,11 @@
  */
 
 import defaultWasmUrl from '../ghostty-vt.wasm?url&no-inline';
-import { decodeTerminalEventRecord, MAX_TERMINAL_EVENT_BYTES } from './terminal-events';
+import {
+  type DecodedTerminalEvent,
+  decodeTerminalEventRecord,
+  MAX_TERMINAL_EVENT_BYTES,
+} from './terminal-events';
 import {
   CellFlags,
   type Cursor,
@@ -37,6 +41,16 @@ const FOREGROUND_CONFIGURED = 1 << 0;
 const BACKGROUND_CONFIGURED = 1 << 1;
 const CURSOR_CONFIGURED = 1 << 2;
 const PALETTE_CONFIGURED_SHIFT = 8;
+
+export type GhosttyBufferType = 'normal' | 'alternate';
+
+export interface GhosttyBufferInfo {
+  scrollbackLength: number;
+  cursorX: number;
+  cursorY: number;
+  rows: number;
+  cols: number;
+}
 
 const CURSOR_STYLE_VALUES: Readonly<Record<CursorStyle, number>> = {
   block: 0,
@@ -370,6 +384,9 @@ export class GhosttyTerminal {
   /** Reusable buffer for viewport operations */
   private viewportBufferPtr: number = 0;
   private viewportBufferSize: number = 0;
+
+  /** Reusable five-u32 buffer for named screen metadata. */
+  private bufferInfoPtr: number = 0;
 
   /** Cell pool for zero-allocation rendering */
   private cellPool: GhosttyCell[] = [];
@@ -716,8 +733,8 @@ export class GhosttyTerminal {
   // ========================================================================
 
   /** Drain all complete parser events currently queued by Ghostty. */
-  readEvents(): TerminalEvent[] {
-    const events: TerminalEvent[] = [];
+  readEvents(): DecodedTerminalEvent[] {
+    const events: DecodedTerminalEvent[] = [];
     while (this.handle) {
       const recordSize = this.exports.ghostty_terminal_peek_event_size(this.handle);
       if (recordSize === 0) break;
@@ -980,6 +997,84 @@ export class GhosttyTerminal {
 
   isAlternateScreen(): boolean {
     return !!this.exports.ghostty_terminal_is_alternate_screen(this.handle);
+  }
+
+  /** Read metadata for either Ghostty screen without activating it. */
+  getBufferInfo(type: GhosttyBufferType): GhosttyBufferInfo | null {
+    if (!this.handle) return null;
+    const byteLength = 5 * Uint32Array.BYTES_PER_ELEMENT;
+    if (!this.bufferInfoPtr) {
+      this.bufferInfoPtr = this.exports.ghostty_wasm_alloc_u8_array(byteLength);
+      if (!this.bufferInfoPtr) return null;
+    }
+
+    const count = this.exports.ghostty_terminal_get_buffer_info(
+      this.handle,
+      type === 'alternate',
+      this.bufferInfoPtr,
+      5
+    );
+    if (count !== 5) return null;
+    const values = new Uint32Array(this.memory.buffer, this.bufferInfoPtr, 5);
+    return {
+      scrollbackLength: values[0],
+      cursorX: values[1],
+      cursorY: values[2],
+      rows: values[3],
+      cols: values[4],
+    };
+  }
+
+  /** Copy an absolute retained row from either screen without activating it. */
+  getBufferLine(type: GhosttyBufferType, y: number): GhosttyCell[] | null {
+    if (!this.handle || y < 0) return null;
+    const neededSize = this._cols * GhosttyTerminal.CELL_SIZE;
+    if (!this.viewportBufferPtr || this.viewportBufferSize < neededSize) {
+      if (this.viewportBufferPtr) {
+        this.exports.ghostty_wasm_free_u8_array(this.viewportBufferPtr, this.viewportBufferSize);
+      }
+      this.viewportBufferPtr = this.exports.ghostty_wasm_alloc_u8_array(neededSize);
+      this.viewportBufferSize = neededSize;
+    }
+    if (!this.viewportBufferPtr) return null;
+
+    this.update();
+    const count = this.exports.ghostty_terminal_get_buffer_line(
+      this.handle,
+      type === 'alternate',
+      y,
+      this.viewportBufferPtr,
+      this._cols
+    );
+    return count < 0 ? null : this.parseCells(this.viewportBufferPtr, count);
+  }
+
+  /** Read every codepoint for a cell in either named screen. */
+  getBufferGrapheme(type: GhosttyBufferType, y: number, col: number): number[] | null {
+    if (!this.handle || y < 0 || col < 0) return null;
+    if (!this.graphemeBufferPtr) {
+      this.graphemeBufferPtr = this.exports.ghostty_wasm_alloc_u8_array(16 * 4);
+      if (!this.graphemeBufferPtr) return null;
+      this.graphemeBuffer = new Uint32Array(this.memory.buffer, this.graphemeBufferPtr, 16);
+    }
+    const count = this.exports.ghostty_terminal_get_buffer_grapheme(
+      this.handle,
+      type === 'alternate',
+      y,
+      col,
+      this.graphemeBufferPtr,
+      16
+    );
+    if (count < 0) return null;
+    return Array.from(new Uint32Array(this.memory.buffer, this.graphemeBufferPtr, count));
+  }
+
+  /** Whether an absolute retained row in a named screen continues a soft wrap. */
+  isBufferRowWrapped(type: GhosttyBufferType, y: number): boolean {
+    return (
+      !!this.handle &&
+      !!this.exports.ghostty_terminal_is_buffer_row_wrapped(this.handle, type === 'alternate', y)
+    );
   }
 
   hasBracketedPaste(): boolean {
@@ -1278,6 +1373,30 @@ export class GhosttyTerminal {
     }
   }
 
+  private parseCells(ptr: number, count: number): GhosttyCell[] {
+    const buffer = this.memory.buffer;
+    const u8 = new Uint8Array(buffer, ptr, count * GhosttyTerminal.CELL_SIZE);
+    const view = new DataView(buffer, ptr, count * GhosttyTerminal.CELL_SIZE);
+    const cells: GhosttyCell[] = [];
+    for (let i = 0; i < count; i++) {
+      const offset = i * GhosttyTerminal.CELL_SIZE;
+      cells.push({
+        codepoint: view.getUint32(offset, true),
+        fg_r: u8[offset + 4],
+        fg_g: u8[offset + 5],
+        fg_b: u8[offset + 6],
+        bg_r: u8[offset + 7],
+        bg_g: u8[offset + 8],
+        bg_b: u8[offset + 9],
+        flags: u8[offset + 10],
+        width: u8[offset + 11],
+        hyperlink_id: view.getUint16(offset + 12, true),
+        grapheme_len: u8[offset + 14],
+      });
+    }
+    return cells;
+  }
+
   /** Small buffer for grapheme lookups (reused to avoid allocation) */
   private graphemeBuffer: Uint32Array | null = null;
   private graphemeBufferPtr: number = 0;
@@ -1368,6 +1487,13 @@ export class GhosttyTerminal {
     if (this.graphemeBufferPtr) {
       this.exports.ghostty_wasm_free_u8_array(this.graphemeBufferPtr, 16 * 4);
       this.graphemeBufferPtr = 0;
+    }
+    if (this.bufferInfoPtr) {
+      this.exports.ghostty_wasm_free_u8_array(
+        this.bufferInfoPtr,
+        5 * Uint32Array.BYTES_PER_ELEMENT
+      );
+      this.bufferInfoPtr = 0;
     }
     this.graphemeBuffer = null;
   }

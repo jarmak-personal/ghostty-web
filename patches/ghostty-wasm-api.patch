@@ -3,9 +3,9 @@ index 74f3f85eb..814e13ccd 100644
 --- a/.gitignore
 +++ b/.gitignore
 @@ -26,3 +26,4 @@ glad.zip
-
+ 
  vgcore.*
-
+ 
 +node_modules/
 diff --git a/include/ghostty/vt.h b/include/ghostty/vt.h
 index 4f8fef88e..ca9fb1d4d 100644
@@ -20,7 +20,7 @@ index 4f8fef88e..ca9fb1d4d 100644
   * - @ref osc "OSC Parser" - Parse OSC (Operating System Command) sequences
   * - @ref sgr "SGR Parser" - Parse SGR (Select Graphic Rendition) sequences
 @@ -74,6 +75,7 @@ extern "C" {
-
+ 
  #include <ghostty/vt/result.h>
  #include <ghostty/vt/allocator.h>
 +#include <ghostty/vt/terminal.h>
@@ -29,10 +29,10 @@ index 4f8fef88e..ca9fb1d4d 100644
  #include <ghostty/vt/key.h>
 diff --git a/include/ghostty/vt/terminal.h b/include/ghostty/vt/terminal.h
 new file mode 100644
-index 000000000..427f7eeaf
+index 000000000..94a29ce69
 --- /dev/null
 +++ b/include/ghostty/vt/terminal.h
-@@ -0,0 +1,466 @@
+@@ -0,0 +1,505 @@
 +/**
 + * @file terminal.h
 + *
@@ -373,6 +373,45 @@ index 000000000..427f7eeaf
 +/** Check if alternate screen is active */
 +bool ghostty_terminal_is_alternate_screen(GhosttyTerminal term);
 +
++/**
++ * Get metadata for a named buffer as
++ * [scrollback_length, cursor_x, cursor_y, rows, cols].
++ * @return 5 on success, 0 when the alternate screen does not yet exist,
++ * or -1 on error.
++ */
++int ghostty_terminal_get_buffer_info(
++    GhosttyTerminal term,
++    bool alternate,
++    uint32_t* out_buffer,
++    size_t buffer_size
++);
++
++/** Copy an absolute retained row (history followed by active rows). */
++int ghostty_terminal_get_buffer_line(
++    GhosttyTerminal term,
++    bool alternate,
++    int y,
++    GhosttyCell* out_buffer,
++    size_t buffer_size
++);
++
++/** Get every codepoint for a named buffer cell. */
++int ghostty_terminal_get_buffer_grapheme(
++    GhosttyTerminal term,
++    bool alternate,
++    int y,
++    int col,
++    uint32_t* out_buffer,
++    size_t buffer_size
++);
++
++/** Check whether a named buffer row continues a soft wrap. */
++bool ghostty_terminal_is_buffer_row_wrapped(
++    GhosttyTerminal term,
++    bool alternate,
++    int y
++);
++
 +/** Check if any mouse tracking mode is enabled */
 +bool ghostty_terminal_has_mouse_tracking(GhosttyTerminal term);
 +
@@ -500,10 +539,10 @@ index 000000000..427f7eeaf
 +
 +#endif /* GHOSTTY_VT_TERMINAL_H */
 diff --git a/src/lib_vt.zig b/src/lib_vt.zig
-index 426660621..343d37fdc 100644
+index 426660621..9349de184 100644
 --- a/src/lib_vt.zig
 +++ b/src/lib_vt.zig
-@@ -143,6 +143,77 @@ comptime {
+@@ -143,6 +143,81 @@ comptime {
          @export(&c.sgr_unknown_partial, .{ .name = "ghostty_sgr_unknown_partial" });
          @export(&c.sgr_attribute_tag, .{ .name = "ghostty_sgr_attribute_tag" });
          @export(&c.sgr_attribute_value, .{ .name = "ghostty_sgr_attribute_value" });
@@ -558,6 +597,10 @@ index 426660621..343d37fdc 100644
 +
 +        // Terminal modes
 +        @export(&c.terminal_is_alternate_screen, .{ .name = "ghostty_terminal_is_alternate_screen" });
++        @export(&c.terminal_get_buffer_info, .{ .name = "ghostty_terminal_get_buffer_info" });
++        @export(&c.terminal_get_buffer_line, .{ .name = "ghostty_terminal_get_buffer_line" });
++        @export(&c.terminal_get_buffer_grapheme, .{ .name = "ghostty_terminal_get_buffer_grapheme" });
++        @export(&c.terminal_is_buffer_row_wrapped, .{ .name = "ghostty_terminal_is_buffer_row_wrapped" });
 +        @export(&c.terminal_has_mouse_tracking, .{ .name = "ghostty_terminal_has_mouse_tracking" });
 +        @export(&c.terminal_get_synchronized_output_generation, .{ .name = "ghostty_terminal_get_synchronized_output_generation" });
 +        @export(&c.terminal_reset_synchronized_output, .{ .name = "ghostty_terminal_reset_synchronized_output" });
@@ -578,36 +621,54 @@ index 426660621..343d37fdc 100644
 +        // Response API (for DSR and other queries)
 +        @export(&c.terminal_has_response, .{ .name = "ghostty_terminal_has_response" });
 +        @export(&c.terminal_read_response, .{ .name = "ghostty_terminal_read_response" });
-
+ 
          // On Wasm we need to export our allocator convenience functions.
          if (builtin.target.cpu.arch.isWasm()) {
 diff --git a/src/terminal/PageList.zig b/src/terminal/PageList.zig
 index 6e39428db..aac4b567c 100644
 --- a/src/terminal/PageList.zig
 +++ b/src/terminal/PageList.zig
-@@ -480,6 +480,6 @@ fn initPages(
+@@ -477,10 +477,10 @@ fn initPages(
+         else
+             page_alloc.free(page_buf);
+ 
 -        // In runtime safety modes we have to memset because the Zig allocator
 -        // interface will always memset to 0xAA for undefined. In non-safe modes
 -        // we use a page allocator and the OS guarantees zeroed memory.
 -        if (comptime std.debug.runtime_safety) @memset(page_buf, 0);
--
 +        // Runtime safety allocators initialize to undefined, 0xAA. WASM also
 +        // reuses page allocations without guaranteeing zeroed contents.
 +        if (comptime builtin.target.cpu.arch.isWasm() or std.debug.runtime_safety)
 +            @memset(page_buf, 0);
-+
+ 
          // Initialize the first set of pages to contain our viewport so that
-@@ -3388,5 +3388,6 @@ inline fn createPageExt(
+         // the top of the first page is always the active area.
+@@ -3385,9 +3385,10 @@ inline fn createPageExt(
+     else
+         page_alloc.free(page_buf);
+ 
 -    // Required only with runtime safety because allocators initialize
 -    // to undefined, 0xAA.
 -    if (comptime std.debug.runtime_safety) @memset(page_buf, 0);
--
 +    // Runtime safety allocators initialize to undefined, 0xAA. WASM also
 +    // reuses page allocations without guaranteeing zeroed contents.
 +    if (comptime builtin.target.cpu.arch.isWasm() or std.debug.runtime_safety)
 +        @memset(page_buf, 0);
-+
+ 
      page.* = .{
+         .data = .initBuf(.init(page_buf), layout),
+diff --git a/src/terminal/Parser.zig b/src/terminal/Parser.zig
+index 88e7edf7c..b5c3896e1 100644
+--- a/src/terminal/Parser.zig
++++ b/src/terminal/Parser.zig
+@@ -27,6 +27,7 @@ pub const State = enum {
+     dcs_ignore,
+     osc_string,
+     sos_pm_apc_string,
++    screen_title_string,
+ };
+ 
+ /// Transition action is an action that can be taken during a state
 diff --git a/src/terminal/Screen.zig b/src/terminal/Screen.zig
 index ea8ca1445..75a72480b 100644
 --- a/src/terminal/Screen.zig
@@ -615,7 +676,7 @@ index ea8ca1445..75a72480b 100644
 @@ -871,15 +871,24 @@ pub fn cursorDownScroll(self: *Screen) !void {
          // Our new row is always dirty
          self.cursorMarkDirty();
-
+ 
 -        // Clear the new row so it gets our bg color. We only do this
 -        // if we have a bg color at all.
 -        if (self.cursor.style.bg_color != .none) {
@@ -641,9 +702,9 @@ index ea8ca1445..75a72480b 100644
 +            row.* = .{ .cells = cells_offset, .dirty = dirty };
          }
      }
-
+ 
 diff --git a/src/terminal/c/main.zig b/src/terminal/c/main.zig
-index bc92597f5..f74c3baeb 100644
+index bc92597f5..de6d5bfa6 100644
 --- a/src/terminal/c/main.zig
 +++ b/src/terminal/c/main.zig
 @@ -4,6 +4,7 @@ pub const key_event = @import("key_event.zig");
@@ -651,13 +712,13 @@ index bc92597f5..f74c3baeb 100644
  pub const paste = @import("paste.zig");
  pub const sgr = @import("sgr.zig");
 +pub const terminal = @import("terminal.zig");
-
+ 
  // The full C API, unexported.
  pub const osc_new = osc.new;
-@@ -52,6 +53,78 @@ pub const key_encoder_encode = key_encode.encode;
-
+@@ -52,6 +53,82 @@ pub const key_encoder_encode = key_encode.encode;
+ 
  pub const paste_is_safe = paste.is_safe;
-
+ 
 +// Terminal lifecycle
 +pub const terminal_new = terminal.new;
 +pub const terminal_new_with_config = terminal.newWithConfig;
@@ -709,6 +770,10 @@ index bc92597f5..f74c3baeb 100644
 +
 +// Terminal modes
 +pub const terminal_is_alternate_screen = terminal.isAlternateScreen;
++pub const terminal_get_buffer_info = terminal.getBufferInfo;
++pub const terminal_get_buffer_line = terminal.getBufferLine;
++pub const terminal_get_buffer_grapheme = terminal.getBufferGrapheme;
++pub const terminal_is_buffer_row_wrapped = terminal.isBufferRowWrapped;
 +pub const terminal_has_mouse_tracking = terminal.hasMouseTracking;
 +pub const terminal_get_synchronized_output_generation = terminal.getSynchronizedOutputGeneration;
 +pub const terminal_reset_synchronized_output = terminal.resetSynchronizedOutput;
@@ -733,20 +798,20 @@ index bc92597f5..f74c3baeb 100644
  test {
      _ = color;
      _ = osc;
-@@ -59,6 +130,7 @@ test {
+@@ -59,6 +136,7 @@ test {
      _ = key_encode;
      _ = paste;
      _ = sgr;
 +    _ = terminal;
-
+ 
      // We want to make sure we run the tests for the C allocator interface.
      _ = @import("../../lib/allocator.zig");
 diff --git a/src/terminal/c/terminal.zig b/src/terminal/c/terminal.zig
 new file mode 100644
-index 000000000..1f8362e72
+index 000000000..d418a3146
 --- /dev/null
 +++ b/src/terminal/c/terminal.zig
-@@ -0,0 +1,2725 @@
+@@ -0,0 +1,2928 @@
 +//! C API wrapper for Terminal
 +//!
 +//! This provides a minimal, high-performance interface to Ghostty's Terminal
@@ -903,6 +968,7 @@ index 000000000..1f8362e72
 +    semantic = 6,
 +    palette = 7,
 +    clipboard = 8,
++    screen_change = 9,
 +};
 +
 +/// Fixed little-endian WASM event header followed by data_a then data_b.
@@ -936,6 +1002,31 @@ index 000000000..1f8362e72
 +
 +    fn clearRetainingCapacity(self: *EventQueue) void {
 +        self.buffer.clearRetainingCapacity();
++        self.read_offset = 0;
++    }
++
++    /// A full terminal reset invalidates unread host-facing events, but screen
++    /// transitions are parser history needed by the buffer activation API.
++    fn clearRetainingScreenChanges(self: *EventQueue) void {
++        var source = self.read_offset;
++        var destination: usize = 0;
++        while (source + @sizeOf(EventHeader) <= self.buffer.items.len) {
++            const header: *align(1) const EventHeader = @ptrCast(
++                self.buffer.items[source..][0..@sizeOf(EventHeader)].ptr,
++            );
++            const size = @sizeOf(EventHeader) + header.data_a_len + header.data_b_len;
++            if (size > self.buffer.items.len - source) break;
++            if (header.tag == .screen_change) {
++                std.mem.copyForwards(
++                    u8,
++                    self.buffer.items[destination..][0..size],
++                    self.buffer.items[source..][0..size],
++                );
++                destination += size;
++            }
++            source += size;
++        }
++        self.buffer.items.len = destination;
 +        self.read_offset = 0;
 +    }
 +
@@ -1623,6 +1714,22 @@ index 000000000..1f8362e72
 +            alternate_screen_touched;
 +    }
 +
++    fn switchScreenMode(
++        self: *ResponseHandler,
++        mode: Terminal.SwitchScreenMode,
++        enabled: bool,
++    ) !void {
++        const before = self.terminal.screens.active_key;
++        try self.terminal.switchScreenMode(mode, enabled);
++        self.noteActiveScreen();
++        if (before != self.terminal.screens.active_key) {
++            self.events.append(self.alloc, .{
++                .tag = .screen_change,
++                .flags = if (self.terminal.screens.active_key == .alternate) 1 else 0,
++            }, "", "");
++        }
++    }
++
 +    pub fn vt(
 +        self: *ResponseHandler,
 +        comptime action: Action.Tag,
@@ -1736,12 +1843,19 @@ index 000000000..1f8362e72
 +            .active_status_display => self.terminal.status_display = value,
 +            .decaln => try self.terminal.decaln(),
 +            .full_reset => {
-+                self.events.clearRetainingCapacity();
++                const before = self.terminal.screens.active_key;
++                self.events.clearRetainingScreenChanges();
 +                self.retained_ranges.clear(self.terminal);
 +                self.provenance.clear(self.terminal);
 +                self.terminal.fullReset();
 +                self.cursor_defaults.reset(self.terminal);
 +                self.noteActiveScreen();
++                if (before != self.terminal.screens.active_key) {
++                    self.events.append(self.alloc, .{
++                        .tag = .screen_change,
++                        .flags = 0,
++                    }, "", "");
++                }
 +            },
 +            .start_hyperlink => try self.terminal.screens.active.startHyperlink(value.uri, value.id),
 +            .end_hyperlink => self.terminal.screens.active.endHyperlink(),
@@ -1891,16 +2005,13 @@ index 000000000..1f8362e72
 +                self.terminal.scrolling_region.right = self.terminal.cols - 1;
 +            },
 +            .alt_screen_legacy => {
-+                try self.terminal.switchScreenMode(.@"47", enabled);
-+                self.noteActiveScreen();
++                try self.switchScreenMode(.@"47", enabled);
 +            },
 +            .alt_screen => {
-+                try self.terminal.switchScreenMode(.@"1047", enabled);
-+                self.noteActiveScreen();
++                try self.switchScreenMode(.@"1047", enabled);
 +            },
 +            .alt_screen_save_cursor_clear_enter => {
-+                try self.terminal.switchScreenMode(.@"1049", enabled);
-+                self.noteActiveScreen();
++                try self.switchScreenMode(.@"1049", enabled);
 +            },
 +            .save_cursor => if (enabled) {
 +                self.terminal.saveCursor();
@@ -2929,6 +3040,163 @@ index 000000000..1f8362e72
 +    return wrapper.terminal.screens.active_key == .alternate;
 +}
 +
++fn getBufferScreen(wrapper: *const TerminalWrapper, alternate: bool) ?*Screen {
++    return wrapper.terminal.screens.get(if (alternate) .alternate else .primary);
++}
++
++/// Get retained buffer metadata for a named screen. The output is
++/// [scrollback length, cursor x, cursor y, rows, cols]. A missing alternate
++/// screen returns zero so callers can represent its initial empty state.
++pub fn getBufferInfo(
++    ptr: ?*anyopaque,
++    alternate: bool,
++    out: [*]u32,
++    buf_size: usize,
++) callconv(.c) c_int {
++    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return -1));
++    if (buf_size < 5) return -1;
++    const screen = getBufferScreen(wrapper, alternate) orelse return 0;
++    const pages = &screen.pages;
++    out[0] = @intCast(if (pages.total_rows > pages.rows) pages.total_rows - pages.rows else 0);
++    out[1] = @intCast(screen.cursor.x);
++    out[2] = @intCast(screen.cursor.y);
++    out[3] = @intCast(pages.rows);
++    out[4] = @intCast(pages.cols);
++    return 5;
++}
++
++/// Copy an absolute retained row (history followed by active rows) from a
++/// named screen without changing which screen is active.
++pub fn getBufferLine(
++    ptr: ?*anyopaque,
++    alternate: bool,
++    y: c_int,
++    out: [*]GhosttyCell,
++    buf_size: usize,
++) callconv(.c) c_int {
++    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return -1));
++    const screen = getBufferScreen(wrapper, alternate) orelse return -1;
++    const pages = &screen.pages;
++    const cols: usize = @intCast(pages.cols);
++    if (y < 0 or buf_size < cols) return -1;
++    const row: usize = @intCast(y);
++    if (row >= pages.total_rows) return -1;
++
++    const pin = pages.pin(.{ .screen = .{ .y = row } }) orelse return -1;
++    const cells = pin.cells(.all);
++    const page = pin.node.data;
++    const colors = &wrapper.render_state.colors;
++
++    for (0..cols) |x| {
++        if (x >= cells.len) {
++            out[x] = .{
++                .codepoint = 0,
++                .fg_r = colors.foreground.r,
++                .fg_g = colors.foreground.g,
++                .fg_b = colors.foreground.b,
++                .bg_r = colors.background.r,
++                .bg_g = colors.background.g,
++                .bg_b = colors.background.b,
++                .flags = 0,
++                .width = 1,
++                .hyperlink_id = 0,
++            };
++            continue;
++        }
++
++        const cell = &cells[x];
++        const sty: Style = switch (cell.content_tag) {
++            .bg_color_rgb, .bg_color_palette => .{},
++            else => if (cell.style_id > 0) page.styles.get(page.memory, cell.style_id).* else .{},
++        };
++        const fg: color.RGB = switch (sty.fg_color) {
++            .none => colors.foreground,
++            .palette => |i| colors.palette[i],
++            .rgb => |rgb| rgb,
++        };
++        const bg: color.RGB = if (sty.bg(cell, &colors.palette)) |rgb| rgb else colors.background;
++        var flags: u8 = 0;
++        if (sty.flags.bold) flags |= 1 << 0;
++        if (sty.flags.italic) flags |= 1 << 1;
++        if (sty.flags.underline != .none) flags |= 1 << 2;
++        if (sty.flags.strikethrough) flags |= 1 << 3;
++        if (sty.flags.inverse) flags |= 1 << 4;
++        if (sty.flags.invisible) flags |= 1 << 5;
++        if (sty.flags.blink) flags |= 1 << 6;
++        if (sty.flags.faint) flags |= 1 << 7;
++
++        out[x] = .{
++            .codepoint = cell.codepoint(),
++            .fg_r = fg.r,
++            .fg_g = fg.g,
++            .fg_b = fg.b,
++            .bg_r = bg.r,
++            .bg_g = bg.g,
++            .bg_b = bg.b,
++            .flags = flags,
++            .width = switch (cell.wide) {
++                .narrow => 1,
++                .wide => 2,
++                .spacer_tail, .spacer_head => 0,
++            },
++            .hyperlink_id = if (cell.hyperlink) 1 else 0,
++            .grapheme_len = if (cell.hasGrapheme())
++                if (page.lookupGrapheme(cell)) |cps| @min(@as(u8, @intCast(cps.len)), 255) else 0
++            else
++                0,
++        };
++    }
++    return @intCast(cols);
++}
++
++/// Get every codepoint for a cell in an absolute retained row of a named screen.
++pub fn getBufferGrapheme(
++    ptr: ?*anyopaque,
++    alternate: bool,
++    y: c_int,
++    col: c_int,
++    out: [*]u32,
++    buf_size: usize,
++) callconv(.c) c_int {
++    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return -1));
++    const screen = getBufferScreen(wrapper, alternate) orelse return -1;
++    const pages = &screen.pages;
++    if (y < 0 or col < 0 or buf_size < 1) return -1;
++    const row: usize = @intCast(y);
++    const x: usize = @intCast(col);
++    if (row >= pages.total_rows or x >= pages.cols) return -1;
++
++    const pin = pages.pin(.{ .screen = .{ .y = row } }) orelse return -1;
++    const cells = pin.cells(.all);
++    if (x >= cells.len) return -1;
++    const cell = &cells[x];
++    const page = pin.node.data;
++
++    out[0] = cell.codepoint();
++    var count: usize = 1;
++    if (cell.hasGrapheme()) {
++        if (page.lookupGrapheme(cell)) |codepoints| {
++            for (codepoints) |codepoint| {
++                if (count >= buf_size) break;
++                out[count] = codepoint;
++                count += 1;
++            }
++        }
++    }
++    return @intCast(count);
++}
++
++/// Check whether an absolute retained row of a named screen continues a soft wrap.
++pub fn isBufferRowWrapped(ptr: ?*anyopaque, alternate: bool, y: c_int) callconv(.c) bool {
++    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return false));
++    const screen = getBufferScreen(wrapper, alternate) orelse return false;
++    if (y < 0) return false;
++    const row: usize = @intCast(y);
++    if (row >= screen.pages.total_rows) return false;
++    const pin = screen.pages.pin(.{ .screen = .{ .y = row } }) orelse return false;
++    return pin.rowAndCell().row.wrap_continuation;
++}
++
 +pub fn hasMouseTracking(ptr: ?*anyopaque) callconv(.c) bool {
 +    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return false));
 +    return wrapper.terminal.modes.get(.mouse_event_normal) or
@@ -3479,7 +3747,7 @@ index 3b806f8b8..869496c0f 100644
 @@ -257,11 +257,30 @@ pub const DynamicRGB = struct {
          self.override = color;
      }
-
+ 
 +    /// Change the configured default while preserving an active override.
 +    pub fn changeDefault(self: *DynamicRGB, color: RGB) void {
 +        self.default = color;
@@ -3490,7 +3758,7 @@ index 3b806f8b8..869496c0f 100644
 +        self.override = null;
      }
  };
-
+ 
 +test "DynamicRGB configured default and override lifecycle" {
 +    const first: RGB = .{ .r = 1, .g = 2, .b = 3 };
 +    const second: RGB = .{ .r = 4, .g = 5, .b = 6 };
@@ -3551,7 +3819,7 @@ index 062e3969a..7ada25876 100644
 @@ -865,6 +865,27 @@ pub const PageFormatter = struct {
          };
      }
-
+ 
 +    /// Initialize a formatter for one bounded page chunk. This is used by
 +    /// retained-range consumers that deliberately yield between pages while
 +    /// preserving soft-wrap and trailing-row state.
@@ -3608,7 +3876,7 @@ index 0086e48bc..6757628e1 100644
 --- a/src/terminal/osc.zig
 +++ b/src/terminal/osc.zig
 @@ -93,6 +93,7 @@ pub const Command = union(Key) {
-
+ 
      /// Show a desktop notification (OSC 9 or OSC 777)
      show_desktop_notification: struct {
 +        source: NotificationSource,
@@ -3616,9 +3884,9 @@ index 0086e48bc..6757628e1 100644
          body: [:0]const u8,
      },
 @@ -164,6 +165,12 @@ pub const Command = union(Key) {
-
+ 
      pub const KittyClipboardProtocol = parsers.kitty_clipboard_protocol.OSC;
-
+ 
 +    /// Closed parser-owned origin for desktop notification requests.
 +    pub const NotificationSource = enum {
 +        osc_9,
@@ -3641,7 +3909,7 @@ index f636813d9..cdd912d91 100644
              .body = data[0 .. data.len - 1 :0],
          },
 @@ -294,6 +295,7 @@ test "OSC 9: show desktop notification" {
-
+ 
      const cmd = p.end('\x1b').?.*;
      try testing.expect(cmd == .show_desktop_notification);
 +    try testing.expectEqual(.osc_9, cmd.show_desktop_notification.source);
@@ -3661,7 +3929,7 @@ index 94a0961d2..2aa4ba037 100644
              .body = body,
          },
 @@ -54,6 +55,7 @@ test "OSC: OSC 777 show desktop notification with title" {
-
+ 
      const cmd = p.end('\x1b').?.*;
      try testing.expect(cmd == .show_desktop_notification);
 +    try testing.expectEqual(.osc_777, cmd.show_desktop_notification.source);
@@ -3673,17 +3941,17 @@ index d3a117515..494807f73 100644
 --- a/src/terminal/osc/parsers/semantic_prompt.zig
 +++ b/src/terminal/osc/parsers/semantic_prompt.zig
 @@ -3,6 +3,7 @@ const std = @import("std");
-
+ 
  const Parser = @import("../../osc.zig").Parser;
  const OSCCommand = @import("../../osc.zig").Command;
 +const lib = @import("../../../lib/main.zig");
  const string_encoding = @import("../../../os/string_encoding.zig");
-
+ 
  const log = std.log.scoped(.osc_semantic_prompt);
 @@ -17,6 +18,18 @@ pub const Command = struct {
      action: Action,
      options_unvalidated: []const u8,
-
+ 
 +    pub const C = extern struct {
 +        action: c_int,
 +        options_unvalidated: lib.String,
@@ -3699,35 +3967,25 @@ index d3a117515..494807f73 100644
      pub const Action = enum {
          fresh_line, // 'L'
          fresh_line_new_prompt, // 'A'
-diff --git a/src/terminal/Parser.zig b/src/terminal/Parser.zig
-index 980906e49..c175d9d5b 100644
---- a/src/terminal/Parser.zig
-+++ b/src/terminal/Parser.zig
-@@ -27,4 +27,5 @@ pub const State = enum {
-     dcs_ignore,
-     osc_string,
-     sos_pm_apc_string,
-+    screen_title_string,
- };
 diff --git a/src/terminal/parse_table.zig b/src/terminal/parse_table.zig
-index 01bd569cb..fe6701794 100644
+index 01bd569cb..66674d3b4 100644
 --- a/src/terminal/parse_table.zig
 +++ b/src/terminal/parse_table.zig
-@@ -148,4 +148,8 @@ fn genTable() Table {
+@@ -148,6 +148,10 @@ fn genTable() Table {
          // => dcs_entry
          single(&result, 0x50, source, .dcs_entry, .none);
--
-+
+ 
 +        // GNU screen/tmux title sequence: ESC k <text> ST/BEL
 +        // Consume payload so it never reaches the visible grid.
 +        single(&result, 0x6B, source, .screen_title_string, .none);
 +
          // => csi_entry
-@@ -323,4 +327,22 @@ fn genTable() Table {
+         single(&result, 0x5B, source, .csi_entry, .none);
+ 
+@@ -324,6 +328,24 @@ fn genTable() Table {
          range(&result, 0x3C, 0x3F, source, .csi_param, .collect);
      }
--
-+
+ 
 +    // screen_title_string
 +    {
 +        const source = State.screen_title_string;
@@ -3747,6 +4005,8 @@ index 01bd569cb..fe6701794 100644
 +    }
 +
      // osc_string
+     {
+         const source = State.osc_string;
 diff --git a/src/terminal/render.zig b/src/terminal/render.zig
 index 2332866ac..dcfa15f57 100644
 --- a/src/terminal/render.zig
@@ -3831,7 +4091,7 @@ index 4bfd241e7..ae5955f15 100644
          // By using a tracked pin, we can keep our pagelist references safe
 @@ -62,7 +78,12 @@ pub const PageListSearch = struct {
          errdefer list.untrackPin(pin);
-
+ 
          // Create our sliding window we'll use for searching.
 -        var window: SlidingWindow = try .init(alloc, .reverse, needle);
 +        var window: SlidingWindow = try .initWithCaseSensitivity(
@@ -3841,7 +4101,7 @@ index 4bfd241e7..ae5955f15 100644
 +            case_sensitivity,
 +        );
          errdefer window.deinit();
-
+ 
          // We always feed our initial page data into the window, because
 diff --git a/src/terminal/search/screen.zig b/src/terminal/search/screen.zig
 index 74828d879..f7ccec00e 100644
@@ -3855,7 +4115,7 @@ index 74828d879..f7ccec00e 100644
 +
      /// The screen being searched.
      screen: *Screen,
-
+ 
 @@ -137,12 +139,30 @@ pub const ScreenSearch = struct {
          alloc: Allocator,
          screen: *Screen,
@@ -3899,12 +4159,12 @@ index 74828d879..f7ccec00e 100644
                  self.needle(),
 +                self.active.window.case_sensitivity,
              );
-
+ 
              // Deinit/reinit
 @@ -445,11 +466,12 @@ pub const ScreenSearch = struct {
                  // No history search yet, but we now have history. So let's
                  // initialize.
-
+ 
 -                var search: PageListSearch = try .init(
 +                var search: PageListSearch = try .initWithCaseSensitivity(
                      alloc,
@@ -3914,7 +4174,7 @@ index 74828d879..f7ccec00e 100644
 +                    self.active.window.case_sensitivity,
                  );
                  errdefer search.deinit();
-
+ 
 @@ -475,10 +497,11 @@ pub const ScreenSearch = struct {
              // collect all the results into a new list. We ASSUME that
              // reloadActive is being called frequently enough that there isn't
@@ -3949,7 +4209,7 @@ index c3c29e085..0c6762f2c 100644
 @@ -78,6 +85,9 @@ pub const SlidingWindow = struct {
      /// concurrently from that point).
      direction: Direction,
-
+ 
 +    /// Whether literal byte matching folds ASCII case.
 +    case_sensitivity: CaseSensitivity,
 +
@@ -3985,7 +4245,7 @@ index c3c29e085..0c6762f2c 100644
              .overlap_buf = overlap_buf,
          };
      }
-
+ 
 +    fn indexOf(self: *const SlidingWindow, haystack: []const u8) ?usize {
 +        return switch (self.case_sensitivity) {
 +            .sensitive => std.mem.indexOf(u8, haystack, self.needle),
@@ -3998,7 +4258,7 @@ index c3c29e085..0c6762f2c 100644
          self.alloc.free(self.needle);
 @@ -176,7 +208,7 @@ pub const SlidingWindow = struct {
          };
-
+ 
          // Search the first slice for the needle.
 -        if (std.ascii.indexOfIgnoreCase(slices[0], self.needle)) |idx| {
 +        if (self.indexOf(slices[0])) |idx| {
@@ -4007,19 +4267,19 @@ index c3c29e085..0c6762f2c 100644
                  self.needle.len,
 @@ -202,10 +234,7 @@ pub const SlidingWindow = struct {
              @memcpy(self.overlap_buf[prefix.len..overlap_len], suffix);
-
+ 
              // Search the overlap
 -            const idx = std.ascii.indexOfIgnoreCase(
 -                self.overlap_buf[0..overlap_len],
 -                self.needle,
 -            ) orelse break :overlap;
 +            const idx = self.indexOf(self.overlap_buf[0..overlap_len]) orelse break :overlap;
-
+ 
              // We found a match in the overlap buffer. We need to map the
              // index back to the data buffer in order to get our selection.
 @@ -216,7 +245,7 @@ pub const SlidingWindow = struct {
          }
-
+ 
          // Search the last slice for the needle.
 -        if (std.ascii.indexOfIgnoreCase(slices[1], self.needle)) |idx| {
 +        if (self.indexOf(slices[1])) |idx| {
@@ -4029,7 +4289,7 @@ index c3c29e085..0c6762f2c 100644
 @@ -732,6 +761,37 @@ test "SlidingWindow single append case insensitive ASCII" {
      try testing.expect(w.next() == null);
  }
-
+ 
 +test "SlidingWindow single append case sensitive" {
 +    const testing = std.testing;
 +    const alloc = testing.allocator;
@@ -4070,14 +4330,14 @@ index e89c73e66..6893c9c84 100644
 +++ b/src/terminal/stream.zig
 @@ -333,6 +333,7 @@ pub const Action = union(Key) {
      };
-
+ 
      pub const ShowDesktopNotification = struct {
 +        source: osc.Command.NotificationSource,
          title: []const u8,
          body: []const u8,
-
+ 
 @@ -2021,6 +2022,7 @@ pub fn Stream(comptime Handler: type) type {
-
+ 
                  .show_desktop_notification => |v| {
                      try self.handler.vt(.show_desktop_notification, .{
 +                        .source = v.source,
