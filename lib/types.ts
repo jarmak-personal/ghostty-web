@@ -524,6 +524,18 @@ export interface GhosttyWasmExports extends WebAssembly.Exports {
     bufPtr: number,
     bufLen: number
   ): number;
+  ghostty_terminal_capture_retained_buffer_position(
+    terminal: TerminalHandle,
+    row: number,
+    column: number,
+    bufPtr: number,
+    bufLen: number
+  ): number;
+  ghostty_terminal_release_retained_buffer_boundary(
+    terminal: TerminalHandle,
+    provenanceId: number,
+    alternate: boolean
+  ): void;
   ghostty_terminal_retained_range_create(
     terminal: TerminalHandle,
     startId: number,

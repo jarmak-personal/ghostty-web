@@ -531,6 +531,154 @@ describe('SelectionManager', () => {
     });
   });
 
+  describe('absolute buffer API and buffer mutations', () => {
+    test('selects absolute history rows while the viewport is not at the bottom', async () => {
+      if (!container) return;
+
+      const term = await createIsolatedTerminal({ cols: 20, rows: 3, scrollback: 100 });
+      term.open(container);
+      try {
+        for (let i = 0; i < 10; i++) term.write(`Line ${i}\r\n`);
+        expect(term.getScrollbackLength()).toBeGreaterThan(0);
+
+        term.scrollToTop();
+        expect(term.getViewportY()).toBeGreaterThan(0);
+
+        term.select(0, 0, 6);
+        expect(term.getSelection()).toBe('Line 0');
+        expect(term.getSelectionPosition()).toEqual({
+          start: { x: 0, y: 0 },
+          end: { x: 5, y: 0 },
+        });
+
+        term.selectLines(0, 1);
+        expect(term.getSelection()).toBe('Line 0\nLine 1');
+        expect(term.getSelectionPosition()?.start.y).toBe(0);
+        expect(term.getSelectionPosition()?.end.y).toBe(1);
+
+        const lastBufferRow = term.getScrollbackLength() + term.rows - 1;
+        term.selectLines(lastBufferRow + 100, lastBufferRow + 200);
+        expect(term.getSelectionPosition()?.start.y).toBe(lastBufferRow);
+        expect(term.getSelectionPosition()?.end.y).toBe(lastBufferRow);
+
+        term.select(10, lastBufferRow - 1, 10_000);
+        expect(term.getSelectionPosition()?.end).toEqual({ x: term.cols - 1, y: lastBufferRow });
+      } finally {
+        term.dispose();
+      }
+    });
+
+    test('rebases surviving selection rows and clears an evicted boundary exactly once', async () => {
+      if (!container) return;
+
+      const term = await createIsolatedTerminal({ cols: 12, rows: 2, scrollback: 8 });
+      term.open(container);
+      try {
+        // Cross Ghostty's minimum two-page retention before anchoring a recent
+        // row, then wait for the next page trim to prove exact rebasing.
+        term.write('filler\r\n'.repeat(20_000));
+        for (let i = 0; i < 6; i++) term.write(`Line ${i}\r\n`);
+        const scrollback = term.getScrollbackLength();
+        expect(scrollback).toBeGreaterThan(2);
+
+        const retainedRow = scrollback - 2;
+        term.selectLines(retainedRow, retainedRow);
+        const retainedText = term.getSelection();
+        let transitions = 0;
+        term.onSelectionChange(() => transitions++);
+
+        let previousRow = retainedRow;
+        let rebased = false;
+        for (let i = 6; i < 5_000 && !rebased; i++) {
+          term.write(`Line ${i}\r\n`);
+          const position = term.getSelectionPosition();
+          if (!position) break;
+          if (position!.start.y < previousRow) {
+            rebased = true;
+            expect(term.getSelection()).toBe(retainedText);
+            expect(transitions).toBe(1);
+          }
+          previousRow = position!.start.y;
+        }
+        expect(rebased).toBe(true);
+
+        term.selectLines(0, 0);
+        transitions = 0;
+        for (let i = 5_000; i < 15_000 && term.hasSelection(); i++) {
+          term.write(`Line ${i}\r\n`);
+        }
+        expect(term.hasSelection()).toBe(false);
+        expect(term.getSelectionPosition()).toBeUndefined();
+        expect(transitions).toBe(1);
+      } finally {
+        term.dispose();
+      }
+    });
+
+    test('clears once on both narrower and wider reflow', async () => {
+      if (!container) return;
+
+      const term = await createIsolatedTerminal({ cols: 12, rows: 3, scrollback: 100 });
+      term.open(container);
+      try {
+        term.write('0123456789AB\r\nnext');
+        let transitions = 0;
+        term.onSelectionChange(() => transitions++);
+
+        term.select(8, 0, 6);
+        transitions = 0;
+        term.resize(6, 3);
+        expect(term.hasSelection()).toBe(false);
+        expect(transitions).toBe(1);
+
+        term.select(0, 0, 4);
+        transitions = 0;
+        term.resize(18, 3);
+        expect(term.hasSelection()).toBe(false);
+        expect(transitions).toBe(1);
+
+        term.clearSelection();
+        expect(transitions).toBe(1);
+      } finally {
+        term.dispose();
+      }
+    });
+
+    test('does not publish a pending no-drag click as a selection transition', async () => {
+      if (!container) return;
+
+      const term = await createIsolatedTerminal({ cols: 12, rows: 3 });
+      term.open(container);
+      try {
+        const canvas = term.renderer!.getCanvas();
+        let transitions = 0;
+        term.onSelectionChange(() => transitions++);
+
+        canvas.dispatchEvent(
+          new MouseEvent('mousedown', { button: 0, bubbles: true, clientX: 1, clientY: 1 })
+        );
+        document.dispatchEvent(
+          new MouseEvent('mouseup', { button: 0, bubbles: true, clientX: 1, clientY: 1 })
+        );
+        expect(term.hasSelection()).toBe(false);
+        expect(transitions).toBe(0);
+
+        term.select(0, 0, 2);
+        transitions = 0;
+        canvas.dispatchEvent(
+          new MouseEvent('mousedown', { button: 0, bubbles: true, clientX: 1, clientY: 1 })
+        );
+        document.dispatchEvent(
+          new MouseEvent('mouseup', { button: 0, bubbles: true, clientX: 1, clientY: 1 })
+        );
+        expect(term.hasSelection()).toBe(false);
+        expect(transitions).toBe(1);
+      } finally {
+        term.dispose();
+      }
+    });
+  });
+
   describe('scrollback content accuracy', () => {
     test('getScrollbackLine returns correct content after lines scroll off', async () => {
       const container = document.createElement('div');

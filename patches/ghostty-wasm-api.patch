@@ -32,7 +32,7 @@ new file mode 100644
 index 000000000..427f7eeaf
 --- /dev/null
 +++ b/include/ghostty/vt/terminal.h
-@@ -0,0 +1,450 @@
+@@ -0,0 +1,466 @@
 +/**
 + * @file terminal.h
 + *
@@ -227,6 +227,22 @@ index 000000000..427f7eeaf
 +    GhosttyTerminal term,
 +    uint32_t* out_buffer,
 +    size_t buffer_size
++);
++
++/** Capture a tracked boundary at one absolute row/column on the active screen. */
++int ghostty_terminal_capture_retained_buffer_position(
++    GhosttyTerminal term,
++    uint32_t row,
++    uint32_t column,
++    uint32_t* out_buffer,
++    size_t buffer_size
++);
++
++/** Release one tracked retained boundary before bounded registry eviction. */
++void ghostty_terminal_release_retained_buffer_boundary(
++    GhosttyTerminal term,
++    uint32_t provenance_id,
++    bool alternate
 +);
 +
 +/** Begin exact [start,end) extraction between retained same-screen tokens. */
@@ -487,7 +503,7 @@ diff --git a/src/lib_vt.zig b/src/lib_vt.zig
 index 426660621..343d37fdc 100644
 --- a/src/lib_vt.zig
 +++ b/src/lib_vt.zig
-@@ -143,6 +143,75 @@ comptime {
+@@ -143,6 +143,77 @@ comptime {
          @export(&c.sgr_unknown_partial, .{ .name = "ghostty_sgr_unknown_partial" });
          @export(&c.sgr_attribute_tag, .{ .name = "ghostty_sgr_attribute_tag" });
          @export(&c.sgr_attribute_value, .{ .name = "ghostty_sgr_attribute_value" });
@@ -508,6 +524,8 @@ index 426660621..343d37fdc 100644
 +        @export(&c.terminal_get_primary_screen_generation, .{ .name = "ghostty_terminal_get_primary_screen_generation" });
 +        @export(&c.terminal_get_alternate_screen_generation, .{ .name = "ghostty_terminal_get_alternate_screen_generation" });
 +        @export(&c.terminal_capture_retained_buffer_boundary, .{ .name = "ghostty_terminal_capture_retained_buffer_boundary" });
++        @export(&c.terminal_capture_retained_buffer_position, .{ .name = "ghostty_terminal_capture_retained_buffer_position" });
++        @export(&c.terminal_release_retained_buffer_boundary, .{ .name = "ghostty_terminal_release_retained_buffer_boundary" });
 +        @export(&c.terminal_retained_range_create, .{ .name = "ghostty_terminal_retained_range_create" });
 +        @export(&c.terminal_retained_range_step, .{ .name = "ghostty_terminal_retained_range_step" });
 +        @export(&c.terminal_retained_range_cancel, .{ .name = "ghostty_terminal_retained_range_cancel" });
@@ -636,7 +654,7 @@ index bc92597f5..f74c3baeb 100644
 
  // The full C API, unexported.
  pub const osc_new = osc.new;
-@@ -52,6 +53,76 @@ pub const key_encoder_encode = key_encode.encode;
+@@ -52,6 +53,78 @@ pub const key_encoder_encode = key_encode.encode;
 
  pub const paste_is_safe = paste.is_safe;
 
@@ -657,6 +675,8 @@ index bc92597f5..f74c3baeb 100644
 +pub const terminal_get_primary_screen_generation = terminal.getPrimaryScreenGeneration;
 +pub const terminal_get_alternate_screen_generation = terminal.getAlternateScreenGeneration;
 +pub const terminal_capture_retained_buffer_boundary = terminal.captureRetainedBufferBoundary;
++pub const terminal_capture_retained_buffer_position = terminal.captureRetainedBufferPosition;
++pub const terminal_release_retained_buffer_boundary = terminal.releaseRetainedBufferBoundary;
 +pub const terminal_retained_range_create = terminal.retainedRangeCreate;
 +pub const terminal_retained_range_step = terminal.retainedRangeStep;
 +pub const terminal_retained_range_cancel = terminal.retainedRangeCancel;
@@ -726,7 +746,7 @@ new file mode 100644
 index 000000000..1f8362e72
 --- /dev/null
 +++ b/src/terminal/c/terminal.zig
-@@ -0,0 +1,2634 @@
+@@ -0,0 +1,2725 @@
 +//! C API wrapper for Terminal
 +//!
 +//! This provides a minimal, high-performance interface to Ghostty's Terminal
@@ -1008,6 +1028,23 @@ index 000000000..1f8362e72
 +        self.next_slot = 0;
 +    }
 +
++    fn remove(
++        self: *ProvenanceRegistry,
++        terminal: *Terminal,
++        id: u32,
++        screen_key: ScreenSet.Key,
++    ) void {
++        for (&self.entries) |*entry| {
++            const existing = entry.* orelse continue;
++            if (existing.id != id or existing.screen != screen_key) continue;
++            if (terminal.screens.get(existing.screen)) |screen| {
++                screen.pages.untrackPin(existing.pin);
++            }
++            entry.* = null;
++            return;
++        }
++    }
++
 +    const Boundary = struct {
 +        id: u32,
 +        screen: ScreenSet.Key,
@@ -1017,9 +1054,51 @@ index 000000000..1f8362e72
 +
 +    fn register(self: *ProvenanceRegistry, terminal: *Terminal) ?Boundary {
 +        const screen_key = terminal.screens.active_key;
-+        const pages = &terminal.screens.active.pages;
 +        const after_cell = terminal.screens.active.cursor.pending_wrap;
-+        const tracked = pages.trackPin(terminal.screens.active.cursor.page_pin.*) catch return null;
++        return self.registerPin(
++            terminal,
++            screen_key,
++            terminal.screens.active.cursor.page_pin.*,
++            after_cell,
++        );
++    }
++
++    fn registerPosition(
++        self: *ProvenanceRegistry,
++        terminal: *Terminal,
++        absolute_row: u32,
++        column: u32,
++    ) ?Boundary {
++        const screen_key = terminal.screens.active_key;
++        const pages = &terminal.screens.active.pages;
++        const row: usize = @intCast(absolute_row);
++        const col = std.math.cast(@TypeOf(pages.cols), column) orelse return null;
++        if (row >= pages.total_rows or col >= pages.cols) return null;
++
++        const history_rows = pages.total_rows - pages.rows;
++        const untracked = if (row < history_rows)
++            pages.pin(.{ .history = .{ .x = col, .y = absolute_row } })
++        else
++            pages.pin(.{ .active = .{
++                .x = col,
++                .y = @intCast(row - history_rows),
++            } });
++        return self.registerPin(terminal, screen_key, untracked orelse return null, false);
++    }
++
++    fn registerPin(
++        self: *ProvenanceRegistry,
++        terminal: *Terminal,
++        screen_key: ScreenSet.Key,
++        pin: PageList.Pin,
++        after_cell: bool,
++    ) ?Boundary {
++        const pages = &terminal.screens.get(screen_key).?.pages;
++        const tracked = pages.trackPin(pin) catch return null;
++        const absolute_row = absoluteRow(pages, tracked) orelse {
++            pages.untrackPin(tracked);
++            return null;
++        };
 +
 +        const slot = self.next_slot;
 +        self.next_slot = (self.next_slot + 1) % max_provenance_entries;
@@ -1044,7 +1123,7 @@ index 000000000..1f8362e72
 +        return .{
 +            .id = id,
 +            .screen = screen_key,
-+            .row = @intCast(pages.total_rows - pages.rows + terminal.screens.active.cursor.y),
++            .row = absolute_row,
 +            .column = if (after_cell) tracked.node.data.size.cols else tracked.x,
 +        };
 +    }
@@ -2400,6 +2479,38 @@ index 000000000..1f8362e72
 +    out[2] = boundary.row;
 +    out[3] = boundary.column;
 +    return 4;
++}
++
++/// Capture a tracked boundary for one absolute retained position.
++pub fn captureRetainedBufferPosition(
++    ptr: ?*anyopaque,
++    row: u32,
++    column: u32,
++    out: [*]u32,
++    out_len: usize,
++) callconv(.c) c_int {
++    if (out_len < 4) return -1;
++    const wrapper: *TerminalWrapper = @ptrCast(@alignCast(ptr orelse return -1));
++    const boundary = wrapper.provenance.registerPosition(
++        &wrapper.terminal,
++        row,
++        column,
++    ) orelse return -1;
++    out[0] = boundary.id;
++    out[1] = if (boundary.screen == .alternate) 1 else 0;
++    out[2] = boundary.row;
++    out[3] = boundary.column;
++    return 4;
++}
++
++pub fn releaseRetainedBufferBoundary(
++    ptr: ?*anyopaque,
++    provenance_id: u32,
++    alternate: bool,
++) callconv(.c) void {
++    const wrapper: *TerminalWrapper = @ptrCast(@alignCast(ptr orelse return));
++    const screen_key: ScreenSet.Key = if (alternate) .alternate else .primary;
++    wrapper.provenance.remove(&wrapper.terminal, provenance_id, screen_key);
 +}
 +
 +/// Create a same-screen [start,end) extraction from authenticated native ids.
