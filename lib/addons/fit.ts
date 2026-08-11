@@ -41,6 +41,7 @@ export class FitAddon implements ITerminalAddon {
   private _terminal?: ITerminalCore;
   private _resizeObserver?: ResizeObserver;
   private _resizeDebounceTimer?: ReturnType<typeof setTimeout>;
+  private _resizeSettleTimer?: ReturnType<typeof setTimeout>;
   private _lastCols?: number;
   private _lastRows?: number;
   private _isResizing: boolean = false;
@@ -50,6 +51,19 @@ export class FitAddon implements ITerminalAddon {
    */
   public activate(terminal: ITerminalCore): void {
     this._terminal = terminal;
+  }
+
+  /** Re-fit when physical-pixel alignment changes the renderer's CSS cell metrics. */
+  public onDevicePixelRatioChange(): void {
+    // _isResizing remains set briefly only to reject ResizeObserver feedback.
+    // A new renderer metric generation supersedes that guard and must not be
+    // dropped just because it arrived during the settling window.
+    if (this._resizeSettleTimer) {
+      clearTimeout(this._resizeSettleTimer);
+      this._resizeSettleTimer = undefined;
+      this._isResizing = false;
+    }
+    this.fit();
   }
 
   /**
@@ -67,10 +81,15 @@ export class FitAddon implements ITerminalAddon {
       clearTimeout(this._resizeDebounceTimer);
       this._resizeDebounceTimer = undefined;
     }
+    if (this._resizeSettleTimer) {
+      clearTimeout(this._resizeSettleTimer);
+      this._resizeSettleTimer = undefined;
+    }
 
     // Clear stored dimensions
     this._lastCols = undefined;
     this._lastRows = undefined;
+    this._isResizing = false;
 
     this._terminal = undefined;
   }
@@ -120,7 +139,8 @@ export class FitAddon implements ITerminalAddon {
       }
     } finally {
       // Clear flag after a short delay to allow DOM to settle
-      setTimeout(() => {
+      this._resizeSettleTimer = setTimeout(() => {
+        this._resizeSettleTimer = undefined;
         this._isResizing = false;
       }, 50);
     }

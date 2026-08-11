@@ -41,6 +41,110 @@ function installAnimationFrameHarness(): {
   };
 }
 
+function installDevicePixelRatioHarness(
+  initialDevicePixelRatio: number,
+  mediaQueryApi: 'modern' | 'legacy' = 'modern'
+): {
+  set: (devicePixelRatio: number, signal?: 'media' | 'resize' | 'none') => void;
+  activeMediaListeners: () => number;
+  activeResizeListeners: () => number;
+  restore: () => void;
+} {
+  const dprDescriptor = Object.getOwnPropertyDescriptor(window, 'devicePixelRatio');
+  const originalMatchMedia = window.matchMedia;
+  const originalAddEventListener = window.addEventListener;
+  const originalRemoveEventListener = window.removeEventListener;
+  const mediaQueries: Array<{
+    media: string;
+    listeners: Set<(event: MediaQueryListEvent) => void>;
+  }> = [];
+  const resizeListeners = new Set<EventListenerOrEventListenerObject>();
+
+  Object.defineProperty(window, 'devicePixelRatio', {
+    configurable: true,
+    value: initialDevicePixelRatio,
+  });
+  window.matchMedia = ((media: string) => {
+    const query = {
+      media,
+      listeners: new Set<(event: MediaQueryListEvent) => void>(),
+    };
+    mediaQueries.push(query);
+    const eventTargetApi =
+      mediaQueryApi === 'modern'
+        ? {
+            addEventListener: (_type: string, listener: (event: MediaQueryListEvent) => void) =>
+              query.listeners.add(listener),
+            removeEventListener: (_type: string, listener: (event: MediaQueryListEvent) => void) =>
+              query.listeners.delete(listener),
+          }
+        : {};
+    const legacyApi =
+      mediaQueryApi === 'legacy'
+        ? {
+            addListener: (listener: (event: MediaQueryListEvent) => void) =>
+              query.listeners.add(listener),
+            removeListener: (listener: (event: MediaQueryListEvent) => void) =>
+              query.listeners.delete(listener),
+          }
+        : { addListener: () => {}, removeListener: () => {} };
+    return {
+      media,
+      matches: true,
+      onchange: null,
+      ...eventTargetApi,
+      ...legacyApi,
+      dispatchEvent: () => true,
+    } as unknown as MediaQueryList;
+  }) as typeof window.matchMedia;
+  window.addEventListener = ((
+    type: string,
+    listener: EventListenerOrEventListenerObject,
+    options?: boolean | AddEventListenerOptions
+  ) => {
+    if (type === 'resize') resizeListeners.add(listener);
+    originalAddEventListener.call(window, type, listener, options);
+  }) as typeof window.addEventListener;
+  window.removeEventListener = ((
+    type: string,
+    listener: EventListenerOrEventListenerObject,
+    options?: boolean | EventListenerOptions
+  ) => {
+    if (type === 'resize') resizeListeners.delete(listener);
+    originalRemoveEventListener.call(window, type, listener, options);
+  }) as typeof window.removeEventListener;
+
+  return {
+    set: (devicePixelRatio, signal = 'media') => {
+      Object.defineProperty(window, 'devicePixelRatio', {
+        configurable: true,
+        value: devicePixelRatio,
+      });
+      if (signal === 'media') {
+        const query = mediaQueries.at(-1);
+        if (!query) throw new Error('Expected an active resolution media query');
+        const event = { matches: false, media: query.media } as MediaQueryListEvent;
+        for (const listener of [...query.listeners]) listener(event);
+      } else if (signal === 'resize') {
+        window.dispatchEvent(new Event('resize'));
+      }
+    },
+    activeMediaListeners: () =>
+      mediaQueries.reduce((total, query) => total + query.listeners.size, 0),
+    activeResizeListeners: () => resizeListeners.size,
+    restore: () => {
+      window.matchMedia = originalMatchMedia;
+      window.addEventListener = originalAddEventListener;
+      window.removeEventListener = originalRemoveEventListener;
+      if (dprDescriptor) {
+        Object.defineProperty(window, 'devicePixelRatio', dprDescriptor);
+      } else {
+        Reflect.deleteProperty(window, 'devicePixelRatio');
+      }
+    },
+  };
+}
+
 function createSchedulerHarness(): Terminal & {
   renderCalls: RenderCall[];
   renderedRanges: Array<{ start: number; end: number }>;
@@ -527,6 +631,182 @@ describe('hvir presentation scheduler', () => {
       } else {
         Reflect.deleteProperty(window, 'devicePixelRatio');
       }
+      frames.restore();
+    }
+  });
+
+  test('atomically repaints 1→2 and 2→1 DPR transitions and notifies addons', async () => {
+    const frames = installAnimationFrameHarness();
+    const dpr = installDevicePixelRatioHarness(1);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const terminal = await createIsolatedTerminal({ cols: 20, rows: 4 });
+    let addonNotifications = 0;
+    let lateAddonNotifications = 0;
+    let installedLateAddon = false;
+    const originalConsoleError = console.error;
+    const addonErrors: unknown[][] = [];
+    console.error = (...args: unknown[]) => addonErrors.push(args);
+    terminal.loadAddon({
+      activate: () => {},
+      onDevicePixelRatioChange: () => {
+        if (installedLateAddon) return;
+        installedLateAddon = true;
+        terminal.loadAddon({
+          activate: () => {},
+          onDevicePixelRatioChange: () => lateAddonNotifications++,
+          dispose: () => {},
+        });
+      },
+      dispose: () => {},
+    });
+    terminal.loadAddon({
+      activate: () => {},
+      onDevicePixelRatioChange: () => {
+        throw new Error('injected addon DPR failure');
+      },
+      dispose: () => {},
+    });
+    terminal.loadAddon({
+      activate: () => {},
+      onDevicePixelRatioChange: () => addonNotifications++,
+      dispose: () => {},
+    });
+
+    try {
+      terminal.open(container);
+      frames.runNext();
+
+      const renderer = terminal.renderer;
+      if (!renderer) throw new Error('Expected renderer');
+      const canvas = renderer.getCanvas();
+      const context = (renderer as unknown as { ctx: CanvasRenderingContext2D }).ctx;
+      const originalScale = context.scale;
+      const scales: Array<[number, number]> = [];
+      context.scale = ((x: number, y: number) => {
+        scales.push([x, y]);
+        originalScale.call(context, x, y);
+      }) as typeof context.scale;
+
+      const initialWidth = canvas.width;
+      const initialFullFrames = terminal.getRenderStats().fullRenderFrames;
+      dpr.set(2);
+
+      // The old backing store stays intact until one atomic presentation frame.
+      expect(canvas.width).toBe(initialWidth);
+      expect(frames.callbacks.size).toBe(1);
+      frames.runNext();
+
+      expect(canvas.width).toBe(renderer.charWidth * terminal.cols * 2);
+      expect(canvas.height).toBe(renderer.charHeight * terminal.rows * 2);
+      expect(scales).toEqual([[2, 2]]);
+      expect(addonNotifications).toBe(1);
+      expect(lateAddonNotifications).toBe(0);
+      expect(addonErrors).toHaveLength(1);
+      expect(terminal.getRenderStats().fullRenderFrames).toBe(initialFullFrames + 1);
+      expect(frames.callbacks.size).toBe(0);
+
+      const highDpiWidth = canvas.width;
+      dpr.set(1);
+      expect(canvas.width).toBe(highDpiWidth);
+      expect(frames.callbacks.size).toBe(1);
+      frames.runNext();
+
+      expect(canvas.width).toBe(renderer.charWidth * terminal.cols);
+      expect(canvas.height).toBe(renderer.charHeight * terminal.rows);
+      expect(scales).toEqual([
+        [2, 2],
+        [1, 1],
+      ]);
+      expect(addonNotifications).toBe(2);
+      expect(lateAddonNotifications).toBe(1);
+      expect(addonErrors).toHaveLength(2);
+      expect(terminal.getRenderStats().fullRenderFrames).toBe(initialFullFrames + 2);
+      expect(frames.callbacks.size).toBe(0);
+    } finally {
+      console.error = originalConsoleError;
+      terminal.dispose();
+      container.remove();
+      dpr.restore();
+      frames.restore();
+    }
+  });
+
+  test('settles fractional DPR transitions without resize or repaint loops', async () => {
+    const frames = installAnimationFrameHarness();
+    const dpr = installDevicePixelRatioHarness(1);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const terminal = await createIsolatedTerminal({ cols: 21, rows: 5 });
+
+    try {
+      terminal.open(container);
+      frames.runNext();
+
+      const renderer = terminal.renderer;
+      if (!renderer) throw new Error('Expected renderer');
+      const canvas = renderer.getCanvas();
+      const originalResize = renderer.resize;
+      let resizeCalls = 0;
+      renderer.resize = ((...args: Parameters<typeof renderer.resize>) => {
+        resizeCalls++;
+        originalResize.call(renderer, ...args);
+      }) as typeof renderer.resize;
+
+      for (const [ratio, signal] of [
+        [1.25, 'resize'],
+        [1.26, 'media'],
+        [1.5, 'media'],
+      ] as const) {
+        dpr.set(ratio, signal);
+        expect(frames.callbacks.size).toBe(1);
+        frames.runNext();
+
+        const metrics = renderer.getMetrics();
+        expect(metrics.width * ratio).toBeCloseTo(Math.round(metrics.width * ratio));
+        expect(metrics.height * ratio).toBeCloseTo(Math.round(metrics.height * ratio));
+        expect(metrics.baseline * ratio).toBeCloseTo(Math.round(metrics.baseline * ratio));
+        expect(canvas.width).toBe(Math.round(metrics.width * terminal.cols * ratio));
+        expect(canvas.height).toBe(Math.round(metrics.height * terminal.rows * ratio));
+        expect(frames.callbacks.size).toBe(0);
+
+        terminal.requestRender();
+        frames.runNext();
+        expect(frames.callbacks.size).toBe(0);
+      }
+
+      expect(resizeCalls).toBe(3);
+    } finally {
+      terminal.dispose();
+      container.remove();
+      dpr.restore();
+      frames.restore();
+    }
+  });
+
+  test('releases DPR media-query and resize listeners on disposal', async () => {
+    const frames = installAnimationFrameHarness();
+    const dpr = installDevicePixelRatioHarness(1, 'legacy');
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const terminal = await createIsolatedTerminal({ cols: 20, rows: 4 });
+
+    try {
+      terminal.open(container);
+      frames.runNext();
+      expect(dpr.activeMediaListeners()).toBe(1);
+      expect(dpr.activeResizeListeners()).toBe(1);
+
+      terminal.dispose();
+      expect(dpr.activeMediaListeners()).toBe(0);
+      expect(dpr.activeResizeListeners()).toBe(0);
+
+      dpr.set(2, 'resize');
+      expect(frames.callbacks.size).toBe(0);
+    } finally {
+      terminal.dispose();
+      container.remove();
+      dpr.restore();
       frames.restore();
     }
   });
