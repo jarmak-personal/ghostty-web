@@ -76,6 +76,12 @@ export interface RendererFrameStats {
   maxRunCells: number;
 }
 
+/** Inclusive viewport-row range painted during a Canvas frame. */
+export interface RendererRowRange {
+  start: number;
+  end: number;
+}
+
 interface TextRunCell {
   cell: GhosttyCell;
   column: number;
@@ -186,6 +192,7 @@ export class CanvasRenderer {
   private requestRender: (forceAll?: boolean) => void;
   private renderPaused = false;
   private frameStats: RendererFrameStats = { ...EMPTY_FRAME_STATS };
+  private renderedRowRanges: RendererRowRange[] = [];
   private glyphAdvanceCache = new Map<string, number>();
 
   // Cursor blinking state
@@ -356,6 +363,7 @@ export class CanvasRenderer {
     scrollbarOpacity: number = 1
   ): RenderStateCursor {
     this.frameStats = { ...EMPTY_FRAME_STATS };
+    this.renderedRowRanges = [];
     // Store buffer reference for grapheme lookups in renderCell
     this.currentBuffer = buffer;
 
@@ -566,6 +574,12 @@ export class CanvasRenderer {
         const cursorColumn = viewportY === 0 && cursor.y === y && cursor.visible ? cursor.x : null;
         this.renderLine(line, y, dims.cols, cursorColumn, getGraphemeString);
         this.frameStats.renderedRows++;
+        const previousRange = this.renderedRowRanges[this.renderedRowRanges.length - 1];
+        if (previousRange?.end === y - 1) {
+          previousRange.end = y;
+        } else {
+          this.renderedRowRanges.push({ start: y, end: y });
+        }
       }
     }
 
@@ -1364,6 +1378,11 @@ export class CanvasRenderer {
 
   public getFrameStats(): RendererFrameStats {
     return { ...this.frameStats };
+  }
+
+  /** Contiguous viewport-row ranges actually painted by the most recent frame. */
+  public getRenderedRowRanges(): RendererRowRange[] {
+    return this.renderedRowRanges.map((range) => ({ ...range }));
   }
 
   /**

@@ -90,6 +90,7 @@ function createRenderHarness(
     lineWidth: number;
   }>;
   requestedFullFrames: boolean[];
+  setDirtyRows: (rows: number[]) => void;
 } {
   const canvas = document.createElement('canvas');
   const requestedFullFrames: boolean[] = [];
@@ -189,10 +190,39 @@ function createRenderHarness(
     }
   }) as CanvasRenderingContext2D['clip'];
 
-  return { renderer, buffer, state, fillTexts, clips, fillRects, paths, requestedFullFrames };
+  return {
+    renderer,
+    buffer,
+    state,
+    fillTexts,
+    clips,
+    fillRects,
+    paths,
+    requestedFullFrames,
+    setDirtyRows: (rows) => {
+      dirtyRows = new Set(rows);
+      state.dirty = DirtyState.NONE;
+    },
+  };
 }
 
 describe('CanvasRenderer', () => {
+  test('reports the contiguous viewport ranges it actually paints', () => {
+    const harness = createRenderHarness(Array.from({ length: 10 }, () => [makeCell('x')]));
+    harness.renderer.render(harness.buffer, true);
+
+    harness.setDirtyRows([2, 7]);
+    harness.renderer.render(harness.buffer);
+
+    // Adjacent rows are intentionally repainted for glyph overflow.
+    expect(harness.renderer.getRenderedRowRanges()).toEqual([
+      { start: 1, end: 3 },
+      { start: 6, end: 8 },
+    ]);
+    expect(harness.renderer.getFrameStats().renderedRows).toBe(6);
+    harness.renderer.dispose();
+  });
+
   describe('Default Theme', () => {
     test('has all required ANSI colors', () => {
       expect(DEFAULT_THEME.black).toBe('#000000');

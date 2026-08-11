@@ -944,37 +944,8 @@ export interface IDisposable {
   dispose(): void;
 }
 
-/**
- * Event emitter for custom events
- */
-export class EventEmitter<T> {
-  private listeners: Array<(data: T) => void> = [];
-
-  /** Subscribe to events */
-  public readonly event: IEvent<T> = (listener: (data: T) => void): IDisposable => {
-    this.listeners.push(listener);
-    return {
-      dispose: () => {
-        const index = this.listeners.indexOf(listener);
-        if (index !== -1) {
-          this.listeners.splice(index, 1);
-        }
-      },
-    };
-  };
-
-  /** Emit an event to all listeners */
-  public fire(data: T): void {
-    for (const listener of this.listeners) {
-      listener(data);
-    }
-  }
-
-  /** Remove all listeners */
-  public dispose(): void {
-    this.listeners = [];
-  }
-}
+// Preserve the historical deep-module export while keeping one implementation.
+export { EventEmitter } from './event-emitter';
 
 /**
  * Terminal mode identifiers

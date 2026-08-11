@@ -116,7 +116,13 @@ export { LinkDetector } from './link-detector';
 // Link providers
 export { OSC8LinkProvider } from './providers/osc8-link-provider';
 export { UrlRegexProvider } from './providers/url-regex-provider';
-export type { FontMetrics, IRenderable, RendererFrameStats, RendererOptions } from './renderer';
+export type {
+  FontMetrics,
+  IRenderable,
+  RendererFrameStats,
+  RendererOptions,
+  RendererRowRange,
+} from './renderer';
 // Low-level components (for custom integrations)
 export { CanvasRenderer } from './renderer';
 export {

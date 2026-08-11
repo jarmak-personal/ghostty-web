@@ -28,6 +28,11 @@ export interface SelectionCoordinates {
   endRow: number;
 }
 
+interface SelectionEndpoint {
+  col: number;
+  absoluteRow: number;
+}
+
 interface SelectionWriteAnchors {
   start: TerminalEventProvenance | null;
   end: TerminalEventProvenance | null;
@@ -46,8 +51,8 @@ export class SelectionManager {
 
   // Selection state - coordinates are in ABSOLUTE buffer space (viewportY + viewportRow)
   // This ensures selection persists correctly when scrolling
-  private selectionStart: { col: number; absoluteRow: number } | null = null;
-  private selectionEnd: { col: number; absoluteRow: number } | null = null;
+  private selectionStart: SelectionEndpoint | null = null;
+  private selectionEnd: SelectionEndpoint | null = null;
   private isSelecting: boolean = false;
   private mouseDownX: number = 0;
   private mouseDownY: number = 0;
@@ -259,32 +264,12 @@ export class SelectionManager {
    * Clear the selection
    */
   clearSelection(): void {
-    if (this.clearSelectionState()) this.selectionChangedEmitter.fire();
-  }
-
-  /** Clear owned state and report whether an externally visible selection changed. */
-  private clearSelectionState(): boolean {
-    if (!this.selectionStart && !this.selectionEnd && !this.isSelecting) return false;
-
-    const wasVisible = this.hasSelection();
-
-    // Mark current or pending selection rows as dirty for redraw. This also
-    // revokes a below-threshold drag, which is intentionally not yet exposed
-    // through hasSelection().
-    const coords = this.normalizeSelection();
-    if (coords) {
-      for (let row = coords.startRow; row <= coords.endRow; row++) {
-        this.dirtySelectionRows.add(row);
-      }
-    }
-
-    this.selectionStart = null;
-    this.selectionEnd = null;
-    this.isSelecting = false;
-
-    // Force redraw of previously selected lines to clear the overlay
-    this.requestRender();
-    return wasVisible;
+    this.transitionSelection(() => {
+      this.selectionStart = null;
+      this.selectionEnd = null;
+      this.isSelecting = false;
+      this.dragThresholdMet = false;
+    });
   }
 
   /**
@@ -293,13 +278,15 @@ export class SelectionManager {
   selectAll(): void {
     const dims = this.wasmTerm.getDimensions();
     const scrollbackLength = this.wasmTerm.getScrollbackLength();
-    this.selectionStart = { col: 0, absoluteRow: 0 };
-    this.selectionEnd = {
-      col: dims.cols - 1,
-      absoluteRow: scrollbackLength + dims.rows - 1,
-    };
-    this.requestRender();
-    this.selectionChangedEmitter.fire();
+    this.transitionSelection(() => {
+      this.selectionStart = { col: 0, absoluteRow: 0 };
+      this.selectionEnd = {
+        col: dims.cols - 1,
+        absoluteRow: scrollbackLength + dims.rows - 1,
+      };
+      this.isSelecting = false;
+      this.dragThresholdMet = false;
+    });
   }
 
   /** Replace the parser state owned by the same public Terminal instance. */
@@ -348,11 +335,10 @@ export class SelectionManager {
         return;
       }
 
-      this.markCurrentSelectionDirty();
-      this.selectionStart = { col: start.column, absoluteRow: start.row };
-      this.selectionEnd = { col: end.column, absoluteRow: end.row };
-      this.requestRender();
-      this.selectionChangedEmitter.fire();
+      this.transitionSelection(() => {
+        this.selectionStart = { col: start.column, absoluteRow: start.row };
+        this.selectionEnd = { col: end.column, absoluteRow: end.row };
+      });
     } finally {
       if (anchors.start) this.wasmTerm.releaseRetainedBufferBoundary(anchors.start);
       if (anchors.end) this.wasmTerm.releaseRetainedBufferBoundary(anchors.end);
@@ -380,10 +366,12 @@ export class SelectionManager {
     const endRow = Math.floor(endOffset / dims.cols);
     const endCol = endOffset % dims.cols;
 
-    this.selectionStart = { col: column, absoluteRow: row };
-    this.selectionEnd = { col: endCol, absoluteRow: endRow };
-    this.requestRender();
-    this.selectionChangedEmitter.fire();
+    this.transitionSelection(() => {
+      this.selectionStart = { col: column, absoluteRow: row };
+      this.selectionEnd = { col: endCol, absoluteRow: endRow };
+      this.isSelecting = false;
+      this.dragThresholdMet = false;
+    });
   }
 
   /**
@@ -407,10 +395,12 @@ export class SelectionManager {
       [start, end] = [end, start];
     }
 
-    this.selectionStart = { col: 0, absoluteRow: start };
-    this.selectionEnd = { col: dims.cols - 1, absoluteRow: end };
-    this.requestRender();
-    this.selectionChangedEmitter.fire();
+    this.transitionSelection(() => {
+      this.selectionStart = { col: 0, absoluteRow: start };
+      this.selectionEnd = { col: dims.cols - 1, absoluteRow: end };
+      this.isSelecting = false;
+      this.dragThresholdMet = false;
+    });
   }
 
   /**
@@ -564,20 +554,16 @@ export class SelectionManager {
 
         const cell = this.pixelToCell(e.offsetX, e.offsetY);
 
-        // Always clear previous selection on new click
-        const hadSelection = this.hasSelection();
-        if (hadSelection) {
-          this.clearSelection();
-        }
-
         // Start new selection (convert to absolute coordinates)
         const absoluteRow = this.viewportRowToAbsolute(cell.row);
-        this.selectionStart = { col: cell.col, absoluteRow };
-        this.selectionEnd = { col: cell.col, absoluteRow };
-        this.isSelecting = true;
+        this.transitionSelection(() => {
+          this.selectionStart = { col: cell.col, absoluteRow };
+          this.selectionEnd = { col: cell.col, absoluteRow };
+          this.isSelecting = true;
+          this.dragThresholdMet = false;
+        });
         this.mouseDownX = e.offsetX;
         this.mouseDownY = e.offsetY;
-        this.dragThresholdMet = false;
       }
     };
     canvas.addEventListener('mousedown', canvasMouseDownHandler);
@@ -595,16 +581,14 @@ export class SelectionManager {
           if (dx * dx + dy * dy < threshold * threshold) {
             return; // Below threshold, ignore
           }
-          this.dragThresholdMet = true;
         }
-
-        // Mark current selection rows as dirty before updating
-        this.markCurrentSelectionDirty();
 
         const cell = this.pixelToCell(e.offsetX, e.offsetY);
         const absoluteRow = this.viewportRowToAbsolute(cell.row);
-        this.selectionEnd = { col: cell.col, absoluteRow };
-        this.requestRender();
+        this.transitionSelection(() => {
+          this.dragThresholdMet = true;
+          this.selectionEnd = { col: cell.col, absoluteRow };
+        });
 
         // Check if near edges for auto-scroll
         this.updateAutoScroll(e.offsetY, canvas.clientHeight);
@@ -648,7 +632,6 @@ export class SelectionManager {
           if (dx * dx + dy * dy < threshold * threshold) {
             return;
           }
-          this.dragThresholdMet = true;
         }
 
         const rect = canvas.getBoundingClientRect();
@@ -680,13 +663,12 @@ export class SelectionManager {
           // Only update selection position if NOT auto-scrolling
           // During auto-scroll, the scroll handler extends the selection
           if (this.autoScrollDirection === 0) {
-            // Mark current selection rows as dirty before updating
-            this.markCurrentSelectionDirty();
-
             const cell = this.pixelToCell(offsetX, offsetY);
             const absoluteRow = this.viewportRowToAbsolute(cell.row);
-            this.selectionEnd = { col: cell.col, absoluteRow };
-            this.requestRender();
+            this.transitionSelection(() => {
+              this.dragThresholdMet = true;
+              this.selectionEnd = { col: cell.col, absoluteRow };
+            });
           }
         }
       }
@@ -714,13 +696,14 @@ export class SelectionManager {
           return;
         }
 
-        this.isSelecting = false;
+        this.transitionSelection(() => {
+          this.isSelecting = false;
+        });
 
         if (this.hasSelection()) {
           const text = this.getSelection();
           if (text) {
             this.copyToClipboard(text);
-            this.selectionChangedEmitter.fire();
           }
         }
       }
@@ -740,14 +723,16 @@ export class SelectionManager {
 
         if (word) {
           const absoluteRow = this.viewportRowToAbsolute(cell.row);
-          this.selectionStart = { col: word.startCol, absoluteRow };
-          this.selectionEnd = { col: word.endCol, absoluteRow };
-          this.requestRender();
+          this.transitionSelection(() => {
+            this.selectionStart = { col: word.startCol, absoluteRow };
+            this.selectionEnd = { col: word.endCol, absoluteRow };
+            this.isSelecting = false;
+            this.dragThresholdMet = false;
+          });
 
           const text = this.getSelection();
           if (text) {
             this.copyToClipboard(text);
-            this.selectionChangedEmitter.fire();
           }
         }
       } else if (e.detail >= 3) {
@@ -781,14 +766,16 @@ export class SelectionManager {
         // Only select if line has content (endCol >= 0)
         if (endCol >= 0) {
           // Select line content only (not trailing whitespace)
-          this.selectionStart = { col: 0, absoluteRow };
-          this.selectionEnd = { col: endCol, absoluteRow };
-          this.requestRender();
+          this.transitionSelection(() => {
+            this.selectionStart = { col: 0, absoluteRow };
+            this.selectionEnd = { col: endCol, absoluteRow };
+            this.isSelecting = false;
+            this.dragThresholdMet = false;
+          });
 
           const text = this.getSelection();
           if (text) {
             this.copyToClipboard(text);
-            this.selectionChangedEmitter.fire();
           }
         }
       }
@@ -905,15 +892,45 @@ export class SelectionManager {
   }
 
   /**
-   * Mark current selection rows as dirty for redraw
+   * Apply one selection mutation and publish exactly one visible transition.
+   * Pending click candidates remain private until the drag threshold is met.
    */
-  private markCurrentSelectionDirty(): void {
-    const coords = this.normalizeSelection();
-    if (coords) {
-      for (let row = coords.startRow; row <= coords.endRow; row++) {
+  private transitionSelection(update: () => void): void {
+    const before = this.getVisibleSelectionState();
+    const beforeViewport = before ? this.normalizeSelection() : null;
+
+    update();
+
+    const after = this.getVisibleSelectionState();
+    if (this.selectionStatesEqual(before, after)) return;
+
+    if (beforeViewport) {
+      for (let row = beforeViewport.startRow; row <= beforeViewport.endRow; row++) {
         this.dirtySelectionRows.add(row);
       }
     }
+
+    this.requestRender();
+    this.selectionChangedEmitter.fire();
+  }
+
+  private getVisibleSelectionState(): SelectionCoordinates | null {
+    return this.hasSelection() ? this.normalizeBufferSelection() : null;
+  }
+
+  private selectionStatesEqual(
+    left: SelectionCoordinates | null,
+    right: SelectionCoordinates | null
+  ): boolean {
+    return (
+      left === right ||
+      (left !== null &&
+        right !== null &&
+        left.startCol === right.startCol &&
+        left.startRow === right.startRow &&
+        left.endCol === right.endCol &&
+        left.endRow === right.endRow)
+    );
   }
 
   /**
@@ -971,19 +988,21 @@ export class SelectionManager {
           // Set to top of viewport, but only if it extends the selection
           const topAbsoluteRow = this.viewportRowToAbsolute(0);
           if (topAbsoluteRow < this.selectionEnd.absoluteRow) {
-            this.selectionEnd = { col: 0, absoluteRow: topAbsoluteRow };
+            this.transitionSelection(() => {
+              this.selectionEnd = { col: 0, absoluteRow: topAbsoluteRow };
+            });
           }
         } else {
           // Scrolling down - extend selection downward (increase absoluteRow)
           // Set to bottom of viewport, but only if it extends the selection
           const bottomAbsoluteRow = this.viewportRowToAbsolute(dims.rows - 1);
           if (bottomAbsoluteRow > this.selectionEnd.absoluteRow) {
-            this.selectionEnd = { col: dims.cols - 1, absoluteRow: bottomAbsoluteRow };
+            this.transitionSelection(() => {
+              this.selectionEnd = { col: dims.cols - 1, absoluteRow: bottomAbsoluteRow };
+            });
           }
         }
       }
-
-      this.requestRender();
     }, SelectionManager.AUTO_SCROLL_INTERVAL);
   }
 

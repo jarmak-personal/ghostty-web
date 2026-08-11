@@ -165,6 +165,7 @@ export class Terminal implements ITerminalCore {
   public readonly onKey: IEvent<IKeyEvent> = this.keyEmitter.event;
   public readonly onTitleChange: IEvent<string> = this.titleChangeEmitter.event;
   public readonly onScroll: IEvent<number> = this.scrollEmitter.event;
+  /** Fires once per contiguous viewport-row range painted; one frame may emit several ranges. */
   public readonly onRender: IEvent<{ start: number; end: number }> = this.renderEmitter.event;
   public readonly onCursorMove: IEvent<void> = this.cursorMoveEmitter.event;
   /** Typed host-facing events sourced directly from Ghostty parser actions. */
@@ -203,7 +204,13 @@ export class Terminal implements ITerminalCore {
   private scrollAnimationFrame?: number;
   private scrollAnimationGeneration: number = 0;
   private customWheelEventHandler?: (event: WheelEvent) => boolean;
-  private lastCursorY: number = 0; // Track cursor position for onCursorMove
+  // Cursor events are presentation events: multiple writes coalesce into one
+  // notification, while every intervening screen switch remains observable.
+  private lastCursorX: number = 0;
+  private lastCursorY: number = 0;
+  private lastCursorAlternateScreen = false;
+  private cursorScreenGeneration = 0;
+  private lastPresentedCursorScreenGeneration = 0;
 
   // Scrollbar interaction state
   private isDraggingScrollbar: boolean = false;
@@ -924,7 +931,6 @@ export class Terminal implements ITerminalCore {
 
     // Reset title
     this.currentTitle = '';
-    this.lastCursorY = 0;
     this.requestRender(true);
   }
 
@@ -1675,9 +1681,26 @@ export class Terminal implements ITerminalCore {
       this.renderFrames++;
       if (forceAll) this.fullRenderFrames++;
 
-      if (cursor.y !== this.lastCursorY) {
-        this.lastCursorY = cursor.y;
+      const renderedRanges = this.renderer!.getRenderedRowRanges();
+      const alternateScreen = this.wasmTerm!.isAlternateScreen();
+      const cursorMoved =
+        cursor.x !== this.lastCursorX ||
+        cursor.y !== this.lastCursorY ||
+        alternateScreen !== this.lastCursorAlternateScreen ||
+        this.cursorScreenGeneration !== this.lastPresentedCursorScreenGeneration;
+
+      // Commit the observation before firing user code. A listener may reenter
+      // write(), schedule another frame, or dispose the terminal.
+      this.lastCursorX = cursor.x;
+      this.lastCursorY = cursor.y;
+      this.lastCursorAlternateScreen = alternateScreen;
+      this.lastPresentedCursorScreenGeneration = this.cursorScreenGeneration;
+
+      if (cursorMoved) {
         this.cursorMoveEmitter.fire();
+      }
+      for (const range of renderedRanges) {
+        this.renderEmitter.fire(range);
       }
     });
   }
@@ -2399,6 +2422,7 @@ export class Terminal implements ITerminalCore {
     let bell = false;
     for (const event of events) {
       if (event.type === 'buffer-change') {
+        this.cursorScreenGeneration++;
         const buffer = event.active === 'alternate' ? this.buffer.alternate : this.buffer.normal;
         (this.buffer as BufferNamespace)._fireBufferChange(buffer);
         continue;

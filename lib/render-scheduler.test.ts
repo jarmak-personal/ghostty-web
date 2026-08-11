@@ -43,6 +43,9 @@ function installAnimationFrameHarness(): {
 
 function createSchedulerHarness(): Terminal & {
   renderCalls: RenderCall[];
+  renderedRanges: Array<{ start: number; end: number }>;
+  renderEvents: Array<{ start: number; end: number }>;
+  cursorMoveEvents: number;
   cursorResetCount: number;
   rendererPauseStates: boolean[];
   scrollEvents: number[];
@@ -50,11 +53,14 @@ function createSchedulerHarness(): Terminal & {
   const renderCalls: RenderCall[] = [];
   const rendererPauseStates: boolean[] = [];
   const scrollEvents: number[] = [];
+  const renderedRanges: Array<{ start: number; end: number }> = [];
+  const renderEvents: Array<{ start: number; end: number }> = [];
   const renderer = {
     render: (...args: RenderCall) => {
       renderCalls.push(args);
-      return { y: 0 };
+      return { x: 0, y: 0 };
     },
+    getRenderedRowRanges: () => renderedRanges.map((range) => ({ ...range })),
     getCursorVisible: () => true,
     setRenderPaused: (paused: boolean) => rendererPauseStates.push(paused),
     resetCursorBlink: () => {
@@ -85,10 +91,18 @@ function createSchedulerHarness(): Terminal & {
     scrollbarVisible: false,
     scrollbarOpacity: 0,
     viewportY: 0,
+    lastCursorX: 0,
     lastCursorY: 0,
+    lastCursorAlternateScreen: false,
+    cursorScreenGeneration: 0,
+    lastPresentedCursorScreenGeneration: 0,
     renderer,
-    wasmTerm: { getCursor: () => ({ y: 0 }) },
-    cursorMoveEmitter: { fire: () => {}, dispose: () => {} },
+    wasmTerm: { isAlternateScreen: () => false },
+    cursorMoveEvents: 0,
+    cursorMoveEmitter: {
+      fire: () => terminal.cursorMoveEvents++,
+      dispose: () => {},
+    },
     addons: [],
     cleanupComponents: () => {},
     dataEmitter: disposable,
@@ -98,9 +112,14 @@ function createSchedulerHarness(): Terminal & {
     keyEmitter: disposable,
     titleChangeEmitter: disposable,
     scrollEmitter: { fire: (viewportY: number) => scrollEvents.push(viewportY), dispose: () => {} },
-    renderEmitter: disposable,
+    renderEmitter: {
+      fire: (range: { start: number; end: number }) => renderEvents.push(range),
+      dispose: () => {},
+    },
     terminalEventEmitter: disposable,
     renderCalls,
+    renderedRanges,
+    renderEvents,
     cursorResetCount: 0,
     rendererPauseStates,
     scrollEvents,
@@ -109,6 +128,112 @@ function createSchedulerHarness(): Terminal & {
 }
 
 describe('hvir presentation scheduler', () => {
+  test('forwards each actual painted row range once', () => {
+    const frames = installAnimationFrameHarness();
+    try {
+      const terminal = createSchedulerHarness();
+      terminal.renderedRanges.push({ start: 1, end: 3 }, { start: 7, end: 8 });
+
+      terminal.requestRender();
+      frames.runNext();
+
+      expect(terminal.renderEvents).toEqual([
+        { start: 1, end: 3 },
+        { start: 7, end: 8 },
+      ]);
+    } finally {
+      frames.restore();
+    }
+  });
+
+  test('coalesces cursor axes and buffer switches by presented frame', () => {
+    const frames = installAnimationFrameHarness();
+    try {
+      const terminal = createSchedulerHarness();
+      const cursor = { x: 0, y: 0 };
+      let alternateScreen = false;
+      (terminal.renderer as CanvasRenderer).render = (() => ({
+        ...cursor,
+      })) as CanvasRenderer['render'];
+      terminal.wasmTerm!.isAlternateScreen = () => alternateScreen;
+
+      cursor.x = 1;
+      terminal.requestRender();
+      frames.runNext();
+      expect(terminal.cursorMoveEvents).toBe(1);
+
+      terminal.requestRender();
+      frames.runNext();
+      expect(terminal.cursorMoveEvents).toBe(1);
+
+      cursor.y = 2;
+      terminal.requestRender();
+      frames.runNext();
+      expect(terminal.cursorMoveEvents).toBe(2);
+
+      alternateScreen = true;
+      Object.assign(terminal, { cursorScreenGeneration: 1 });
+      terminal.requestRender();
+      frames.runNext();
+      expect(terminal.cursorMoveEvents).toBe(3);
+
+      // Entering and leaving a screen between frames is still one observable
+      // presentation transition, even when the final screen is unchanged.
+      alternateScreen = false;
+      Object.assign(terminal, { cursorScreenGeneration: 3 });
+      terminal.requestRender();
+      frames.runNext();
+      expect(terminal.cursorMoveEvents).toBe(4);
+    } finally {
+      frames.restore();
+    }
+  });
+
+  test('publishes real horizontal, vertical, and same-write screen transitions', async () => {
+    const frames = installAnimationFrameHarness();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const terminal = await createIsolatedTerminal({ cols: 20, rows: 4, focusOnOpen: false });
+    try {
+      terminal.open(container);
+      frames.runNext();
+
+      let cursorMoves = 0;
+      const renderEvents: Array<{ start: number; end: number }> = [];
+      terminal.onCursorMove(() => cursorMoves++);
+      terminal.onRender((range) => renderEvents.push(range));
+
+      terminal.write('x');
+      frames.runNext();
+      expect(cursorMoves).toBe(1);
+      expect(renderEvents).toEqual(terminal.renderer!.getRenderedRowRanges());
+      expect(renderEvents.length).toBeGreaterThan(0);
+
+      renderEvents.length = 0;
+      terminal.requestRender();
+      frames.runNext();
+      expect(renderEvents).toEqual([]);
+
+      terminal.write('\r\n');
+      frames.runNext();
+      expect(cursorMoves).toBe(2);
+
+      // The final cursor and screen match the pre-write presentation, but both
+      // parser-owned buffer transitions must still produce one coalesced event.
+      terminal.write('\x1b[?1049h\x1b[?1049l');
+      frames.runNext();
+      expect(cursorMoves).toBe(3);
+
+      terminal.reset();
+      frames.runNext();
+      expect(cursorMoves).toBe(4);
+    } finally {
+      terminal.dispose();
+      container.remove();
+      frames.restore();
+    }
+  });
+
   test('coalesces requests and preserves a requested full repaint', () => {
     const frames = installAnimationFrameHarness();
     try {

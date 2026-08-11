@@ -677,6 +677,92 @@ describe('SelectionManager', () => {
         term.dispose();
       }
     });
+
+    test('publishes only distinct programmatic selection states', async () => {
+      if (!container) return;
+
+      const term = await createIsolatedTerminal({ cols: 12, rows: 3 });
+      term.open(container);
+      try {
+        let transitions = 0;
+        term.onSelectionChange(() => transitions++);
+
+        term.select(1, 0, 3);
+        term.select(1, 0, 3);
+        expect(transitions).toBe(1);
+
+        term.selectLines(0, 1);
+        term.selectLines(1, 0);
+        expect(transitions).toBe(2);
+
+        term.clearSelection();
+        term.clearSelection();
+        expect(transitions).toBe(3);
+      } finally {
+        term.dispose();
+      }
+    });
+
+    test('commits selection state before reentrant listeners mutate it', async () => {
+      if (!container) return;
+
+      const term = await createIsolatedTerminal({ cols: 12, rows: 3 });
+      term.open(container);
+      try {
+        const observedStates: boolean[] = [];
+        term.onSelectionChange(() => {
+          observedStates.push(term.hasSelection());
+          if (term.hasSelection()) term.clearSelection();
+        });
+
+        term.select(0, 0, 2);
+
+        expect(observedStates).toEqual([true, false]);
+        expect(term.hasSelection()).toBe(false);
+      } finally {
+        term.dispose();
+      }
+    });
+
+    test('publishes drag boundary changes without a duplicate mouseup event', async () => {
+      if (!container) return;
+
+      const term = await createIsolatedTerminal({ cols: 12, rows: 3 });
+      term.open(container);
+      try {
+        const canvas = term.renderer!.getCanvas();
+        Object.defineProperty(canvas, 'clientHeight', { configurable: true, value: 500 });
+        let transitions = 0;
+        term.onSelectionChange(() => transitions++);
+        const mouseOnCanvas = (type: string, offsetX: number, offsetY: number): MouseEvent => {
+          const event = new MouseEvent(type, { button: 0, bubbles: true });
+          Object.defineProperties(event, {
+            offsetX: { configurable: true, value: offsetX },
+            offsetY: { configurable: true, value: offsetY },
+          });
+          return event;
+        };
+
+        canvas.dispatchEvent(mouseOnCanvas('mousedown', 1, 40));
+        canvas.dispatchEvent(mouseOnCanvas('mousemove', 20, 40));
+        expect(transitions).toBe(1);
+
+        // Repeating the same endpoint does not describe a new public state.
+        canvas.dispatchEvent(mouseOnCanvas('mousemove', 20, 40));
+        expect(transitions).toBe(1);
+
+        canvas.dispatchEvent(mouseOnCanvas('mousemove', 35, 40));
+        expect(transitions).toBe(2);
+
+        document.dispatchEvent(
+          new MouseEvent('mouseup', { button: 0, bubbles: true, clientX: 35, clientY: 40 })
+        );
+        expect(term.hasSelection()).toBe(true);
+        expect(transitions).toBe(2);
+      } finally {
+        term.dispose();
+      }
+    });
   });
 
   describe('scrollback content accuracy', () => {
