@@ -263,6 +263,148 @@ describe('SelectionManager', () => {
 
       term.dispose();
     });
+
+    test('copies a wide glyph once when either endpoint lands on its continuation cell', async () => {
+      if (!container) return;
+
+      const term = await createIsolatedTerminal({ cols: 12, rows: 3 });
+      term.open(container);
+      term.write('A界B');
+
+      const row = term.wasmTerm!.getScrollbackLength();
+      setSelectionAbsolute(term, 0, row, 3, row);
+      expect(term.getSelection()).toBe('A界B');
+
+      // The second column occupied by 界 is a width-zero continuation cell.
+      setSelectionAbsolute(term, 2, row, 2, row);
+      expect(term.getSelection()).toBe('界');
+
+      // Backward selections normalize before extracting the same grapheme.
+      setSelectionAbsolute(term, 2, row, 1, row);
+      expect(term.getSelection()).toBe('界');
+
+      term.dispose();
+    });
+
+    test('preserves complete decomposed and ZWJ graphemes in both directions', async () => {
+      if (!container) return;
+
+      const term = await createIsolatedTerminal({ cols: 12, rows: 3 });
+      term.open(container);
+      const graphemes = 'e\u0301👩‍💻';
+      term.write(`${graphemes}X`);
+
+      const row = term.wasmTerm!.getScrollbackLength();
+      setSelectionAbsolute(term, 0, row, 2, row);
+      expect(term.getSelection()).toBe(graphemes);
+
+      setSelectionAbsolute(term, 2, row, 0, row);
+      expect(term.getSelection()).toBe(graphemes);
+
+      term.dispose();
+    });
+
+    test('joins soft-wrapped rows and preserves hard line breaks and explicit spaces', async () => {
+      if (!container) return;
+
+      const term = await createIsolatedTerminal({ cols: 5, rows: 4 });
+      term.open(container);
+      term.write('abcd FG\r\nHI');
+
+      const row = term.wasmTerm!.getScrollbackLength();
+      expect(term.wasmTerm!.isBufferRowWrapped('normal', row + 1)).toBe(true);
+      expect(term.wasmTerm!.isBufferRowWrapped('normal', row + 2)).toBe(false);
+
+      setSelectionAbsolute(term, 0, row, 1, row + 2);
+      expect(term.getSelection()).toBe('abcd FG\nHI');
+
+      term.dispose();
+    });
+
+    test('joins a soft wrap across the scrollback and active-screen boundary', async () => {
+      if (!container) return;
+
+      const term = await createIsolatedTerminal({ cols: 5, rows: 2, scrollback: 20 });
+      term.open(container);
+      term.write('abcdeFGHIJK');
+
+      const info = term.wasmTerm!.getBufferInfo('normal')!;
+      expect(info.scrollbackLength).toBe(1);
+      expect(term.wasmTerm!.isBufferRowWrapped('normal', 1)).toBe(true);
+      expect(term.wasmTerm!.isBufferRowWrapped('normal', 2)).toBe(true);
+
+      setSelectionAbsolute(term, 0, 0, 0, 2);
+      expect(term.getSelection()).toBe('abcdeFGHIJK');
+
+      // The same absolute range extracts identically with backward endpoints.
+      setSelectionAbsolute(term, 0, 2, 0, 0);
+      expect(term.getSelection()).toBe('abcdeFGHIJK');
+
+      term.dispose();
+    });
+
+    test('copies Unicode text from the alternate screen through its named buffer', async () => {
+      if (!container) return;
+
+      const term = await createIsolatedTerminal({ cols: 12, rows: 3 });
+      term.open(container);
+      term.write('primary\x1b[?1049h\x1b[HA界B');
+      expect(term.wasmTerm!.isAlternateScreen()).toBe(true);
+      expect(term.wasmTerm!.getBufferInfo('alternate')).toMatchObject({
+        scrollbackLength: 0,
+        rows: 3,
+        cols: 12,
+      });
+      expect(
+        term
+          .wasmTerm!.getBufferLine('alternate', 0)!
+          .slice(0, 4)
+          .map((cell) => cell.codepoint)
+      ).toEqual(['A'.codePointAt(0), '界'.codePointAt(0), 0, 'B'.codePointAt(0)]);
+
+      setSelectionAbsolute(term, 0, 0, 3, 0);
+      expect(term.getSelectionPosition()).toEqual({
+        start: { x: 0, y: 0 },
+        end: { x: 3, y: 0 },
+      });
+      expect(term.getSelection()).toBe('A界B');
+
+      term.dispose();
+    });
+
+    test('preserves explicit and interior spaces while trimming null-cell padding', async () => {
+      if (!container) return;
+
+      const term = await createIsolatedTerminal({ cols: 8, rows: 2 });
+      term.open(container);
+      term.write('A\x1b[4GC  ');
+
+      setSelectionAbsolute(term, 0, 0, 7, 0);
+      expect(term.getSelection()).toBe('A  C  ');
+
+      term.dispose();
+    });
+
+    test('skips a wide spacer head when the glyph soft-wraps to the next row', async () => {
+      if (!container) return;
+
+      const term = await createIsolatedTerminal({ cols: 5, rows: 3 });
+      term.open(container);
+      term.write('abcd界X');
+
+      const first = term.wasmTerm!.getBufferLine('normal', 0)!;
+      const second = term.wasmTerm!.getBufferLine('normal', 1)!;
+      expect(first[4]).toMatchObject({ codepoint: 0, width: 0 });
+      expect(first[3].width).toBe(1);
+      expect(second[0].width).toBe(2);
+      expect(second[1].width).toBe(0);
+      expect(term.wasmTerm!.isBufferRowWrapped('normal', 1)).toBe(true);
+
+      setSelectionAbsolute(term, 0, 0, 2, 1);
+      expect(term.getSelection()).toBe('abcd界X');
+
+      term.dispose();
+    });
   });
 
   describe('Selection persistence during scroll', () => {

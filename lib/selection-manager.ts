@@ -11,7 +11,7 @@
  */
 
 import { EventEmitter } from './event-emitter';
-import type { GhosttyTerminal } from './ghostty';
+import type { GhosttyBufferType, GhosttyTerminal } from './ghostty';
 import type { IEvent } from './interfaces';
 import type { CanvasRenderer } from './renderer';
 import type { Terminal } from './terminal';
@@ -144,88 +144,71 @@ export class SelectionManager {
    * Get the selected text as a string
    */
   getSelection(): string {
-    if (!this.selectionStart || !this.selectionEnd) return '';
+    const selection = this.normalizeBufferSelection();
+    if (!selection) return '';
 
-    // Get absolute row coordinates (not clamped to viewport)
-    let { col: startCol, absoluteRow: startAbsRow } = this.selectionStart;
-    let { col: endCol, absoluteRow: endAbsRow } = this.selectionEnd;
+    const bufferType: GhosttyBufferType = this.wasmTerm.isAlternateScreen()
+      ? 'alternate'
+      : 'normal';
+    const bufferInfo = this.wasmTerm.getBufferInfo(bufferType);
+    if (!bufferInfo) return '';
 
-    // Swap if selection goes backwards
-    if (startAbsRow > endAbsRow || (startAbsRow === endAbsRow && startCol > endCol)) {
-      [startCol, endCol] = [endCol, startCol];
-      [startAbsRow, endAbsRow] = [endAbsRow, startAbsRow];
-    }
-
-    const scrollbackLength = this.wasmTerm.getScrollbackLength();
+    const { startRow, endRow } = selection;
     let text = '';
+    let refreshRenderState = true;
 
-    for (let absRow = startAbsRow; absRow <= endAbsRow; absRow++) {
-      // Fetch line based on absolute row position
-      // Absolute row < scrollbackLength means it's in scrollback
-      // Absolute row >= scrollbackLength means it's in the screen buffer
-      let line: GhosttyCell[] | null = null;
-
-      if (absRow < scrollbackLength) {
-        // Row is in scrollback
-        line = this.wasmTerm.getScrollbackLine(absRow);
-      } else {
-        // Row is in screen buffer
-        const screenRow = absRow - scrollbackLength;
-        line = this.wasmTerm.getLine(screenRow);
-      }
-
+    for (let absoluteRow = startRow; absoluteRow <= endRow; absoluteRow++) {
+      const line = this.wasmTerm.getBufferLine(bufferType, absoluteRow, refreshRenderState);
+      refreshRenderState = false;
       if (!line) continue;
 
-      // Track the last non-empty column for trimming trailing spaces
-      let lastNonEmpty = -1;
+      let colStart = absoluteRow === startRow ? selection.startCol : 0;
+      let colEnd = absoluteRow === endRow ? selection.endCol : line.length - 1;
+      colStart = this.normalizeWideEndpoint(line, colStart);
+      colEnd = this.normalizeWideEndpoint(line, colEnd);
 
-      // Determine column range for this row
-      const colStart = absRow === startAbsRow ? startCol : 0;
-      const colEnd = absRow === endAbsRow ? endCol : line.length - 1;
-
-      // Build the line text
       let lineText = '';
+      let contentEnd = 0;
       for (let col = colStart; col <= colEnd; col++) {
         const cell = line[col];
-        if (cell && cell.codepoint !== 0) {
-          // Use grapheme lookup for cells with multi-codepoint characters
-          let char: string;
-          if (cell.grapheme_len > 0) {
-            // Row is in scrollback or screen - determine which and use appropriate method
-            if (absRow < scrollbackLength) {
-              char = this.wasmTerm.getScrollbackGraphemeString(absRow, col);
-            } else {
-              const screenRow = absRow - scrollbackLength;
-              char = this.wasmTerm.getGraphemeString(screenRow, col);
-            }
-          } else {
-            char = String.fromCodePoint(cell.codepoint);
-          }
-          lineText += char;
-          if (char.trim()) {
-            lastNonEmpty = lineText.length;
-          }
-        } else {
+        if (!cell || cell.width === 0) continue;
+
+        if (cell.codepoint === 0) {
           lineText += ' ';
+          continue;
         }
+
+        const codepoints =
+          cell.grapheme_len > 0
+            ? this.wasmTerm.getBufferGrapheme(bufferType, absoluteRow, col)
+            : null;
+        lineText += codepoints?.length
+          ? String.fromCodePoint(...codepoints)
+          : String.fromCodePoint(cell.codepoint);
+        // A real terminal character, including an explicit U+0020, is content.
+        // Only null-cell padding at the right edge should be trimmed.
+        contentEnd = lineText.length;
       }
 
-      // Trim trailing spaces from each line
-      if (lastNonEmpty >= 0) {
-        lineText = lineText.substring(0, lastNonEmpty);
-      } else {
-        lineText = '';
-      }
+      text += lineText.substring(0, contentEnd);
 
-      text += lineText;
-
-      // Add newline between rows (but not after the last row)
-      if (absRow < endAbsRow) {
+      // Wrap metadata belongs to the continuation row. A hard row boundary is
+      // copied as a newline; a physical row created by soft wrapping is joined.
+      if (absoluteRow < endRow && !this.wasmTerm.isBufferRowWrapped(bufferType, absoluteRow + 1)) {
         text += '\n';
       }
     }
 
     return text;
+  }
+
+  /** Map a wide glyph's continuation column back to its authoritative head cell. */
+  private normalizeWideEndpoint(line: GhosttyCell[], col: number): number {
+    const clamped = Math.max(0, Math.min(Math.trunc(col), line.length - 1));
+    if (clamped > 0 && line[clamped]?.width === 0 && line[clamped - 1]?.width === 2) {
+      return clamped - 1;
+    }
+    return clamped;
   }
 
   /**
