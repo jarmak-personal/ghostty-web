@@ -53,21 +53,21 @@
       fitAddon.fit();
 
       // Write lots of lines to create scrollback
-      term.write('\\x1b[1;32m=== Scrollbar Test ===\\x1b[0m\\r\\n\\r\\n');
-      term.write('Generating 200 lines of content...\\r\\n\\r\\n');
+      term.write('\x1b[1;32m=== Scrollbar Test ===\x1b[0m\r\n\r\n');
+      term.write('Generating 200 lines of content...\r\n\r\n');
 
       for (let i = 1; i <= 200; i++) {
         const color = 31 + (i % 7);
         term.write(
-          `\\x1b[${color}mLine ${i}: This is test content for scrolling. The quick brown fox jumps over the lazy dog.\\x1b[0m\\r\\n`
+          `\x1b[${color}mLine ${i}: This is test content for scrolling. The quick brown fox jumps over the lazy dog.\x1b[0m\r\n`
         );
       }
 
-      term.write('\\r\\n\\x1b[1;33m✅ Done! Now try:\\x1b[0m\\r\\n');
-      term.write('  • Scroll up with mouse wheel\\r\\n');
-      term.write('  • Click on the scrollbar track to jump\\r\\n');
-      term.write('  • Drag the scrollbar thumb\\r\\n');
-      term.write('  • Notice: NO blue banner! 🎉\\r\\n');
+      term.write('\r\n\x1b[1;33m✅ Done! Now try:\x1b[0m\r\n');
+      term.write('  • Scroll up with mouse wheel\r\n');
+      term.write('  • Click on the scrollbar track to jump\r\n');
+      term.write('  • Drag the scrollbar thumb\r\n');
+      term.write('  • Notice: NO blue banner! 🎉\r\n');
 
       // Handle window resize
       window.addEventListener('resize', () => {
