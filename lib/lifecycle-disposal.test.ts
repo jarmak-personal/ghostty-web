@@ -218,6 +218,7 @@ describe('lifecycle disposal', () => {
       return false;
     });
     const documentTracker = trackListeners(document);
+    const windowTracker = trackListeners(window);
     let terminalCreates = 0;
     let terminalFrees = 0;
     let encoderCreates = 0;
@@ -247,6 +248,7 @@ describe('lifecycle disposal', () => {
       expect(host.childNodes).toHaveLength(0);
       expect(hostTracker.active).toHaveLength(0);
       expect(documentTracker.active).toHaveLength(0);
+      expect(windowTracker.active).toHaveLength(0);
       expect(childTrackers.every((tracker) => tracker.active.length === 0)).toBe(true);
       expect(terminalFrees).toBe(1);
       expect(encoderFrees).toBe(1);
@@ -258,6 +260,7 @@ describe('lifecycle disposal', () => {
       expect(host.childNodes).toHaveLength(0);
       expect(hostTracker.active).toHaveLength(0);
       expect(documentTracker.active).toHaveLength(0);
+      expect(windowTracker.active).toHaveLength(0);
       expect(childTrackers.every((tracker) => tracker.active.length === 0)).toBe(true);
       expect(terminalCreates).toBe(2);
       expect(terminalFrees).toBe(2);
@@ -278,6 +281,7 @@ describe('lifecycle disposal', () => {
       terminal.dispose();
       hostTracker.restore();
       documentTracker.restore();
+      windowTracker.restore();
       for (const tracker of childTrackers) tracker.restore();
       document.createElement = originalCreateElement;
       host.remove();

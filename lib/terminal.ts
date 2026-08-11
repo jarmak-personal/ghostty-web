@@ -181,6 +181,7 @@ export class Terminal implements ITerminalCore {
   private renderRequests = 0;
   private renderFrames = 0;
   private fullRenderFrames = 0;
+  private devicePixelRatioChanged = false;
   private writeQueue: Uint8Array[] = [];
   private synchronizedOutputActive = false;
   private synchronizedOutputGeneration = 0;
@@ -541,6 +542,9 @@ export class Terminal implements ITerminalCore {
         fontLigatures: this.options.fontLigatures,
         theme: this.options.theme,
         requestRender: (forceAll = false) => this.requestRender(forceAll),
+        onDevicePixelRatioChange: () => {
+          this.devicePixelRatioChanged = true;
+        },
       });
       this.renderer.setRenderPaused(this.renderPaused);
 
@@ -1701,6 +1705,17 @@ export class Terminal implements ITerminalCore {
       }
       for (const range of renderedRanges) {
         this.renderEmitter.fire(range);
+      }
+      if (this.devicePixelRatioChanged) {
+        this.devicePixelRatioChanged = false;
+        for (const addon of [...this.addons]) {
+          if (this.isDisposed || !this.isOpen) break;
+          try {
+            addon.onDevicePixelRatioChange?.();
+          } catch (error) {
+            console.error('Addon DPR-change handler failed:', error);
+          }
+        }
       }
     });
   }

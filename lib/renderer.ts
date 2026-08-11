@@ -58,6 +58,7 @@ export interface RendererOptions {
   theme?: ITheme;
   devicePixelRatio?: number; // Default: window.devicePixelRatio
   requestRender?: (forceAll?: boolean) => void;
+  onDevicePixelRatioChange?: () => void;
 }
 
 export interface FontMetrics {
@@ -188,8 +189,13 @@ export class CanvasRenderer {
   private theme: Required<ITheme>;
   private effectiveColors: RenderStateColors;
   private devicePixelRatio: number;
+  private readonly tracksWindowDevicePixelRatio: boolean;
+  private resolutionMediaQuery?: MediaQueryList;
+  private resolutionMediaQueryUsesLegacyListener = false;
+  private disposed = false;
   private metrics: FontMetrics;
   private requestRender: (forceAll?: boolean) => void;
+  private onDevicePixelRatioChange: () => void;
   private renderPaused = false;
   private frameStats: RendererFrameStats = { ...EMPTY_FRAME_STATS };
   private renderedRowRanges: RendererRowRange[] = [];
@@ -239,6 +245,7 @@ export class CanvasRenderer {
     }
     this.ctx = ctx;
     this.requestRender = options.requestRender ?? (() => {});
+    this.onDevicePixelRatioChange = options.onDevicePixelRatioChange ?? (() => {});
 
     // Apply options
     this.fontSize = options.fontSize ?? 15;
@@ -252,10 +259,18 @@ export class CanvasRenderer {
       cursor: themeRgb(this.theme.cursor),
       palette: ANSI_THEME_KEYS.map((key) => themeRgb(this.theme[key])),
     };
-    this.devicePixelRatio = options.devicePixelRatio ?? window.devicePixelRatio ?? 1;
+    this.tracksWindowDevicePixelRatio = options.devicePixelRatio === undefined;
+    this.devicePixelRatio = this.normalizeDevicePixelRatio(
+      options.devicePixelRatio ?? window.devicePixelRatio
+    );
 
     // Measure font metrics
     this.metrics = this.measureFont();
+
+    if (this.tracksWindowDevicePixelRatio) {
+      window.addEventListener('resize', this.handleDevicePixelRatioSignal);
+      this.watchCurrentResolution();
+    }
   }
 
   // ==========================================================================
@@ -298,6 +313,68 @@ export class CanvasRenderer {
     this.glyphAdvanceCache.clear();
     this.metrics = this.measureFont();
     this.requestRender();
+  }
+
+  private normalizeDevicePixelRatio(value: unknown): number {
+    return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 1;
+  }
+
+  private readWindowDevicePixelRatio(): number {
+    return this.normalizeDevicePixelRatio(window.devicePixelRatio);
+  }
+
+  /**
+   * A resolution media query reports zoom and cross-display transitions even
+   * when the window's CSS dimensions do not change. The resize listener is a
+   * fallback for engines that do not dispatch resolution-query changes.
+   */
+  private watchCurrentResolution(): void {
+    this.unwatchCurrentResolution();
+    if (this.disposed || typeof window.matchMedia !== 'function') return;
+
+    this.resolutionMediaQuery = window.matchMedia(`(resolution: ${this.devicePixelRatio}dppx)`);
+    if (typeof this.resolutionMediaQuery.addEventListener === 'function') {
+      this.resolutionMediaQuery.addEventListener('change', this.handleDevicePixelRatioSignal);
+      return;
+    }
+    if (typeof this.resolutionMediaQuery.addListener === 'function') {
+      this.resolutionMediaQuery.addListener(this.handleDevicePixelRatioSignal);
+      this.resolutionMediaQueryUsesLegacyListener = true;
+      return;
+    }
+    this.resolutionMediaQuery = undefined;
+  }
+
+  private unwatchCurrentResolution(): void {
+    if (this.resolutionMediaQueryUsesLegacyListener) {
+      this.resolutionMediaQuery?.removeListener?.(this.handleDevicePixelRatioSignal);
+    } else {
+      this.resolutionMediaQuery?.removeEventListener?.('change', this.handleDevicePixelRatioSignal);
+    }
+    this.resolutionMediaQuery = undefined;
+    this.resolutionMediaQueryUsesLegacyListener = false;
+  }
+
+  private handleDevicePixelRatioSignal = (): void => {
+    if (this.disposed || this.readWindowDevicePixelRatio() === this.devicePixelRatio) return;
+    // Keep the old canvas intact until the next presentation callback can
+    // remeasure, resize, rescale, and repaint it as one operation.
+    this.requestRender(true);
+  };
+
+  /** Apply a pending browser DPR transition at the start of a Canvas frame. */
+  private refreshDevicePixelRatio(): boolean {
+    if (!this.tracksWindowDevicePixelRatio) return false;
+
+    const nextDevicePixelRatio = this.readWindowDevicePixelRatio();
+    if (nextDevicePixelRatio === this.devicePixelRatio) return false;
+
+    this.devicePixelRatio = nextDevicePixelRatio;
+    this.glyphAdvanceCache.clear();
+    this.metrics = this.measureFont();
+    this.watchCurrentResolution();
+    this.onDevicePixelRatioChange();
+    return true;
   }
 
   // ==========================================================================
@@ -362,6 +439,8 @@ export class CanvasRenderer {
     scrollbackProvider?: IScrollbackProvider,
     scrollbarOpacity: number = 1
   ): RenderStateCursor {
+    const devicePixelRatioChanged = this.refreshDevicePixelRatio();
+    if (devicePixelRatioChanged) forceAll = true;
     this.frameStats = { ...EMPTY_FRAME_STATS };
     this.renderedRowRanges = [];
     // Store buffer reference for grapheme lookups in renderCell
@@ -382,6 +461,7 @@ export class CanvasRenderer {
 
     // Resize canvas if dimensions changed
     const needsResize =
+      devicePixelRatioChanged ||
       this.canvas.width !== this.toDevicePixels(dims.cols * this.metrics.width) ||
       this.canvas.height !== this.toDevicePixels(dims.rows * this.metrics.height);
 
@@ -1418,6 +1498,10 @@ export class CanvasRenderer {
    * Cleanup resources
    */
   public dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    window.removeEventListener('resize', this.handleDevicePixelRatioSignal);
+    this.unwatchCurrentResolution();
     this.stopCursorBlink();
   }
 }

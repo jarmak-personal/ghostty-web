@@ -160,6 +160,33 @@ describe('FitAddon', () => {
     addon.fit();
     expect(resizeCallCount).toBe(0); // Still 0 because no element
   });
+
+  test('re-fits when DPR-aligned renderer metrics change', () => {
+    const mockElement = document.createElement('div');
+    Object.defineProperty(mockElement, 'clientWidth', { value: 900, configurable: true });
+    Object.defineProperty(mockElement, 'clientHeight', { value: 480, configurable: true });
+    let cellWidth = 9;
+    const mockTerminal = {
+      cols: 80,
+      rows: 24,
+      element: mockElement,
+      renderer: {
+        getMetrics: () => ({ width: cellWidth, height: 16, baseline: 12 }),
+      },
+      resize: (cols: number, rows: number) => {
+        mockTerminal.cols = cols;
+        mockTerminal.rows = rows;
+      },
+    };
+    addon.activate(mockTerminal as any);
+
+    addon.fit();
+    expect({ cols: mockTerminal.cols, rows: mockTerminal.rows }).toEqual({ cols: 98, rows: 30 });
+
+    cellWidth = 10;
+    addon.onDevicePixelRatioChange();
+    expect({ cols: mockTerminal.cols, rows: mockTerminal.rows }).toEqual({ cols: 88, rows: 30 });
+  });
 });
 
 // ==========================================================================
