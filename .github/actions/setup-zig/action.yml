@@ -52,7 +52,7 @@ runs:
         echo "url=https://ziglang.org/download/${VERSION}/${TARBALL}" >> "$GITHUB_OUTPUT"
 
     - name: Cache pinned Zig archive
-      uses: actions/cache@v4
+      uses: actions/cache@v6
       id: cache-zig
       with:
         path: ${{ runner.temp }}/ghostty-web-zig-cache/${{ steps.archive.outputs.tarball }}

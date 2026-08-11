@@ -64,6 +64,7 @@ describe('setup-zig action integrity', () => {
   test('binds the cache key to the pinned digest and verifies every restore', async () => {
     const action = await readFile(join(actionDirectory, 'action.yml'), 'utf8');
 
+    expect(action).toContain('uses: actions/cache@v6');
     expect(action).toContain('${{ steps.archive.outputs.sha256 }}');
     expect(action).toContain('verify-archive.sh');
     expect(action.indexOf('verify-archive.sh')).toBeLessThan(action.indexOf('tar -xf'));

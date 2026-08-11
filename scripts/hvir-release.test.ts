@@ -5,6 +5,7 @@ import {
   type CompatibilityTagRecord,
   parseCompatibilityTag,
   planPublication,
+  pollRemoteState,
   type RemoteRelease,
   selectReleaseFromPages,
   selectReleasePlan,
@@ -44,6 +45,66 @@ function release(overrides: Partial<RemoteRelease> = {}): RemoteRelease {
     ...overrides,
   };
 }
+
+describe('remote state polling', () => {
+  test('returns immediately when the first read is ready', async () => {
+    const sleeps: number[] = [];
+    const value = await pollRemoteState(
+      () => 'ready',
+      (result) => result === 'ready',
+      {
+        delays: [1, 2],
+        sleep: async (delayMs) => {
+          sleeps.push(delayMs);
+        },
+      }
+    );
+
+    expect(value).toBe('ready');
+    expect(sleeps).toEqual([]);
+  });
+
+  test('backs off across transient reads until the remote state is ready', async () => {
+    const values = [undefined, undefined, source];
+    const sleeps: number[] = [];
+    const value = await pollRemoteState(
+      () => values.shift(),
+      (result) => result !== undefined,
+      {
+        delays: [1, 2, 4],
+        sleep: async (delayMs) => {
+          sleeps.push(delayMs);
+        },
+      }
+    );
+
+    expect(value).toBe(source);
+    expect(sleeps).toEqual([1, 2]);
+  });
+
+  test('waits for a published release to become immutable', async () => {
+    const releases = [release({ immutable: false }), release()];
+    const value = await pollRemoteState(
+      () => releases.shift(),
+      (result) => result !== undefined && !result.draft && result.immutable,
+      { delays: [1], sleep: async () => {} }
+    );
+
+    expect(value?.immutable).toBeTrue();
+  });
+
+  test('returns the final observation when the retry budget is exhausted', async () => {
+    let reads = 0;
+    const value = await pollRemoteState(
+      () => ++reads,
+      () => false,
+      { delays: [1, 2], sleep: async () => {} }
+    );
+
+    expect(value).toBe(3);
+    expect(reads).toBe(3);
+  });
+});
 
 describe('hvir release tag planning', () => {
   test('parses only canonical compatibility tags', () => {
