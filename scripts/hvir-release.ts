@@ -5,6 +5,7 @@ import { basename, join } from 'node:path';
 
 const COMPATIBILITY_TAG = /^hvir-v([0-9]+\.[0-9]+\.[0-9]+)-([1-9][0-9]*)$/;
 const COMMIT_SHA = /^[0-9a-f]{40}$/;
+const REMOTE_STATE_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 32_000] as const;
 
 interface CommandResult {
   exitCode: number;
@@ -67,6 +68,12 @@ interface ExpectedAsset extends AssetIdentity {
   path: string;
 }
 
+interface PollOptions {
+  delays?: readonly number[];
+  description?: string;
+  sleep?: (delayMs: number) => Promise<void>;
+}
+
 function execute(command: string, args: string[], allowFailure = false): CommandResult {
   const result = Bun.spawnSync([command, ...args], {
     cwd: process.cwd(),
@@ -99,6 +106,39 @@ function requireCommit(name: string, value: string): void {
   if (!COMMIT_SHA.test(value)) {
     throw new Error(`${name} must be a full lowercase Git commit SHA, received '${value}'.`);
   }
+}
+
+export async function pollRemoteState<T>(
+  read: () => T | Promise<T>,
+  ready: (value: T) => boolean,
+  options: PollOptions = {}
+): Promise<T> {
+  const delays = options.delays ?? REMOTE_STATE_RETRY_DELAYS_MS;
+  const sleep = options.sleep ?? Bun.sleep;
+  let lastError: unknown;
+  let lastAttemptFailed = false;
+  let value!: T;
+
+  for (let attempt = 0; attempt <= delays.length; attempt++) {
+    try {
+      value = await read();
+      lastAttemptFailed = false;
+      if (ready(value)) return value;
+    } catch (error) {
+      lastError = error;
+      lastAttemptFailed = true;
+    }
+
+    if (attempt === delays.length) break;
+    const delayMs = delays[attempt];
+    if (options.description) {
+      console.log(`Waiting ${delayMs}ms for ${options.description}...`);
+    }
+    await sleep(delayMs);
+  }
+
+  if (lastAttemptFailed) throw lastError;
+  return value;
 }
 
 export function parseCompatibilityTag(name: string): ParsedCompatibilityTag | undefined {
@@ -270,6 +310,23 @@ export function planPublication(
   return { action: 'resume-draft', discardAssetIds, missingAssets };
 }
 
+export function remoteTagIsVisible(commit: string | undefined): boolean {
+  return commit !== undefined;
+}
+
+export function draftReleaseIsComplete(
+  release: RemoteRelease | undefined,
+  expectedAssets: AssetIdentity[]
+): boolean {
+  if (!release) return false;
+  const plan = planPublication(release, expectedAssets);
+  return plan.action !== 'resume-draft' || plan.missingAssets.length === 0;
+}
+
+export function releaseIsPublishedImmutable(release: RemoteRelease | undefined): boolean {
+  return release !== undefined && !release.draft && release.immutable;
+}
+
 export function selectReleaseForTag(
   releases: RemoteRelease[],
   tag: string
@@ -419,6 +476,16 @@ function getRelease(repository: string, tag: string): RemoteRelease | undefined 
   return selectReleaseFromPages(pages, tag);
 }
 
+function getLatestReleaseTag(repository: string): string {
+  const release = JSON.parse(
+    execute('gh', ['api', `repos/${repository}/releases/latest`]).stdout
+  ) as { tag_name?: unknown };
+  if (typeof release.tag_name !== 'string') {
+    throw new Error('GitHub returned an invalid latest release.');
+  }
+  return release.tag_name;
+}
+
 async function expectedAsset(path: string): Promise<ExpectedAsset> {
   const bytes = await readFile(path);
   const digest = createHash('sha256').update(bytes).digest('hex');
@@ -476,8 +543,17 @@ async function publishCommand(): Promise<void> {
   if (!remoteTagCommit) {
     createRemoteTag(repository, tag, sourceCommit);
   }
-  if (getRemoteTagCommit(repository, tag) !== sourceCommit) {
-    throw new Error(`Remote tag ${tag} was not created at ${sourceCommit}.`);
+  const publishedTagCommit = await pollRemoteState(
+    () => getRemoteTagCommit(repository, tag),
+    remoteTagIsVisible,
+    { description: `tag ${tag} to become visible` }
+  );
+  if (publishedTagCommit !== sourceCommit) {
+    throw new Error(
+      publishedTagCommit
+        ? `Remote tag ${tag} resolves to ${publishedTagCommit}, not ${sourceCommit}.`
+        : `Remote tag ${tag} was not created at ${sourceCommit}.`
+    );
   }
 
   const assets = await Promise.all([
@@ -525,7 +601,12 @@ async function publishCommand(): Promise<void> {
         repository,
       ]);
     }
-    const completedDraft = planPublication(getRelease(repository, tag), assets);
+    const completedDraftRelease = await pollRemoteState(
+      () => getRelease(repository, tag),
+      (release) => draftReleaseIsComplete(release, assets),
+      { description: `draft release ${tag} assets to finish uploading` }
+    );
+    const completedDraft = planPublication(completedDraftRelease, assets);
     if (completedDraft.action !== 'resume-draft' || completedDraft.missingAssets.length !== 0) {
       throw new Error(`Draft release ${tag} does not contain the complete reproducible payload.`);
     }
@@ -545,18 +626,33 @@ async function publishCommand(): Promise<void> {
     publishedNow = true;
   }
 
-  const finalPlan = planPublication(getRelease(repository, tag), assets);
+  const publishedRelease = await pollRemoteState(
+    () => getRelease(repository, tag),
+    releaseIsPublishedImmutable,
+    { description: `release ${tag} to become immutable` }
+  );
+  const finalPlan = planPublication(publishedRelease, assets);
   if (finalPlan.action !== 'verify-published') {
     throw new Error(`Release ${tag} was not published immutably.`);
   }
-  const verification = execute('gh', ['release', 'verify', tag, '--repo', repository]);
+  const verification = await pollRemoteState(
+    () => execute('gh', ['release', 'verify', tag, '--repo', repository], true),
+    (result) => result.exitCode === 0,
+    { description: `release ${tag} attestation to become verifiable` }
+  );
+  if (verification.exitCode !== 0) {
+    const diagnostic = verification.stderr || verification.stdout;
+    throw new Error(`Unable to verify immutable release ${tag}: ${diagnostic}`);
+  }
   if (verification.stdout) console.log(verification.stdout);
 
   if (publishedNow) {
-    const latest = JSON.parse(
-      execute('gh', ['api', `repos/${repository}/releases/latest`]).stdout
-    ) as { tag_name: string };
-    if (latest.tag_name !== tag) {
+    const latestTag = await pollRemoteState(
+      () => getLatestReleaseTag(repository),
+      (latestTag) => latestTag === tag,
+      { description: `release ${tag} to become latest` }
+    );
+    if (latestTag !== tag) {
       throw new Error(`Published release ${tag} did not become the repository's latest release.`);
     }
     console.log(`Published immutable release ${tag} from ${sourceCommit}.`);
