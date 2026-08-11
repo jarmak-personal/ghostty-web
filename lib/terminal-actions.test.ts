@@ -138,7 +138,7 @@ describe('host-owned terminal actions', () => {
         );
       }
       expect(ptyInput.length).toBe(2);
-      expect(document.activeElement).toBe(terminal.element);
+      expect(document.activeElement).toBe(terminal.textarea);
 
       ptyInput.length = 0;
       terminal.element!.dispatchEvent(

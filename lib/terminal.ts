@@ -38,7 +38,7 @@ import type {
   IUnicodeVersionProvider,
 } from './interfaces';
 import { LinkDetector } from './link-detector';
-import { normalizeTheme, themeToTerminalConfig } from './palette';
+import { DEFAULT_THEME, normalizeTheme, themeToTerminalConfig } from './palette';
 import { encodePaste } from './paste';
 import { OSC8LinkProvider } from './providers/osc8-link-provider';
 import { UrlRegexProvider } from './providers/url-regex-provider';
@@ -119,7 +119,9 @@ export class Terminal implements ITerminalCore {
 
   // Listener references and host state owned by open(). Keeping these explicit
   // makes both successful disposal and partial-open rollback symmetric.
-  private beforeInputListener?: (event: InputEvent) => void;
+  private hostFocusListener?: () => void;
+  private inputFocusListener?: () => void;
+  private inputBlurListener?: () => void;
   private canvasMouseDownListener?: (event: MouseEvent) => void;
   private canvasTouchEndListener?: (event: TouchEvent) => void;
   private hostMouseDownListenerAttached = false;
@@ -133,6 +135,7 @@ export class Terminal implements ITerminalCore {
     element: HTMLElement;
     attributes: Map<string, string | null>;
     outline: string;
+    outlineOffset: string;
     cursor: string;
   };
 
@@ -399,7 +402,48 @@ export class Terminal implements ITerminalCore {
       throw new Error('Failed to apply terminal palette');
     }
     this.renderer.setTheme(theme);
+    this.updateFocusAppearance(theme);
     this.requestRender(true);
+  }
+
+  /**
+   * Reflect the canonical input's native :focus-visible semantics on the
+   * visible host. Browsers intentionally treat a focused text-entry control as
+   * focus-visible after keyboard, pointer, and touch activation because each
+   * interaction can lead to typing.
+   */
+  private updateFocusAppearance(theme: ITheme = this.options.theme): void {
+    if (!this.hostState || !this.textarea) return;
+
+    const root = this.textarea.getRootNode();
+    const activeElement = (root as Document | ShadowRoot).activeElement ?? document.activeElement;
+    const focusVisible = activeElement === this.textarea;
+
+    if (focusVisible) {
+      this.hostState.element.style.outline = `2px solid ${theme.foreground ?? DEFAULT_THEME.foreground}`;
+      this.hostState.element.style.outlineOffset = '2px';
+    } else {
+      this.restoreHostOutline();
+    }
+  }
+
+  private restoreHostOutline(): void {
+    if (!this.hostState) return;
+    this.hostState.element.style.outline = this.hostState.outline;
+    this.hostState.element.style.outlineOffset = this.hostState.outlineOffset;
+  }
+
+  /**
+   * Focus the sole browser input target. Keeping this path centralized lets
+   * future touch gesture and assistive-input layers decide when to request the
+   * mobile keyboard without creating another focus owner.
+   */
+  private focusInputTarget(): void {
+    if (!this.isOpen) return;
+    this.textarea?.focus({ preventScroll: true });
+    // Some DOM implementations update a shadow root's activeElement after the
+    // focus event itself; reconcile once more after focus() returns.
+    this.updateFocusAppearance();
   }
 
   /**
@@ -451,37 +495,34 @@ export class Terminal implements ITerminalCore {
     this.hostState = {
       element: parent,
       attributes: new Map(
-        ['tabindex', 'contenteditable', 'role', 'aria-label', 'aria-multiline'].map((name) => [
-          name,
-          parent.getAttribute(name),
-        ])
+        [
+          'tabindex',
+          'contenteditable',
+          'role',
+          'aria-label',
+          'aria-labelledby',
+          'aria-multiline',
+        ].map((name) => [name, parent.getAttribute(name)])
       ),
       outline: parent.style.outline,
+      outlineOffset: parent.style.outlineOffset,
       cursor: parent.style.cursor,
     };
 
     try {
-      // Make parent focusable if it isn't already
-      if (!parent.hasAttribute('tabindex')) {
-        parent.setAttribute('tabindex', '0');
-      }
+      // The hidden textarea is the sole sequential and semantic input target.
+      // Keep the visible host programmatically addressable for compatibility,
+      // while removing it from tab order and native editing.
+      parent.setAttribute('tabindex', '-1');
+      parent.setAttribute('contenteditable', 'false');
 
-      // Mark as contenteditable so browser extensions (Vimium, etc.) recognize
-      // this as an input element and don't intercept keyboard events.
-      parent.setAttribute('contenteditable', 'true');
-      // Prevent actual content editing - we handle input ourselves
-      const beforeInputListener = (e: InputEvent) => {
-        if (e.target === parent) {
-          e.preventDefault();
-        }
-      };
-      parent.addEventListener('beforeinput', beforeInputListener);
-      this.beforeInputListener = beforeInputListener;
-
-      // Add accessibility attributes for screen readers and extensions
-      parent.setAttribute('role', 'textbox');
-      parent.setAttribute('aria-label', 'Terminal input');
-      parent.setAttribute('aria-multiline', 'true');
+      // Avoid exposing a second labelled textbox. The canonical textarea owns
+      // these semantics and remains the extension point for richer screen-reader
+      // support without changing focus ownership.
+      parent.removeAttribute('role');
+      parent.removeAttribute('aria-label');
+      parent.removeAttribute('aria-labelledby');
+      parent.removeAttribute('aria-multiline');
 
       // Create WASM terminal with current dimensions and config
       const config = this.buildWasmConfig();
@@ -491,6 +532,7 @@ export class Terminal implements ITerminalCore {
       this.canvas = document.createElement('canvas');
       this.canvas.style.display = 'block';
       this.canvas.style.cursor = 'text';
+      this.canvas.setAttribute('aria-hidden', 'true');
 
       parent.appendChild(this.canvas);
 
@@ -499,8 +541,16 @@ export class Terminal implements ITerminalCore {
       this.textarea.setAttribute('autocorrect', 'off');
       this.textarea.setAttribute('autocapitalize', 'off');
       this.textarea.setAttribute('spellcheck', 'false');
-      this.textarea.setAttribute('tabindex', '0'); // Allow focus for mobile keyboard
-      this.textarea.setAttribute('aria-label', 'Terminal input');
+      this.textarea.setAttribute('tabindex', '0');
+      const hostLabelledBy = this.hostState.attributes.get('aria-labelledby');
+      if (hostLabelledBy) {
+        this.textarea.setAttribute('aria-labelledby', hostLabelledBy);
+      } else {
+        this.textarea.setAttribute(
+          'aria-label',
+          this.hostState.attributes.get('aria-label') ?? 'Terminal input'
+        );
+      }
       // Use clip-path to completely hide the textarea and its caret
       this.textarea.style.position = 'absolute';
       this.textarea.style.left = '0';
@@ -515,22 +565,36 @@ export class Terminal implements ITerminalCore {
       this.textarea.style.overflow = 'hidden';
       this.textarea.style.whiteSpace = 'nowrap';
       this.textarea.style.resize = 'none';
+      this.textarea.style.pointerEvents = 'none';
+      this.textarea.style.zIndex = '-10';
       parent.appendChild(this.textarea);
 
+      // Redirect compatibility callers that focus `element` directly to the
+      // actual keyboard/IME receiver rather than leaving a second focus owner.
+      const hostFocusListener = () => this.focusInputTarget();
+      parent.addEventListener('focus', hostFocusListener);
+      this.hostFocusListener = hostFocusListener;
+
+      const inputFocusListener = () => this.updateFocusAppearance();
+      const inputBlurListener = () => this.restoreHostOutline();
+      this.textarea.addEventListener('focus', inputFocusListener);
+      this.textarea.addEventListener('blur', inputBlurListener);
+      this.inputFocusListener = inputFocusListener;
+      this.inputBlurListener = inputBlurListener;
+
       // Focus textarea on interaction - preventDefault before focus
-      const textarea = this.textarea;
       // Desktop: mousedown
       const canvasMouseDownListener = (ev: MouseEvent) => {
         if (ev.button !== 0) return;
         ev.preventDefault();
-        textarea.focus();
+        this.focusInputTarget();
       };
       this.canvas.addEventListener('mousedown', canvasMouseDownListener);
       this.canvasMouseDownListener = canvasMouseDownListener;
       // Mobile: touchend with preventDefault to suppress iOS caret
       const canvasTouchEndListener = (ev: TouchEvent) => {
         ev.preventDefault();
-        textarea.focus();
+        this.focusInputTarget();
       };
       this.canvas.addEventListener('touchend', canvasTouchEndListener);
       this.canvasTouchEndListener = canvasTouchEndListener;
@@ -618,7 +682,8 @@ export class Terminal implements ITerminalCore {
         this.wasmTerm,
         this.textarea,
         !disableContextMenu,
-        (event) => !(this.wasmTerm?.hasMouseTracking() ?? false) || event.shiftKey
+        (event) => !(this.wasmTerm?.hasMouseTracking() ?? false) || event.shiftKey,
+        () => this.focusInputTarget()
       );
 
       // Connect selection manager to renderer
@@ -942,16 +1007,17 @@ export class Terminal implements ITerminalCore {
    * Focus terminal input
    */
   focus(): void {
-    if (this.isOpen && this.element) {
+    if (this.isOpen && this.textarea) {
       // Focus immediately for immediate keyboard/wheel event handling
-      this.element.focus();
+      this.focusInputTarget();
 
       // Also schedule a delayed focus as backup to ensure it sticks
       // (some browsers may need this if DOM isn't fully settled)
       if (this.focusTimeout !== undefined) window.clearTimeout(this.focusTimeout);
+      const textarea = this.textarea;
       this.focusTimeout = window.setTimeout(() => {
         this.focusTimeout = undefined;
-        this.element?.focus();
+        if (this.isOpen && this.textarea === textarea) this.focusInputTarget();
       }, 0);
     }
   }
@@ -960,9 +1026,11 @@ export class Terminal implements ITerminalCore {
    * Blur terminal (remove focus)
    */
   blur(): void {
-    if (this.isOpen && this.element) {
-      this.element.blur();
+    if (this.focusTimeout !== undefined) {
+      window.clearTimeout(this.focusTimeout);
+      this.focusTimeout = undefined;
     }
+    if (this.isOpen) this.textarea?.blur();
   }
 
   /**
@@ -1766,6 +1834,15 @@ export class Terminal implements ITerminalCore {
     }
     this.canvasTouchEndListener = undefined;
 
+    if (this.textarea && this.inputFocusListener) {
+      this.textarea.removeEventListener('focus', this.inputFocusListener);
+    }
+    this.inputFocusListener = undefined;
+    if (this.textarea && this.inputBlurListener) {
+      this.textarea.removeEventListener('blur', this.inputBlurListener);
+    }
+    this.inputBlurListener = undefined;
+
     // Dispose renderer
     if (this.renderer) {
       this.renderer.dispose();
@@ -1786,8 +1863,8 @@ export class Terminal implements ITerminalCore {
 
     // Remove event listeners
     if (this.element) {
-      if (this.beforeInputListener) {
-        this.element.removeEventListener('beforeinput', this.beforeInputListener);
+      if (this.hostFocusListener) {
+        this.element.removeEventListener('focus', this.hostFocusListener);
       }
       if (this.hostWheelListenerAttached) {
         this.element.removeEventListener('wheel', this.handleWheel, { capture: true });
@@ -1805,7 +1882,7 @@ export class Terminal implements ITerminalCore {
         this.element.removeEventListener('click', this.handleClick);
       }
     }
-    this.beforeInputListener = undefined;
+    this.hostFocusListener = undefined;
     this.hostWheelListenerAttached = false;
     this.hostMouseDownListenerAttached = false;
     this.hostMouseMoveListenerAttached = false;
@@ -1846,7 +1923,7 @@ export class Terminal implements ITerminalCore {
         if (value === null) this.hostState.element.removeAttribute(name);
         else this.hostState.element.setAttribute(name, value);
       }
-      this.hostState.element.style.outline = this.hostState.outline;
+      this.restoreHostOutline();
       this.hostState.element.style.cursor = this.hostState.cursor;
       this.hostState = undefined;
     }

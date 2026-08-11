@@ -369,21 +369,6 @@ export class InputHandler {
    * Attach keyboard event listeners to container
    */
   private attach(): void {
-    // Make container focusable so it can receive keyboard events (browser only)
-    if (
-      typeof this.container.hasAttribute === 'function' &&
-      typeof this.container.setAttribute === 'function'
-    ) {
-      if (!this.container.hasAttribute('tabindex')) {
-        this.container.setAttribute('tabindex', '0');
-      }
-
-      // Add visual focus indication (only if style exists - for browser environments)
-      if (this.container.style) {
-        this.container.style.outline = 'none'; // Remove default outline
-      }
-    }
-
     this.keydownListener = this.handleKeyDown.bind(this);
     this.container.addEventListener('keydown', this.keydownListener);
 

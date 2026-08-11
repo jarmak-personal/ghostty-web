@@ -570,18 +570,18 @@ describe('blur()', () => {
       term.dispose();
     });
 
-    test('should call blur on element', async () => {
+    test('should call blur on the canonical input target', async () => {
       const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
       // Using shared container from beforeEach
       if (!container) return;
       term.open(container!);
 
       const blurSpy = { called: false };
-      if (term.element) {
-        const originalBlur = term.element.blur;
-        term.element.blur = () => {
+      if (term.textarea) {
+        const originalBlur = term.textarea.blur;
+        term.textarea.blur = () => {
           blurSpy.called = true;
-          originalBlur.call(term.element);
+          originalBlur.call(term.textarea);
         };
       }
 
@@ -3455,7 +3455,7 @@ describe('Synchronous open()', () => {
     term.open(container);
 
     expect(term.options.focusOnOpen).toBe(true);
-    expect(document.activeElement).toBe(container);
+    expect(document.activeElement).toBe(term.textarea);
 
     term.dispose();
   });
@@ -3476,7 +3476,7 @@ describe('Synchronous open()', () => {
       expect(document.activeElement).toBe(other);
 
       term.focus();
-      expect(document.activeElement).toBe(container);
+      expect(document.activeElement).toBe(term.textarea);
     } finally {
       term.dispose();
       other.remove();

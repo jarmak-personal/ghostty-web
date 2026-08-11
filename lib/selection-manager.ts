@@ -48,6 +48,7 @@ export class SelectionManager {
   private wasmTerm: GhosttyTerminal;
   private textarea: HTMLTextAreaElement;
   private shouldUseLocalMouse: (event: MouseEvent) => boolean;
+  private focusInputTarget: () => void;
 
   // Selection state - coordinates are in ABSOLUTE buffer space (viewportY + viewportRow)
   // This ensures selection persists correctly when scrolling
@@ -125,13 +126,15 @@ export class SelectionManager {
     wasmTerm: GhosttyTerminal,
     textarea: HTMLTextAreaElement,
     contextMenuEnabled: boolean = true,
-    shouldUseLocalMouse: (event: MouseEvent) => boolean = () => true
+    shouldUseLocalMouse: (event: MouseEvent) => boolean = () => true,
+    focusInputTarget: () => void = () => textarea.focus({ preventScroll: true })
   ) {
     this.terminal = terminal;
     this.renderer = renderer;
     this.wasmTerm = wasmTerm;
     this.textarea = textarea;
     this.shouldUseLocalMouse = shouldUseLocalMouse;
+    this.focusInputTarget = focusInputTarget;
 
     try {
       this.attachEventListeners(contextMenuEnabled);
@@ -413,10 +416,7 @@ export class SelectionManager {
    * Focus the terminal (make it receive keyboard input)
    */
   focus(): void {
-    const canvas = this.renderer.getCanvas();
-    if (canvas.parentElement) {
-      canvas.parentElement.focus();
-    }
+    this.focusInputTarget();
   }
 
   /**
@@ -527,11 +527,8 @@ export class SelectionManager {
       if (e.button === 0) {
         // Left click only
 
-        // CRITICAL: Focus the terminal so it can receive keyboard input
-        // The canvas doesn't have tabindex, but the parent container does
-        if (canvas.parentElement) {
-          canvas.parentElement.focus();
-        }
+        // Keep selection and keyboard/IME activation on the same input owner.
+        this.focusInputTarget();
 
         if (!this.shouldUseLocalMouse(e)) return;
 
@@ -799,7 +796,7 @@ export class SelectionManager {
         }
 
         // Focus the textarea so the context menu appears on it
-        this.textarea.focus();
+        this.focusInputTarget();
 
         // After a short delay, restore the textarea to its hidden state
         // This allows the context menu to appear first
