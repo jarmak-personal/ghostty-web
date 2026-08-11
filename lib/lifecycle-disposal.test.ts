@@ -205,8 +205,10 @@ describe('lifecycle disposal', () => {
     host.setAttribute('aria-label', 'Existing label');
     host.setAttribute('aria-multiline', 'false');
     host.style.outline = '1px dotted red';
+    host.style.outlineOffset = '3px';
     host.style.cursor = 'crosshair';
     const initialOutline = host.style.outline;
+    const initialOutlineOffset = host.style.outlineOffset;
     const initialCursor = host.style.cursor;
     document.body.appendChild(host);
 
@@ -272,6 +274,7 @@ describe('lifecycle disposal', () => {
       expect(host.getAttribute('aria-label')).toBe('Existing label');
       expect(host.getAttribute('aria-multiline')).toBe('false');
       expect(host.style.outline).toBe(initialOutline);
+      expect(host.style.outlineOffset).toBe(initialOutlineOffset);
       expect(host.style.cursor).toBe(initialCursor);
 
       const beforeInput = new InputEvent('beforeinput', { bubbles: true, cancelable: true });
