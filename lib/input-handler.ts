@@ -9,7 +9,6 @@
  * - Emitting data for Terminal to send to PTY
  *
  * Limitations:
- * - Does not handle IME/composition events (CJK input) - to be added later
  * - Captures all keyboard input (preventDefault on everything)
  */
 
@@ -229,6 +228,11 @@ export interface KeyboardProtocolState {
   modifyOtherKeysState2: boolean;
 }
 
+interface CompositionTransaction {
+  phase: 'active' | 'ended';
+  emittedData: string | null;
+}
+
 export class InputHandler {
   private encoder: KeyEncoder;
   private container: HTMLElement;
@@ -258,14 +262,12 @@ export class InputHandler {
   private mouseButtonsPressed = 0; // Track which buttons are pressed for motion reporting
   private locallyOwnedMouseButtons = 0; // Buttons reserved by a host/local-selection override
   private lastKeyDownData: string | null = null;
-  private lastKeyDownTime = 0;
   private lastPasteData: string | null = null;
   private lastPasteTime = 0;
   private lastPasteSource: 'paste' | 'beforeinput' | null = null;
-  private lastCompositionData: string | null = null;
-  private lastCompositionTime = 0;
   private lastBeforeInputData: string | null = null;
-  private lastBeforeInputTime = 0;
+  private compositionTransaction: CompositionTransaction | null = null;
+  private inputStateResetTimeout: ReturnType<typeof setTimeout> | undefined;
   private static readonly BEFORE_INPUT_IGNORE_MS = 100;
 
   /**
@@ -769,7 +771,10 @@ export class InputHandler {
   private handleBeforeInput(event: InputEvent): void {
     if (this.isDisposed) return;
 
-    if (this.isComposing || event.isComposing) {
+    // Pre-edit updates must remain browser-owned so the IME can maintain its
+    // candidate state in the textarea. A final insertFromComposition event has
+    // isComposing=false and is handled as the commit for this transaction.
+    if (event.isComposing) {
       return;
     }
 
@@ -780,6 +785,7 @@ export class InputHandler {
     switch (inputType) {
       case 'insertText':
       case 'insertReplacementText':
+      case 'insertFromComposition':
         output = data.length > 0 ? data.replace(/\n/g, '\r') : null;
         break;
       case 'insertLineBreak':
@@ -799,12 +805,14 @@ export class InputHandler {
         if (this.shouldIgnorePasteEvent(data, 'beforeinput')) {
           event.preventDefault();
           event.stopPropagation();
+          this.scheduleInputStateReset();
           return;
         }
         event.preventDefault();
         event.stopPropagation();
         this.emitPasteData(data);
         this.recordPasteData(data, 'beforeinput');
+        this.scheduleInputStateReset();
         return;
       default:
         return;
@@ -814,15 +822,41 @@ export class InputHandler {
       return;
     }
 
+    const composition = this.compositionTransaction;
+    const isCompositionTextCommit =
+      inputType === 'insertText' ||
+      inputType === 'insertReplacementText' ||
+      inputType === 'insertFromComposition';
+    if (composition?.phase === 'active' && isCompositionTextCommit) {
+      // Let the browser finish its native IME commit. Cancelling this event can
+      // leave candidate/pre-edit state open in Safari and Firefox; the deferred
+      // reset removes the committed textarea value after that work completes.
+      event.stopPropagation();
+      this.onDataCallback(output);
+      composition.emittedData = output;
+      this.scheduleInputStateReset();
+      return;
+    }
+    if (composition?.phase === 'active') return;
+
+    if (composition?.phase === 'ended') {
+      if (composition.emittedData === output) {
+        // This is the browser-owned commit corresponding to compositionend.
+        // Allow its default action to settle before the scheduled reset.
+        event.stopPropagation();
+        this.compositionTransaction = null;
+        this.scheduleInputStateReset();
+        return;
+      }
+      // A different beforeinput payload is a new transaction, not a duplicate
+      // of the composition that just ended.
+      this.compositionTransaction = null;
+    }
+
     if (this.shouldIgnoreBeforeInput(output)) {
       event.preventDefault();
       event.stopPropagation();
-      return;
-    }
-
-    if (data && this.shouldIgnoreBeforeInputFromComposition(data)) {
-      event.preventDefault();
-      event.stopPropagation();
+      this.scheduleInputStateReset();
       return;
     }
 
@@ -830,8 +864,9 @@ export class InputHandler {
     event.stopPropagation();
     this.onDataCallback(output);
     if (data) {
-      this.recordBeforeInputData(data);
+      this.lastBeforeInputData = output;
     }
+    this.scheduleInputStateReset();
   }
 
   /**
@@ -839,7 +874,11 @@ export class InputHandler {
    */
   private handleCompositionStart(_event: CompositionEvent): void {
     if (this.isDisposed) return;
+    this.cancelInputStateReset();
+    this.resetTextarea();
+    this.clearTransientInputState();
     this.isComposing = true;
+    this.compositionTransaction = { phase: 'active', emittedData: null };
   }
 
   /**
@@ -859,17 +898,30 @@ export class InputHandler {
     if (this.isDisposed) return;
     this.isComposing = false;
 
-    const data = event.data;
+    const data = event.data?.replace(/\n/g, '\r') ?? '';
+    const composition = this.compositionTransaction ?? {
+      phase: 'active' as const,
+      emittedData: null,
+    };
     if (data && data.length > 0) {
-      if (this.shouldIgnoreCompositionEnd(data)) {
-        this.cleanupCompositionTextNodes();
-        return;
+      if (composition.emittedData === null && this.lastBeforeInputData === data) {
+        composition.emittedData = data;
+        this.lastBeforeInputData = null;
+      } else if (composition.emittedData === null) {
+        this.onDataCallback(data);
+        composition.emittedData = data;
+      } else {
+        // One or more segmented commits were already emitted from beforeinput.
+        // Retain compositionend's aggregate/final payload only as the expected
+        // value for a possible trailing browser commit event.
+        composition.emittedData = data;
       }
-      this.onDataCallback(data);
-      this.recordCompositionData(data);
     }
+    composition.phase = 'ended';
+    this.compositionTransaction = composition;
 
     this.cleanupCompositionTextNodes();
+    this.scheduleInputStateReset();
   }
 
   /**
@@ -1128,7 +1180,7 @@ export class InputHandler {
    */
   private recordKeyDownData(data: string): void {
     this.lastKeyDownData = data;
-    this.lastKeyDownTime = this.getNow();
+    this.scheduleInputStateReset();
   }
 
   /**
@@ -1144,65 +1196,48 @@ export class InputHandler {
    * Check if beforeinput should be ignored due to a recent keydown
    */
   private shouldIgnoreBeforeInput(data: string): boolean {
-    if (!this.lastKeyDownData) {
-      return false;
-    }
-    const now = this.getNow();
-    const isDuplicate =
-      now - this.lastKeyDownTime < InputHandler.BEFORE_INPUT_IGNORE_MS &&
-      this.lastKeyDownData === data;
+    const isDuplicate = this.lastKeyDownData === data;
     this.lastKeyDownData = null;
     return isDuplicate;
   }
 
   /**
-   * Check if beforeinput text should be ignored due to a recent composition end
+   * Schedule cleanup after the browser finishes the current native input event
+   * chain. In particular, compositionend can run before the browser commits the
+   * final value to a textarea, so clearing synchronously leaves committed text
+   * behind on several engines.
    */
-  private shouldIgnoreBeforeInputFromComposition(data: string): boolean {
-    if (!this.lastCompositionData) {
-      return false;
-    }
-    const now = this.getNow();
-    const isDuplicate =
-      now - this.lastCompositionTime < InputHandler.BEFORE_INPUT_IGNORE_MS &&
-      this.lastCompositionData === data;
-    if (isDuplicate) {
-      this.lastCompositionData = null;
-    }
-    return isDuplicate;
+  private scheduleInputStateReset(): void {
+    this.cancelInputStateReset();
+    this.inputStateResetTimeout = setTimeout(() => {
+      this.inputStateResetTimeout = undefined;
+      if (this.isDisposed || this.isComposing) return;
+      this.resetTextarea();
+      this.clearTransientInputState();
+    }, 0);
   }
 
-  /**
-   * Check if composition end should be ignored due to a recent beforeinput text
-   */
-  private shouldIgnoreCompositionEnd(data: string): boolean {
-    if (!this.lastBeforeInputData) {
-      return false;
+  private cancelInputStateReset(): void {
+    if (this.inputStateResetTimeout !== undefined) {
+      clearTimeout(this.inputStateResetTimeout);
+      this.inputStateResetTimeout = undefined;
     }
-    const now = this.getNow();
-    const isDuplicate =
-      now - this.lastBeforeInputTime < InputHandler.BEFORE_INPUT_IGNORE_MS &&
-      this.lastBeforeInputData === data;
-    if (isDuplicate) {
-      this.lastBeforeInputData = null;
-    }
-    return isDuplicate;
   }
 
-  /**
-   * Record beforeinput text for composition de-duplication
-   */
-  private recordBeforeInputData(data: string): void {
-    this.lastBeforeInputData = data;
-    this.lastBeforeInputTime = this.getNow();
+  private resetTextarea(): void {
+    if (this.inputElement?.tagName?.toLowerCase() !== 'textarea') return;
+    const textarea = this.inputElement as HTMLTextAreaElement;
+    if (textarea.value === '' && textarea.selectionStart === 0 && textarea.selectionEnd === 0) {
+      return;
+    }
+    textarea.value = '';
+    textarea.setSelectionRange(0, 0);
   }
 
-  /**
-   * Record composition end data for beforeinput de-duplication
-   */
-  private recordCompositionData(data: string): void {
-    this.lastCompositionData = data;
-    this.lastCompositionTime = this.getNow();
+  private clearTransientInputState(): void {
+    this.lastKeyDownData = null;
+    this.lastBeforeInputData = null;
+    this.compositionTransaction = null;
   }
 
   /**
@@ -1240,6 +1275,10 @@ export class InputHandler {
   dispose(): void {
     if (this.isDisposed) return;
     this.isDisposed = true;
+    this.cancelInputStateReset();
+    this.resetTextarea();
+    this.clearTransientInputState();
+    this.isComposing = false;
 
     if (this.keydownListener) {
       this.container.removeEventListener('keydown', this.keydownListener);
