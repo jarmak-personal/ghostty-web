@@ -3,10 +3,13 @@ import { describe, expect, test } from 'bun:test';
 import {
   type AssetIdentity,
   type CompatibilityTagRecord,
+  draftReleaseIsComplete,
   parseCompatibilityTag,
   planPublication,
   pollRemoteState,
   type RemoteRelease,
+  releaseIsPublishedImmutable,
+  remoteTagIsVisible,
   selectReleaseFromPages,
   selectReleasePlan,
   validateSnapshot,
@@ -67,16 +70,12 @@ describe('remote state polling', () => {
   test('backs off across transient reads until the remote state is ready', async () => {
     const values = [undefined, undefined, source];
     const sleeps: number[] = [];
-    const value = await pollRemoteState(
-      () => values.shift(),
-      (result) => result !== undefined,
-      {
-        delays: [1, 2, 4],
-        sleep: async (delayMs) => {
-          sleeps.push(delayMs);
-        },
-      }
-    );
+    const value = await pollRemoteState(() => values.shift(), remoteTagIsVisible, {
+      delays: [1, 2, 4],
+      sleep: async (delayMs) => {
+        sleeps.push(delayMs);
+      },
+    });
 
     expect(value).toBe(source);
     expect(sleeps).toEqual([1, 2]);
@@ -84,13 +83,41 @@ describe('remote state polling', () => {
 
   test('waits for a published release to become immutable', async () => {
     const releases = [release({ immutable: false }), release()];
-    const value = await pollRemoteState(
-      () => releases.shift(),
-      (result) => result !== undefined && !result.draft && result.immutable,
-      { delays: [1], sleep: async () => {} }
-    );
+    const value = await pollRemoteState(() => releases.shift(), releaseIsPublishedImmutable, {
+      delays: [1],
+      sleep: async () => {},
+    });
 
     expect(value?.immutable).toBeTrue();
+  });
+
+  test('retries transient remote read and draft asset validation errors', async () => {
+    const reads = [new Error('temporary API failure'), source];
+    const commit = await pollRemoteState(
+      () => {
+        const value = reads.shift();
+        if (value instanceof Error) throw value;
+        return value;
+      },
+      remoteTagIsVisible,
+      { delays: [1], sleep: async () => {} }
+    );
+    expect(commit).toBe(source);
+
+    const releases = [
+      release({
+        assets: [{ ...expectedAssets[0], state: 'starter-without-id' }, expectedAssets[1]],
+        draft: true,
+        immutable: false,
+      }),
+      release({ draft: true, immutable: false }),
+    ];
+    const completedDraft = await pollRemoteState(
+      () => releases.shift(),
+      (candidate) => draftReleaseIsComplete(candidate, expectedAssets),
+      { delays: [1], sleep: async () => {} }
+    );
+    expect(draftReleaseIsComplete(completedDraft, expectedAssets)).toBeTrue();
   });
 
   test('returns the final observation when the retry budget is exhausted', async () => {
@@ -103,6 +130,26 @@ describe('remote state polling', () => {
 
     expect(value).toBe(3);
     expect(reads).toBe(3);
+  });
+
+  test('rethrows a final remote error and preserves fail-closed immutable validation', async () => {
+    const failure = new Error('persistent API failure');
+    await expect(
+      pollRemoteState(
+        () => {
+          throw failure;
+        },
+        () => false,
+        { delays: [1], sleep: async () => {} }
+      )
+    ).rejects.toBe(failure);
+
+    const mutableRelease = release({ immutable: false });
+    const observed = await pollRemoteState(() => mutableRelease, releaseIsPublishedImmutable, {
+      delays: [1],
+      sleep: async () => {},
+    });
+    expect(() => planPublication(observed, expectedAssets)).toThrow('not immutable');
   });
 });
 

@@ -115,17 +115,29 @@ export async function pollRemoteState<T>(
 ): Promise<T> {
   const delays = options.delays ?? REMOTE_STATE_RETRY_DELAYS_MS;
   const sleep = options.sleep ?? Bun.sleep;
-  let value = await read();
+  let lastError: unknown;
+  let lastAttemptFailed = false;
+  let value!: T;
 
-  for (const delayMs of delays) {
-    if (ready(value)) return value;
+  for (let attempt = 0; attempt <= delays.length; attempt++) {
+    try {
+      value = await read();
+      lastAttemptFailed = false;
+      if (ready(value)) return value;
+    } catch (error) {
+      lastError = error;
+      lastAttemptFailed = true;
+    }
+
+    if (attempt === delays.length) break;
+    const delayMs = delays[attempt];
     if (options.description) {
       console.log(`Waiting ${delayMs}ms for ${options.description}...`);
     }
     await sleep(delayMs);
-    value = await read();
   }
 
+  if (lastAttemptFailed) throw lastError;
   return value;
 }
 
@@ -296,6 +308,23 @@ export function planPublication(
     throw new Error(`Draft release ${release.tag_name} unexpectedly reports itself as immutable.`);
   }
   return { action: 'resume-draft', discardAssetIds, missingAssets };
+}
+
+export function remoteTagIsVisible(commit: string | undefined): boolean {
+  return commit !== undefined;
+}
+
+export function draftReleaseIsComplete(
+  release: RemoteRelease | undefined,
+  expectedAssets: AssetIdentity[]
+): boolean {
+  if (!release) return false;
+  const plan = planPublication(release, expectedAssets);
+  return plan.action !== 'resume-draft' || plan.missingAssets.length === 0;
+}
+
+export function releaseIsPublishedImmutable(release: RemoteRelease | undefined): boolean {
+  return release !== undefined && !release.draft && release.immutable;
 }
 
 export function selectReleaseForTag(
@@ -516,7 +545,7 @@ async function publishCommand(): Promise<void> {
   }
   const publishedTagCommit = await pollRemoteState(
     () => getRemoteTagCommit(repository, tag),
-    (commit) => commit !== undefined,
+    remoteTagIsVisible,
     { description: `tag ${tag} to become visible` }
   );
   if (publishedTagCommit !== sourceCommit) {
@@ -574,14 +603,7 @@ async function publishCommand(): Promise<void> {
     }
     const completedDraftRelease = await pollRemoteState(
       () => getRelease(repository, tag),
-      (release) => {
-        if (!release) return false;
-        const plan = planPublication(release, assets);
-        return (
-          plan.action !== 'resume-draft' ||
-          (plan.discardAssetIds.length === 0 && plan.missingAssets.length === 0)
-        );
-      },
+      (release) => draftReleaseIsComplete(release, assets),
       { description: `draft release ${tag} assets to finish uploading` }
     );
     const completedDraft = planPublication(completedDraftRelease, assets);
@@ -606,7 +628,7 @@ async function publishCommand(): Promise<void> {
 
   const publishedRelease = await pollRemoteState(
     () => getRelease(repository, tag),
-    (release) => release !== undefined && !release.draft && release.immutable,
+    releaseIsPublishedImmutable,
     { description: `release ${tag} to become immutable` }
   );
   const finalPlan = planPublication(publishedRelease, assets);
