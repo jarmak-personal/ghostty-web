@@ -1026,7 +1026,11 @@ export class GhosttyTerminal {
   }
 
   /** Copy an absolute retained row from either screen without activating it. */
-  getBufferLine(type: GhosttyBufferType, y: number): GhosttyCell[] | null {
+  getBufferLine(
+    type: GhosttyBufferType,
+    y: number,
+    refreshRenderState: boolean = true
+  ): GhosttyCell[] | null {
     if (!this.handle || y < 0) return null;
     const neededSize = this._cols * GhosttyTerminal.CELL_SIZE;
     if (!this.viewportBufferPtr || this.viewportBufferSize < neededSize) {
@@ -1038,7 +1042,7 @@ export class GhosttyTerminal {
     }
     if (!this.viewportBufferPtr) return null;
 
-    this.update();
+    if (refreshRenderState) this.update();
     const count = this.exports.ghostty_terminal_get_buffer_line(
       this.handle,
       type === 'alternate',
