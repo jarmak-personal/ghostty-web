@@ -122,6 +122,29 @@ WASM example with a strict script and connection policy.
 without moving focus from another control; an explicit later call to `term.focus()` still focuses
 the terminal normally.
 
+### Screen readers
+
+The hidden textarea is the terminal's only sequential input target. Its accessible name is inherited
+from the host's `aria-label` or `aria-labelledby` when present, and it controls a clipped, non-live
+list containing exactly the visible terminal rows. The Canvas is hidden from assistive technology;
+the row list exposes the normal or alternate screen that was presented, including Unicode
+graphemes, cursor position, bounded selection context, and safe links. Scrolling changes the rows in
+that bounded list rather than creating DOM for the complete scrollback buffer.
+
+Terminal rows and links do not add arbitrary tab stops. Screen readers can inspect the row list and
+use virtual link navigation; accessible link activation still passes through the same protocol and
+host-handler policy as Canvas activation. A separate polite region announces only small batches of
+completed normal-screen lines and screen changes. Cursor-only movement, history scrolling,
+selection drags, link discovery, and alternate-screen repaint loops are intentionally not live
+announced. Full-screen applications remain available for deliberate row-by-row inspection.
+
+The automated suite verifies the DOM and ARIA contract, lifecycle, and update bounds in Happy DOM;
+it cannot observe a browser's platform accessibility tree. Release validation should therefore
+include VoiceOver with Safari, NVDA with Firefox or Chrome, and JAWS with Chrome. Check input naming
+and focus, visible-row navigation, cursor and selection context, normal/alternate screen changes,
+history scrolling, link discovery/activation, and announcement volume. A braille-display pass is
+recommended when hardware is available.
+
 Cursor options establish defaults while applications remain free to use `DECSCUSR`. In addition
 to `block`, `bar`, and `underline`, `cursorStyle` accepts `block_hollow`. Set `cursorBlink` to
 `'terminal'` to follow DEC cursor-blinking mode, or use `true`/`false` for an explicit blinking or
