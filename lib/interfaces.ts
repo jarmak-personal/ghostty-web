@@ -11,7 +11,17 @@ export interface ITerminalOptions {
   cursorBlink?: CursorBlink; // Default: false
   cursorStyle?: CursorStyle;
   theme?: ITheme;
-  scrollback?: number; // Default: 10000
+  /**
+   * Maximum scrollback lines (default: 10,000). This retains xterm.js line-count
+   * semantics; 0 means unlimited. Mutually exclusive with `scrollbackBytes`.
+   */
+  scrollback?: number;
+  /**
+   * Maximum native Ghostty page-list budget in bytes. The value is passed
+   * through without conversion; 0 means unlimited and the largest finite
+   * value is 4,294,967,294. Mutually exclusive with `scrollback`.
+   */
+  scrollbackBytes?: number;
   fontSize?: number; // Default: 15
   fontFamily?: string; // Default: 'monospace'
   fontLigatures?: boolean; // Default: true

@@ -229,6 +229,10 @@ export class Terminal implements ITerminalCore {
   private readonly SCROLLBAR_FADE_DURATION_MS = 200; // 200ms fade animation
 
   constructor(options: ITerminalOptions = {}) {
+    if (options.scrollback !== undefined && options.scrollbackBytes !== undefined) {
+      throw new TypeError('scrollback and scrollbackBytes are mutually exclusive');
+    }
+
     // Use provided Ghostty instance (for test isolation) or get module-level instance
     this.ghostty = options.ghostty ?? getGhostty();
 
@@ -239,7 +243,8 @@ export class Terminal implements ITerminalCore {
       cursorBlink: options.cursorBlink ?? false,
       cursorStyle: options.cursorStyle ?? 'block',
       theme: normalizeTheme(options.theme),
-      scrollback: options.scrollback ?? 10000,
+      scrollback: options.scrollback ?? (options.scrollbackBytes === undefined ? 10000 : undefined),
+      scrollbackBytes: options.scrollbackBytes,
       fontSize: options.fontSize ?? 15,
       fontFamily: options.fontFamily ?? 'monospace',
       fontLigatures: options.fontLigatures !== false,
@@ -257,6 +262,13 @@ export class Terminal implements ITerminalCore {
     (this.options as any) = new Proxy(baseOptions, {
       set: (target: any, prop: string, value: any) => {
         const oldValue = target[prop];
+
+        if (
+          (prop === 'scrollback' && value !== undefined && target.scrollbackBytes !== undefined) ||
+          (prop === 'scrollbackBytes' && value !== undefined && target.scrollback !== undefined)
+        ) {
+          throw new TypeError('scrollback and scrollbackBytes are mutually exclusive');
+        }
 
         if (prop === 'theme') {
           const theme = normalizeTheme(value);
@@ -450,8 +462,13 @@ export class Terminal implements ITerminalCore {
    * Convert terminal options to WASM terminal config.
    */
   private buildWasmConfig(): GhosttyTerminalConfig {
+    const scrollbackConfig: GhosttyTerminalConfig =
+      this.options.scrollbackBytes === undefined
+        ? { scrollbackLimit: this.options.scrollback }
+        : { scrollbackBytes: this.options.scrollbackBytes };
     return {
-      ...themeToTerminalConfig(normalizeTheme(this.options.theme), this.options.scrollback),
+      ...themeToTerminalConfig(normalizeTheme(this.options.theme)),
+      ...scrollbackConfig,
       cursorStyle: this.options.cursorStyle,
       cursorBlink: this.options.cursorBlink,
     };
@@ -1804,6 +1821,15 @@ export class Terminal implements ITerminalCore {
   public getScrollbackLength(): number {
     if (!this.wasmTerm) return 0;
     return this.wasmTerm.getScrollbackLength();
+  }
+
+  /**
+   * Get the effective byte limit configured on Ghostty's native page list.
+   * Returns 0 for unlimited scrollback. The terminal must be open.
+   */
+  public getScrollbackByteLimit(): number {
+    this.assertOpen();
+    return this.wasmTerm!.getScrollbackByteLimit();
   }
 
   /**

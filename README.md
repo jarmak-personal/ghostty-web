@@ -73,6 +73,22 @@ term.onData((data) => websocket.send(data));
 websocket.onmessage = (e) => term.write(e.data);
 ```
 
+`scrollback` remains xterm-compatible and counts retained lines. Embedders that need an exact
+memory-capacity input can instead set `scrollbackBytes`; ghostty-web passes that value directly to
+Ghostty's native page-list budget without converting it from lines. The options are mutually
+exclusive and construction fails when both are present. In either mode, `0` means unlimited
+scrollback; omitting both uses the default `scrollback: 10_000` line limit.
+
+```typescript
+const term = new Terminal({ scrollbackBytes: 10_000_000 });
+term.open(element);
+console.log(term.getScrollbackByteLimit()); // 10000000; 0 means unlimited
+```
+
+`getScrollbackByteLimit()` reports the byte limit actually configured on the native terminal. In
+line mode this is Ghostty's converted byte budget, so consumers do not need to reproduce either
+their byte input or the line-to-page calculation in diagnostics.
+
 ### WASM loading and Content Security Policy
 
 **Migration from earlier releases:** the production JavaScript no longer contains an inlined WASM
