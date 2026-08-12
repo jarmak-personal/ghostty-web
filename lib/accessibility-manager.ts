@@ -208,13 +208,29 @@ export class AccessibilityManager {
       const rows = mappingChanged ? this.allViewportRows() : this.rowsInRanges(ranges);
       const selection = this.terminal.getSelectionPosition();
       const cursorAbsoluteRow = buffer.baseY + cursor.y;
+      const previousRowText = new Map<number, string>();
+      for (const state of this.rowStates) {
+        if (state.base?.screen === screen) {
+          previousRowText.set(state.base.absoluteRow, state.base.text);
+        }
+      }
+      const textChangedRows = new Set<number>();
 
       for (const viewportRow of rows) {
         this.updateRow(viewportRow, buffer, screen, viewportTop, cursor, selection);
+        const base = this.rowStates[viewportRow]?.base;
+        if (
+          base &&
+          (previousRowText.has(base.absoluteRow)
+            ? previousRowText.get(base.absoluteRow) !== base.text
+            : base.text.length > 0)
+        ) {
+          textChangedRows.add(base.absoluteRow);
+        }
       }
 
       this.updateContexts(buffer, cursor, cursorAbsoluteRow, selection);
-      this.updateAnnouncement(buffer, screen, cursorAbsoluteRow);
+      this.updateAnnouncement(buffer, screen, cursorAbsoluteRow, textChangedRows);
       this.lastScreen = screen;
       this.lastViewportTop = viewportTop;
       this.presentedState = { screen, cursorAbsoluteRow };
@@ -577,7 +593,8 @@ export class AccessibilityManager {
   private updateAnnouncement(
     buffer: IBuffer,
     screen: 'normal' | 'alternate',
-    cursorAbsoluteRow: number
+    cursorAbsoluteRow: number,
+    textChangedRows: ReadonlySet<number>
   ): void {
     const messages: string[] = [];
     const previous = this.presentedState;
@@ -587,7 +604,10 @@ export class AccessibilityManager {
       previous?.screen === 'normal' &&
       screen === 'normal' &&
       this.terminal.getViewportY() === 0 &&
-      cursorAbsoluteRow > previous.cursorAbsoluteRow
+      cursorAbsoluteRow > previous.cursorAbsoluteRow &&
+      [...textChangedRows].some(
+        (row) => row >= previous.cursorAbsoluteRow && row <= cursorAbsoluteRow
+      )
     ) {
       const firstRow = Math.max(
         previous.cursorAbsoluteRow,

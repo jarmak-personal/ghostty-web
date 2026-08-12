@@ -359,6 +359,26 @@ describe('screen-reader viewport model', () => {
     }
   });
 
+  test('does not announce existing lines when the cursor moves up then back down', async () => {
+    const { terminal, host, frame } = await openTerminal({ cols: 12, rows: 3 });
+    try {
+      const live = host.querySelector<HTMLElement>('[data-ghostty-accessibility-live]')!;
+      terminal.write('first\r\nsecond');
+      frame.runAll();
+      const announcement = live.firstChild;
+
+      terminal.write('\x1b[A');
+      frame.runAll();
+      expect(live.firstChild).toBe(announcement);
+
+      terminal.write('\x1b[B');
+      frame.runAll();
+      expect(live.firstChild).toBe(announcement);
+    } finally {
+      terminal.dispose();
+    }
+  });
+
   test('bounds selection context and marks viewport continuation', async () => {
     const { terminal, host, frame } = await openTerminal({ cols: 8, rows: 3 });
     try {
