@@ -632,6 +632,7 @@ export interface GhosttyWasmExports extends WebAssembly.Exports {
   ghostty_terminal_has_modify_other_keys_state_2(terminal: TerminalHandle): number;
 
   // Scrollback API
+  ghostty_terminal_get_scrollback_limit_bytes(terminal: TerminalHandle): number;
   ghostty_terminal_get_scrollback_length(terminal: TerminalHandle): number;
   ghostty_terminal_get_scrollback_line(
     terminal: TerminalHandle,
@@ -739,7 +740,10 @@ export const COLORS_STRUCT_SIZE = 12;
  * Presence is encoded separately so 0x000000 remains a valid configured color.
  */
 export interface GhosttyTerminalConfig {
+  /** Maximum scrollback lines; 0 means unlimited. */
   scrollbackLimit?: number;
+  /** Maximum native page-list bytes; 0 means unlimited (maximum finite: 0xfffffffe). */
+  scrollbackBytes?: number;
   fgColor?: number;
   bgColor?: number;
   cursorColor?: number;
@@ -752,7 +756,7 @@ export interface GhosttyTerminalConfig {
  * Size of GhosttyTerminalConfig struct in WASM memory (bytes).
  * Layout: scrollback_limit(u32) + color_mask(u32) + fg_color(u32) +
  * bg_color(u32) + cursor_color(u32) + palette[16](u32*16) +
- * cursor_style(u8) + cursor_blink(u8) + reserved(u16)
+ * cursor_style(u8) + cursor_blink(u8) + scrollback_unit(u8) + reserved(u8)
  */
 export const GHOSTTY_CONFIG_SIZE = 88;
 export const GHOSTTY_COLOR_CONFIG_SIZE = 80;
@@ -815,7 +819,7 @@ export interface Cursor {
  * Terminal configuration (passed to ghostty_terminal_new_with_config)
  */
 export interface TerminalConfig {
-  scrollback_limit: number; // Number of scrollback lines (default: 10,000)
+  scrollback_limit: number; // Scrollback limit in the unit selected by the native config
   fg_color: RGB; // Default foreground color
   bg_color: RGB; // Default background color
 }

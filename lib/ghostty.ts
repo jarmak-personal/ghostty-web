@@ -74,11 +74,35 @@ function encodedCursorBlink(blink: CursorBlink | undefined): number {
   return (blink ?? false) ? 1 : 2;
 }
 
-function writeCursorConfig(view: DataView, offset: number, config: GhosttyTerminalConfig): number {
+function writeTerminalConfigTail(
+  view: DataView,
+  offset: number,
+  config: GhosttyTerminalConfig
+): number {
   view.setUint8(offset, encodedCursorStyle(config.cursorStyle));
   view.setUint8(offset + 1, encodedCursorBlink(config.cursorBlink));
-  view.setUint16(offset + 2, 0, true);
+  view.setUint8(offset + 2, config.scrollbackBytes === undefined ? 0 : 1);
+  view.setUint8(offset + 3, 0);
   return offset + 4;
+}
+
+function encodedScrollbackLimit(config: GhosttyTerminalConfig): number {
+  if (config.scrollbackLimit !== undefined && config.scrollbackBytes !== undefined) {
+    throw new TypeError('scrollbackLimit and scrollbackBytes are mutually exclusive');
+  }
+
+  if (config.scrollbackBytes !== undefined) {
+    if (
+      !Number.isInteger(config.scrollbackBytes) ||
+      config.scrollbackBytes < 0 ||
+      config.scrollbackBytes >= 0xffffffff
+    ) {
+      throw new TypeError('scrollbackBytes must be an integer from 0 to 4294967294');
+    }
+    return config.scrollbackBytes;
+  }
+
+  return config.scrollbackLimit ?? 10000;
 }
 
 function validatedColor(value: number | undefined, field: string): number {
@@ -415,11 +439,11 @@ export class GhosttyTerminal {
         const view = new DataView(this.memory.buffer);
         let offset = configPtr;
 
-        // scrollback_limit (u32 line count; WASM converts it to a byte budget)
-        view.setUint32(offset, config.scrollbackLimit ?? 10000, true);
+        // scrollback_limit (u32 in the unit encoded in the config tail)
+        view.setUint32(offset, encodedScrollbackLimit(config), true);
         offset += 4;
         offset = writeColorConfig(view, offset, config);
-        writeCursorConfig(view, offset, config);
+        writeTerminalConfigTail(view, offset, config);
 
         this.handle = this.exports.ghostty_terminal_new_with_config(cols, rows, configPtr);
       } finally {
@@ -1122,6 +1146,11 @@ export class GhosttyTerminal {
   /** Get number of scrollback lines (history, not including active screen) */
   getScrollbackLength(): number {
     return this.exports.ghostty_terminal_get_scrollback_length(this.handle);
+  }
+
+  /** Get the configured native page-list byte limit; 0 means unlimited. */
+  getScrollbackByteLimit(): number {
+    return this.exports.ghostty_terminal_get_scrollback_limit_bytes(this.handle) >>> 0;
   }
 
   /**
