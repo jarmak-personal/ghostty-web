@@ -667,6 +667,7 @@ describe('Smooth Scrolling', () => {
       (term as any).smoothScrollTo(0);
 
       const startTime = (term as any).scrollAnimationStartTime as number;
+      frames.runNext(startTime + 50);
       const viewportBeforeWrite = term.getViewportY();
       const scrollbackBeforeWrite = term.getScrollbackLength();
       term.write('New output\r\n');
@@ -674,6 +675,11 @@ describe('Smooth Scrolling', () => {
       expect(term.getScrollbackLength()).toBe(scrollbackBeforeWrite + 1);
       expect(term.getViewportY()).toBe(viewportBeforeWrite + 1);
       expect((term as any).targetViewportY).toBe(0);
+
+      const restoredViewport = term.getViewportY();
+      frames.runNext(startTime + 60);
+      const expectedViewport = restoredViewport * (0.4 ** 3 / 0.5 ** 3);
+      expect(term.getViewportY()).toBeCloseTo(expectedViewport, 10);
 
       frames.runNext(startTime + 100);
       expect(term.getViewportY()).toBe(0);
@@ -692,6 +698,7 @@ describe('Smooth Scrolling', () => {
       (term as any).smoothScrollTo(0);
 
       const startTime = (term as any).scrollAnimationStartTime as number;
+      frames.runNext(startTime + 25);
       const viewportBeforeWrites = term.getViewportY();
       const scrollbackBeforeWrites = term.getScrollbackLength();
       term.write('First output\r\n');
@@ -705,6 +712,11 @@ describe('Smooth Scrolling', () => {
       expect(scrollbackGrowth).toBe(2);
       expect(term.getViewportY()).toBe(viewportBeforeWrites + scrollbackGrowth);
       expect((term as any).targetViewportY).toBe(0);
+
+      const restoredViewport = term.getViewportY();
+      frames.runNext(startTime + 50);
+      const expectedViewport = restoredViewport * (0.5 ** 3 / 0.75 ** 3);
+      expect(term.getViewportY()).toBeCloseTo(expectedViewport, 10);
 
       frames.runNext(startTime + 100);
       expect(term.getViewportY()).toBe(0);
