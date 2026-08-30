@@ -286,6 +286,8 @@ describe('CanvasRenderer', () => {
       ]);
       expect(harness.renderer.getFrameStats()).toEqual({
         renderedRows: 1,
+        materializedRows: 0,
+        materializedCells: 0,
         textRuns: 1,
         textMeasurements: 4,
         shapedRuns: 1,
@@ -799,6 +801,54 @@ describe('CanvasRenderer', () => {
       harness.renderer.render(harness.buffer, true, 1, scrollbackProvider);
 
       expect(harness.fillTexts.map(([text]) => text)).toEqual(['0:0:e\u0301']);
+      harness.renderer.dispose();
+    });
+
+    test('batches a retained viewport and skips unchanged fractional and opacity frames', () => {
+      const lines = Array.from({ length: 4 }, (_, row) => [makeCell(String(row))]);
+      const harness = createRenderHarness(lines);
+      const retained = Array.from({ length: 24 }, (_, row) => [makeCell(String(row % 10))]);
+      const batchCalls: Array<{ start: number; rows: number }> = [];
+      let scrollbackLength = retained.length;
+      const scrollbackProvider = {
+        getScrollbackLength: () => scrollbackLength,
+        getScrollbackLine: () => {
+          throw new Error('bounded batch should own historical transfer');
+        },
+        getScrollbackViewport: (start: number, rows: number) => {
+          batchCalls.push({ start, rows });
+          return retained.slice(start, start + rows);
+        },
+      };
+
+      harness.renderer.render(harness.buffer, true, 6.25, scrollbackProvider, 1);
+      expect(batchCalls).toEqual([{ start: 18, rows: 4 }]);
+      expect(harness.renderer.getFrameStats()).toMatchObject({
+        renderedRows: 4,
+        materializedRows: 4,
+        materializedCells: 4,
+      });
+
+      // The visible retained rows are identical: only the fractional scrollbar
+      // position and opacity changed.
+      harness.renderer.render(harness.buffer, false, 6.75, scrollbackProvider, 0.5);
+      expect(batchCalls).toHaveLength(1);
+      expect(harness.renderer.getFrameStats()).toMatchObject({
+        renderedRows: 0,
+        materializedRows: 0,
+        materializedCells: 0,
+      });
+
+      // Output growth compensated by Terminal keeps the same retained start.
+      scrollbackLength++;
+      harness.state.dirty = DirtyState.FULL;
+      harness.renderer.render(harness.buffer, false, 7.75, scrollbackProvider, 0.5);
+      expect(batchCalls).toHaveLength(1);
+      expect(harness.renderer.getFrameStats()).toMatchObject({
+        renderedRows: 0,
+        materializedRows: 0,
+        materializedCells: 0,
+      });
       harness.renderer.dispose();
     });
 

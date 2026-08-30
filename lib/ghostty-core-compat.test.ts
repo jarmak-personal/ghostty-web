@@ -12,6 +12,39 @@ function cellsToText(cells: readonly GhosttyCell[]): string {
 }
 
 describe('Ghostty v1.3 core compatibility', () => {
+  test('batches a viewport-bounded retained slice into reusable cells', async () => {
+    const ghostty = await Ghostty.load();
+    const terminal = ghostty.createTerminal(12, 3, { scrollbackLimit: 20 });
+
+    try {
+      for (let line = 0; line < 10; line++) terminal.write(`line-${line}\r\n`);
+      const scrollbackLength = terminal.getScrollbackLength();
+      expect(scrollbackLength).toBeGreaterThan(4);
+
+      const first = terminal.getScrollbackViewport(1, 3);
+      expect(first).not.toBeNull();
+      expect(first!.map(cellsToText)).toEqual(
+        Array.from({ length: 3 }, (_, row) =>
+          cellsToText(terminal.getScrollbackLine(row + 1) ?? [])
+        )
+      );
+
+      const firstRow = first![0];
+      const firstCell = firstRow[0];
+      const second = terminal.getScrollbackViewport(2, 3);
+      expect(second).not.toBeNull();
+      expect(second![0]).toBe(firstRow);
+      expect(second![0][0]).toBe(firstCell);
+      expect(second!.map(cellsToText)).toEqual(
+        Array.from({ length: 3 }, (_, row) =>
+          cellsToText(terminal.getScrollbackLine(row + 2) ?? [])
+        )
+      );
+    } finally {
+      terminal.free();
+    }
+  });
+
   test('reuses WASM page buffers safely after multi-codepoint graphemes', async () => {
     const ghostty = await Ghostty.load();
 

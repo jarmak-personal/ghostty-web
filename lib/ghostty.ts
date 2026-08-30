@@ -415,6 +415,10 @@ export class GhosttyTerminal {
   /** Cell pool for zero-allocation rendering */
   private cellPool: GhosttyCell[] = [];
 
+  /** Reusable renderer-owned retained viewport representation. */
+  private scrollbackViewportCellPool: GhosttyCell[] = [];
+  private scrollbackViewportRows: GhosttyCell[][] = [];
+
   constructor(
     exports: GhosttyWasmExports,
     memory: WebAssembly.Memory,
@@ -1209,6 +1213,61 @@ export class GhosttyTerminal {
     return cells;
   }
 
+  /**
+   * Copy one visible retained-history slice in a single WASM call. The result
+   * is bounded to the active viewport height and reuses its row/cell objects.
+   */
+  getScrollbackViewport(start: number, rows: number): GhosttyCell[][] | null {
+    if (
+      !this.handle ||
+      !Number.isInteger(start) ||
+      !Number.isInteger(rows) ||
+      start < 0 ||
+      rows < 0 ||
+      rows > this._rows
+    ) {
+      return null;
+    }
+    if (rows === 0) return [];
+
+    const totalCells = rows * this._cols;
+    const neededSize = totalCells * GhosttyTerminal.CELL_SIZE;
+    if (!this.viewportBufferPtr || this.viewportBufferSize < neededSize) {
+      if (this.viewportBufferPtr) {
+        this.exports.ghostty_wasm_free_u8_array(this.viewportBufferPtr, this.viewportBufferSize);
+      }
+      this.viewportBufferPtr = this.exports.ghostty_wasm_alloc_u8_array(neededSize);
+      this.viewportBufferSize = neededSize;
+    }
+    if (!this.viewportBufferPtr) return null;
+
+    this.update();
+    const count = this.exports.ghostty_terminal_get_scrollback_viewport(
+      this.handle,
+      start,
+      rows,
+      this.viewportBufferPtr,
+      totalCells
+    );
+    if (count !== totalCells) return null;
+
+    this.ensureCellPool(this.scrollbackViewportCellPool, count);
+    this.parseCellsInto(this.viewportBufferPtr, count, this.scrollbackViewportCellPool);
+    this.scrollbackViewportRows.length = rows;
+    for (let row = 0; row < rows; row++) {
+      let line = this.scrollbackViewportRows[row];
+      if (!line || line.length !== this._cols) {
+        line = new Array<GhosttyCell>(this._cols);
+        this.scrollbackViewportRows[row] = line;
+      }
+      const startCell = row * this._cols;
+      for (let col = 0; col < this._cols; col++) {
+        line[col] = this.scrollbackViewportCellPool[startCell + col];
+      }
+    }
+    return this.scrollbackViewportRows;
+  }
+
   /** Check if a row in the active screen is wrapped (soft-wrapped to next line) */
   isRowWrapped(row: number): boolean {
     return this.exports.ghostty_terminal_is_row_wrapped(this.handle, row) !== 0;
@@ -1365,9 +1424,13 @@ export class GhosttyTerminal {
 
   private initCellPool(): void {
     const total = this._cols * this._rows;
-    if (this.cellPool.length < total) {
-      for (let i = this.cellPool.length; i < total; i++) {
-        this.cellPool.push({
+    this.ensureCellPool(this.cellPool, total);
+  }
+
+  private ensureCellPool(pool: GhosttyCell[], total: number): void {
+    if (pool.length < total) {
+      for (let i = pool.length; i < total; i++) {
+        pool.push({
           codepoint: 0,
           fg_r: 204,
           fg_g: 204,
@@ -1385,13 +1448,17 @@ export class GhosttyTerminal {
   }
 
   private parseCellsIntoPool(ptr: number, count: number): void {
+    this.parseCellsInto(ptr, count, this.cellPool);
+  }
+
+  private parseCellsInto(ptr: number, count: number, pool: GhosttyCell[]): void {
     const buffer = this.memory.buffer;
     const u8 = new Uint8Array(buffer, ptr, count * GhosttyTerminal.CELL_SIZE);
     const view = new DataView(buffer, ptr, count * GhosttyTerminal.CELL_SIZE);
 
     for (let i = 0; i < count; i++) {
       const offset = i * GhosttyTerminal.CELL_SIZE;
-      const cell = this.cellPool[i];
+      const cell = pool[i];
       cell.codepoint = view.getUint32(offset, true);
       cell.fg_r = u8[offset + 4];
       cell.fg_g = u8[offset + 5];

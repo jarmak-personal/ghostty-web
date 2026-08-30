@@ -20,6 +20,16 @@ Works on **Linux** and **macOS** (no Windows support yet).
 - Opens a real shell session (bash, zsh, etc.)
 - Provides full PTY support (colors, cursor positioning, resize, etc.)
 
+## Retained-history benchmark
+
+Run `bun run dev`, then open
+`http://localhost:8000/demo/retained-history-benchmark.html`. The benchmark compares ANSI-rich
+history at 10% and 100% of hvir's 10 MB scrollback budget using a 160×60 viewport. It warms each
+case for 10 seconds and reports configured/estimated retained bytes, retained rows, input bytes,
+render requests, frames, rows/cells materialized, rows painted, and frame p50/p95/max. Query
+parameters `warmupMs` and `measurementMs` may shorten local smoke runs; acceptance evidence uses
+the defaults.
+
 ## Usage
 
 ```bash

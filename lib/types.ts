@@ -640,6 +640,13 @@ export interface GhosttyWasmExports extends WebAssembly.Exports {
     bufPtr: number,
     bufLen: number
   ): number; // Returns cells written or -1 on error
+  ghostty_terminal_get_scrollback_viewport(
+    terminal: TerminalHandle,
+    start: number,
+    rows: number,
+    bufPtr: number,
+    bufLen: number
+  ): number; // Returns cells written or -1 on error
   ghostty_terminal_get_scrollback_grapheme(
     terminal: TerminalHandle,
     offset: number,
