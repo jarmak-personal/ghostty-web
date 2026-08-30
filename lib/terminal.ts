@@ -860,10 +860,14 @@ export class Terminal implements ITerminalCore {
         this.scrollEmitter.fire(this.viewportY);
       }
       if (smoothScrollWasActive) {
-        this.targetViewportY = Math.max(
-          0,
-          Math.min(scrollbackAfter, targetViewportBefore + scrollbackGrowth)
-        );
+        // A target at zero is an explicit intent to catch the live bottom. It
+        // is not a retained-history coordinate, so output growth must not move
+        // it away while the current viewport and animation origin continue to
+        // track the content already on screen.
+        this.targetViewportY =
+          targetViewportBefore === 0
+            ? 0
+            : Math.max(0, Math.min(scrollbackAfter, targetViewportBefore + scrollbackGrowth));
         this.scrollAnimationStartViewportY = Math.max(
           0,
           Math.min(scrollbackAfter, this.scrollAnimationStartViewportY + scrollbackGrowth)
