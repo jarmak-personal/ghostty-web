@@ -12,6 +12,37 @@ function cellsToText(cells: readonly GhosttyCell[]): string {
 }
 
 describe('Ghostty v1.3 core compatibility', () => {
+  test('tracks retained offset remapping without advancing for in-place output', async () => {
+    const ghostty = await Ghostty.load();
+    const terminal = ghostty.createTerminal(24, 3, { scrollbackBytes: 10_000 });
+
+    try {
+      const initialGeneration = terminal.getScrollbackGeneration();
+      terminal.write('status\r');
+      expect(terminal.getScrollbackGeneration()).toBe(initialGeneration);
+
+      let observedEviction = false;
+      for (let batch = 0; batch < 100 && !observedEviction; batch++) {
+        const lengthBefore = terminal.getScrollbackLength();
+        const generationBefore = terminal.getScrollbackGeneration();
+        terminal.write(
+          Array.from({ length: 100 }, (_, line) => `batch-${batch}-line-${line}\r\n`).join('')
+        );
+        const lengthAfter = terminal.getScrollbackLength();
+        const generationAfter = terminal.getScrollbackGeneration();
+        observedEviction =
+          lengthBefore > 0 && lengthAfter <= lengthBefore && generationAfter !== generationBefore;
+      }
+      expect(observedEviction).toBe(true);
+
+      const stableGeneration = terminal.getScrollbackGeneration();
+      terminal.write('\rstatus');
+      expect(terminal.getScrollbackGeneration()).toBe(stableGeneration);
+    } finally {
+      terminal.free();
+    }
+  });
+
   test('batches a viewport-bounded retained slice into reusable cells', async () => {
     const ghostty = await Ghostty.load();
     const terminal = ghostty.createTerminal(12, 3, { scrollbackLimit: 20 });

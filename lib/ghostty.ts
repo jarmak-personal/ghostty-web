@@ -1152,6 +1152,11 @@ export class GhosttyTerminal {
     return this.exports.ghostty_terminal_get_scrollback_length(this.handle);
   }
 
+  /** Generation changed when eviction or clearing remaps retained row offsets. */
+  getScrollbackGeneration(): number {
+    return this.exports.ghostty_terminal_get_scrollback_generation(this.handle) >>> 0;
+  }
+
   /** Get the configured native page-list byte limit; 0 means unlimited. */
   getScrollbackByteLimit(): number {
     return this.exports.ghostty_terminal_get_scrollback_limit_bytes(this.handle) >>> 0;

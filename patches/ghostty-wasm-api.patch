@@ -32,7 +32,7 @@ new file mode 100644
 index 000000000..7b4c2a47c
 --- /dev/null
 +++ b/include/ghostty/vt/terminal.h
-@@ -0,0 +1,532 @@
+@@ -0,0 +1,535 @@
 +/**
 + * @file terminal.h
 + *
@@ -453,6 +453,9 @@ index 000000000..7b4c2a47c
 +/** Get number of scrollback lines (history, not including active screen) */
 +int ghostty_terminal_get_scrollback_length(GhosttyTerminal term);
 +
++/** Generation changed when eviction or clearing remaps retained row offsets. */
++uint32_t ghostty_terminal_get_scrollback_generation(GhosttyTerminal term);
++
 +/**
 + * Get a line from the scrollback buffer.
 + * @param offset 0 = oldest line, (length-1) = most recent scrollback line
@@ -569,7 +572,7 @@ diff --git a/src/lib_vt.zig b/src/lib_vt.zig
 index 426660621..30a91c593 100644
 --- a/src/lib_vt.zig
 +++ b/src/lib_vt.zig
-@@ -143,6 +143,83 @@ comptime {
+@@ -143,6 +143,84 @@ comptime {
          @export(&c.sgr_unknown_partial, .{ .name = "ghostty_sgr_unknown_partial" });
          @export(&c.sgr_attribute_tag, .{ .name = "ghostty_sgr_attribute_tag" });
          @export(&c.sgr_attribute_value, .{ .name = "ghostty_sgr_attribute_value" });
@@ -638,6 +641,7 @@ index 426660621..30a91c593 100644
 +        // Scrollback API
 +        @export(&c.terminal_get_scrollback_limit_bytes, .{ .name = "ghostty_terminal_get_scrollback_limit_bytes" });
 +        @export(&c.terminal_get_scrollback_length, .{ .name = "ghostty_terminal_get_scrollback_length" });
++        @export(&c.terminal_get_scrollback_generation, .{ .name = "ghostty_terminal_get_scrollback_generation" });
 +        @export(&c.terminal_get_scrollback_line, .{ .name = "ghostty_terminal_get_scrollback_line" });
 +        @export(&c.terminal_get_scrollback_viewport, .{ .name = "ghostty_terminal_get_scrollback_viewport" });
 +        @export(&c.terminal_get_scrollback_grapheme, .{ .name = "ghostty_terminal_get_scrollback_grapheme" });
@@ -744,7 +748,7 @@ index bc92597f5..e351e9a58 100644
  
  // The full C API, unexported.
  pub const osc_new = osc.new;
-@@ -52,6 +53,84 @@ pub const key_encoder_encode = key_encode.encode;
+@@ -52,6 +53,85 @@ pub const key_encoder_encode = key_encode.encode;
  
  pub const paste_is_safe = paste.is_safe;
  
@@ -813,6 +817,7 @@ index bc92597f5..e351e9a58 100644
 +// Scrollback API
 +pub const terminal_get_scrollback_limit_bytes = terminal.getScrollbackLimitBytes;
 +pub const terminal_get_scrollback_length = terminal.getScrollbackLength;
++pub const terminal_get_scrollback_generation = terminal.getScrollbackGeneration;
 +pub const terminal_get_scrollback_line = terminal.getScrollbackLine;
 +pub const terminal_get_scrollback_viewport = terminal.getScrollbackViewport;
 +pub const terminal_get_scrollback_grapheme = terminal.getScrollbackGrapheme;
@@ -842,7 +847,7 @@ new file mode 100644
 index 000000000..fb903e7aa
 --- /dev/null
 +++ b/src/terminal/c/terminal.zig
-@@ -0,0 +1,3031 @@
+@@ -0,0 +1,3057 @@
 +//! C API wrapper for Terminal
 +//!
 +//! This provides a minimal, high-performance interface to Ghostty's Terminal
@@ -2241,6 +2246,8 @@ index 000000000..fb903e7aa
 +    provenance: ProvenanceRegistry,
 +    retained_searches: RetainedSearchRegistry,
 +    retained_ranges: RetainedRangeRegistry,
++    /// Incremented when the oldest retained row identity changes.
++    scrollback_generation: u32 = 0,
 +    /// Incremented for every parsed synchronized-output enable action.
 +    synchronized_output_generation: u32 = 0,
 +    /// Incremented once after each non-empty write that touches primary, so
@@ -2429,6 +2436,7 @@ index 000000000..fb903e7aa
 +    wrapper.retained_searches = .{};
 +    wrapper.retained_ranges = .{};
 +    wrapper.cursor_defaults = cursor_defaults;
++    wrapper.scrollback_generation = 0;
 +    wrapper.synchronized_output_generation = 0;
 +    wrapper.primary_screen_generation = 0;
 +    wrapper.alternate_screen_generation = 0;
@@ -2519,11 +2527,16 @@ index 000000000..fb903e7aa
 +pub fn write(ptr: ?*anyopaque, data: [*]const u8, len: usize) callconv(.c) void {
 +    const wrapper: *TerminalWrapper = @ptrCast(@alignCast(ptr orelse return));
 +    if (len == 0) return;
++    const scrollback_origin = scrollbackOrigin(wrapper);
 +    wrapper.write_screen_mask = if (wrapper.terminal.screens.active_key == .primary)
 +        primary_screen_touched
 +    else
 +        alternate_screen_touched;
 +    defer {
++        if (!std.meta.eql(scrollback_origin, scrollbackOrigin(wrapper))) {
++            wrapper.scrollback_generation +%= 1;
++            if (wrapper.scrollback_generation == 0) wrapper.scrollback_generation = 1;
++        }
 +        const touched = wrapper.write_screen_mask;
 +        wrapper.write_screen_mask = 0;
 +        if (touched & primary_screen_touched != 0) {
@@ -3303,6 +3316,24 @@ index 000000000..fb903e7aa
 +    // We subtract rows (active area) to get just scrollback
 +    if (pages.total_rows <= pages.rows) return 0;
 +    return @intCast(pages.total_rows - pages.rows);
++}
++
++const ScrollbackOrigin = struct {
++    page_serial: u64,
++    page_row: usize,
++};
++
++fn scrollbackOrigin(wrapper: *const TerminalWrapper) ?ScrollbackOrigin {
++    const pages = &wrapper.terminal.screens.active.pages;
++    if (pages.total_rows <= pages.rows) return null;
++    const pin = pages.pin(.{ .history = .{ .y = 0 } }) orelse return null;
++    return .{ .page_serial = pin.node.serial, .page_row = pin.y };
++}
++
++/// Monotonic-with-wrap generation for retained offset remapping.
++pub fn getScrollbackGeneration(ptr: ?*anyopaque) callconv(.c) u32 {
++    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return 0));
++    return wrapper.scrollback_generation;
 +}
 +
 +/// Get a line from the scrollback buffer

@@ -44,6 +44,8 @@ export interface IRenderable {
 export interface IScrollbackProvider {
   getScrollbackLine(offset: number): GhosttyCell[] | null;
   getScrollbackLength(): number;
+  /** Changes when eviction or clearing remaps retained row offsets. */
+  getScrollbackGeneration?(): number;
   getScrollbackGraphemeString?(offset: number, col: number): string;
   /**
    * Materialize one bounded, contiguous history slice. Implementations may
@@ -185,6 +187,29 @@ function getBoxDrawingGlyph(cell: GhosttyCell): BoxDrawingGlyph | undefined {
   return cell.grapheme_len === 0 ? BOX_DRAWING_GLYPHS.get(cell.codepoint) : undefined;
 }
 
+function rgbEqual(left: RGB, right: RGB): boolean {
+  return left.r === right.r && left.g === right.g && left.b === right.b;
+}
+
+function renderStateColorsEqual(left: RenderStateColors, right: RenderStateColors): boolean {
+  return (
+    rgbEqual(left.background, right.background) &&
+    rgbEqual(left.foreground, right.foreground) &&
+    rgbEqual(left.cursor, right.cursor) &&
+    left.palette.length === right.palette.length &&
+    left.palette.every((color, index) => rgbEqual(color, right.palette[index]!))
+  );
+}
+
+function cloneRenderStateColors(colors: RenderStateColors): RenderStateColors {
+  return {
+    background: { ...colors.background },
+    foreground: { ...colors.foreground },
+    cursor: { ...colors.cursor },
+    palette: colors.palette.map((color) => ({ ...color })),
+  };
+}
+
 // ============================================================================
 // CanvasRenderer Class
 // ============================================================================
@@ -198,6 +223,7 @@ export class CanvasRenderer {
   private cursorBlink: boolean;
   private theme: Required<ITheme>;
   private effectiveColors: RenderStateColors;
+  private lastEffectiveColors?: RenderStateColors;
   private devicePixelRatio: number;
   private readonly tracksWindowDevicePixelRatio: boolean;
   private resolutionMediaQuery?: MediaQueryList;
@@ -221,6 +247,7 @@ export class CanvasRenderer {
   // scrollbar until it crosses a retained row boundary.
   private lastScrollbackStart: number = 0;
   private lastHistoricalRows: number = 0;
+  private lastScrollbackGeneration?: number;
 
   // Current buffer being rendered (for grapheme lookups)
   private currentBuffer: IRenderable | null = null;
@@ -462,6 +489,9 @@ export class CanvasRenderer {
     const state = buffer.getRenderState();
     const cursor = state.cursor;
     this.reconcileCursorBlink(cursor.blinking);
+    const colorsChanged =
+      !this.lastEffectiveColors || !renderStateColorsEqual(this.lastEffectiveColors, state.colors);
+    if (colorsChanged) this.lastEffectiveColors = cloneRenderStateColors(state.colors);
     this.effectiveColors = state.colors;
     const dims = state.dimensions;
     const scrollbackLength = scrollbackProvider ? scrollbackProvider.getScrollbackLength() : 0;
@@ -485,8 +515,22 @@ export class CanvasRenderer {
     // part or all of the viewport, render only live rows that are actually
     // visible; viewport remapping and explicit presentation changes still
     // promote the whole Canvas below.
-    if (state.dirty === DirtyState.FULL && historicalRows === 0) {
+    if (colorsChanged || (state.dirty === DirtyState.FULL && historicalRows === 0)) {
       forceAll = true;
+    }
+
+    const scrollbackGeneration = scrollbackProvider?.getScrollbackGeneration?.();
+    if (scrollbackGeneration !== undefined) {
+      if (
+        this.lastScrollbackGeneration !== undefined &&
+        scrollbackGeneration !== this.lastScrollbackGeneration &&
+        historicalRows > 0
+      ) {
+        forceAll = true;
+      }
+      this.lastScrollbackGeneration = scrollbackGeneration;
+    } else {
+      this.lastScrollbackGeneration = undefined;
     }
 
     // Text changes only when its retained-buffer mapping changes. Fractional
@@ -502,6 +546,7 @@ export class CanvasRenderer {
     }
 
     let historicalViewport: GhosttyCell[][] | null | undefined;
+    let fallbackHistoricalViewport: Array<GhosttyCell[] | null | undefined> | undefined;
     const getHistoricalLine = (viewportRow: number): GhosttyCell[] | null => {
       if (!scrollbackProvider || viewportRow < 0 || viewportRow >= historicalRows) return null;
       if (historicalViewport === undefined && scrollbackProvider.getScrollbackViewport) {
@@ -519,7 +564,13 @@ export class CanvasRenderer {
       }
       if (historicalViewport) return historicalViewport[viewportRow] ?? null;
 
+      fallbackHistoricalViewport ??= [];
+      if (viewportRow in fallbackHistoricalViewport) {
+        return fallbackHistoricalViewport[viewportRow] ?? null;
+      }
+
       const line = scrollbackProvider.getScrollbackLine(scrollbackStart + viewportRow);
+      fallbackHistoricalViewport[viewportRow] = line;
       if (line) {
         this.frameStats.materializedRows++;
         this.frameStats.materializedCells += line.length;
@@ -537,7 +588,8 @@ export class CanvasRenderer {
       cursor.style !== this.lastCursorState.style ||
       cursor.default !== this.lastCursorState.default;
     const cursorRows = new Set<number>();
-    if (viewportY === 0 && (cursorMoved || cursorPresentationChanged || cursor.blinking)) {
+    const cursorInViewport = historicalRows === 0;
+    if (cursorInViewport && (cursorMoved || cursorPresentationChanged || cursor.blinking)) {
       cursorRows.add(cursor.y);
       if (cursorMoved || cursorPresentationChanged) cursorRows.add(this.lastCursorPosition.y);
     }
@@ -693,7 +745,7 @@ export class CanvasRenderer {
       }
 
       if (line) {
-        const cursorColumn = viewportY === 0 && cursor.y === y && cursor.visible ? cursor.x : null;
+        const cursorColumn = cursorInViewport && cursor.y === y && cursor.visible ? cursor.x : null;
         this.renderLine(line, y, dims.cols, cursorColumn, getGraphemeString);
         this.frameStats.renderedRows++;
         const previousRange = this.renderedRowRanges[this.renderedRowRanges.length - 1];
@@ -710,8 +762,8 @@ export class CanvasRenderer {
 
     // Link underlines are drawn during cell rendering (see renderCell)
 
-    // Render cursor (only if we're at the bottom, not scrolled)
-    if (viewportY === 0 && cursor.visible && this.cursorVisible) {
+    // Render the cursor while the integer text viewport still shows live rows.
+    if (cursorInViewport && cursor.visible && this.cursorVisible) {
       this.renderCursor(cursor.x, cursor.y, cursor.style);
     }
 

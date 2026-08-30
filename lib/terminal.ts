@@ -195,6 +195,7 @@ export class Terminal implements ITerminalCore {
   private readonly rendererScrollbackProvider: IScrollbackProvider = {
     getScrollbackLine: (offset) => this.getScrollbackLine(offset),
     getScrollbackLength: () => this.getScrollbackLength(),
+    getScrollbackGeneration: () => this.wasmTerm?.getScrollbackGeneration() ?? 0,
     getScrollbackGraphemeString: (offset, col) =>
       this.wasmTerm?.getScrollbackGraphemeString(offset, col) ?? ' ',
     getScrollbackViewport: (start, rows) =>

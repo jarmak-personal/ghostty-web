@@ -810,8 +810,10 @@ describe('CanvasRenderer', () => {
       const retained = Array.from({ length: 24 }, (_, row) => [makeCell(String(row % 10))]);
       const batchCalls: Array<{ start: number; rows: number }> = [];
       let scrollbackLength = retained.length;
+      let scrollbackGeneration = 1;
       const scrollbackProvider = {
         getScrollbackLength: () => scrollbackLength,
+        getScrollbackGeneration: () => scrollbackGeneration,
         getScrollbackLine: () => {
           throw new Error('bounded batch should own historical transfer');
         },
@@ -849,6 +851,79 @@ describe('CanvasRenderer', () => {
         materializedRows: 0,
         materializedCells: 0,
       });
+
+      // Native palette changes resolve retained cell colors differently even
+      // though their row mapping and content generation stay stable.
+      harness.state.colors.background = { r: 1, g: 2, b: 3 };
+      harness.state.dirty = DirtyState.FULL;
+      harness.renderer.render(harness.buffer, false, 7.75, scrollbackProvider, 0.5);
+      expect(batchCalls).toHaveLength(2);
+      expect(harness.renderer.getFrameStats()).toMatchObject({
+        renderedRows: 4,
+        materializedRows: 4,
+        materializedCells: 4,
+      });
+
+      // Eviction can replace retained offsets without changing their numeric
+      // start or row count. The engine-owned generation invalidates that map.
+      scrollbackGeneration++;
+      harness.state.dirty = DirtyState.FULL;
+      harness.renderer.render(harness.buffer, false, 7.75, scrollbackProvider, 0.5);
+      expect(batchCalls).toHaveLength(3);
+      expect(harness.renderer.getFrameStats()).toMatchObject({
+        renderedRows: 4,
+        materializedRows: 4,
+        materializedCells: 4,
+      });
+      harness.renderer.dispose();
+    });
+
+    test('memoizes fallback retained rows across hyperlink scanning and painting', () => {
+      const lines = Array.from({ length: 4 }, () => [makeCell('x')]);
+      const harness = createRenderHarness(lines);
+      const retained = Array.from({ length: 4 }, () => [makeCell('h', { hyperlink_id: 7 })]);
+      const requestedRows: number[] = [];
+      const scrollbackProvider = {
+        getScrollbackLength: () => retained.length,
+        getScrollbackLine: (offset: number) => {
+          requestedRows.push(offset);
+          return retained[offset] ?? null;
+        },
+      };
+
+      harness.renderer.render(harness.buffer, true, 4, scrollbackProvider);
+      requestedRows.length = 0;
+      harness.renderer.setHoveredHyperlinkId(7);
+      harness.renderer.render(harness.buffer, false, 4, scrollbackProvider);
+
+      expect(requestedRows).toEqual([0, 1, 2, 3]);
+      expect(harness.renderer.getFrameStats()).toMatchObject({
+        renderedRows: 4,
+        materializedRows: 4,
+        materializedCells: 4,
+      });
+      harness.renderer.dispose();
+    });
+
+    test('tracks cursor presentation across a fractional bottom viewport', () => {
+      const harness = createRenderHarness([[makeCell('a'), makeCell('b')]], {
+        cursor: { x: 0, y: 0, visible: true },
+      });
+      harness.renderer.render(harness.buffer, true, 0);
+
+      harness.state.cursor.x = 1;
+      harness.state.dirty = DirtyState.NONE;
+      harness.renderer.render(harness.buffer, false, 0.5);
+
+      expect(harness.renderer.getFrameStats()).toMatchObject({ renderedRows: 1 });
+      expect(harness.fillRects).toContainEqual(
+        expect.objectContaining({
+          x: harness.renderer.charWidth,
+          y: 0,
+          width: harness.renderer.charWidth,
+          height: harness.renderer.charHeight,
+        })
+      );
       harness.renderer.dispose();
     });
 
