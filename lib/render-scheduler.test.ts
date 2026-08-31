@@ -359,6 +359,8 @@ describe('hvir presentation scheduler', () => {
         synchronizedOutputRecoveries: 0,
         lastFrame: {
           renderedRows: 0,
+          materializedRows: 0,
+          materializedCells: 0,
           textRuns: 0,
           textMeasurements: 0,
           shapedRuns: 0,

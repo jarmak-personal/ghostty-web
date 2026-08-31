@@ -43,7 +43,7 @@ import { DEFAULT_THEME, normalizeTheme, themeToTerminalConfig } from './palette'
 import { encodePaste } from './paste';
 import { OSC8LinkProvider } from './providers/osc8-link-provider';
 import { UrlRegexProvider } from './providers/url-regex-provider';
-import { CanvasRenderer, type RendererFrameStats } from './renderer';
+import { CanvasRenderer, type IScrollbackProvider, type RendererFrameStats } from './renderer';
 import {
   RetainedBufferExtractionError,
   RetainedBufferExtractionManager,
@@ -192,6 +192,15 @@ export class Terminal implements ITerminalCore {
   private synchronizedOutputGeneration = 0;
   private synchronizedOutputTimeout?: number;
   private synchronizedOutputRecoveries = 0;
+  private readonly rendererScrollbackProvider: IScrollbackProvider = {
+    getScrollbackLine: (offset) => this.getScrollbackLine(offset),
+    getScrollbackLength: () => this.getScrollbackLength(),
+    getScrollbackGeneration: () => this.wasmTerm?.getScrollbackGeneration() ?? 0,
+    getScrollbackGraphemeString: (offset, col) =>
+      this.wasmTerm?.getScrollbackGraphemeString(offset, col) ?? ' ',
+    getScrollbackViewport: (start, rows) =>
+      this.wasmTerm?.getScrollbackViewport(start, rows) ?? null,
+  };
 
   // Addons
   private addons: ITerminalAddon[] = [];
@@ -1599,6 +1608,8 @@ export class Terminal implements ITerminalCore {
   public getRenderStats(): TerminalRenderStats {
     const lastFrame = this.renderer?.getFrameStats?.() ?? {
       renderedRows: 0,
+      materializedRows: 0,
+      materializedCells: 0,
       textRuns: 0,
       textMeasurements: 0,
       shapedRuns: 0,
@@ -1778,7 +1789,7 @@ export class Terminal implements ITerminalCore {
         this.wasmTerm!,
         forceAll,
         this.viewportY,
-        this,
+        this.rendererScrollbackProvider,
         this.scrollbarOpacity
       );
       this.renderFrames++;
