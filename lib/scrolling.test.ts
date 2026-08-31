@@ -659,6 +659,104 @@ describe('Smooth Scrolling', () => {
     }
   });
 
+  test('keeps a live-bottom target at zero when output grows scrollback', () => {
+    const frames = installScrollFrameHarness();
+    try {
+      term.options.smoothScrollDuration = 100;
+      term.scrollLines(-20);
+      (term as any).smoothScrollTo(0);
+
+      const startTime = (term as any).scrollAnimationStartTime as number;
+      frames.runNext(startTime + 50);
+      const viewportBeforeWrite = term.getViewportY();
+      const scrollbackBeforeWrite = term.getScrollbackLength();
+      term.write('New output\r\n');
+
+      expect(term.getScrollbackLength()).toBe(scrollbackBeforeWrite + 1);
+      expect(term.getViewportY()).toBe(viewportBeforeWrite + 1);
+      expect((term as any).targetViewportY).toBe(0);
+
+      const restoredViewport = term.getViewportY();
+      frames.runNext(startTime + 60);
+      const expectedViewport = restoredViewport * (0.4 ** 3 / 0.5 ** 3);
+      expect(term.getViewportY()).toBeCloseTo(expectedViewport, 10);
+
+      frames.runNext(startTime + 100);
+      expect(term.getViewportY()).toBe(0);
+      expect((term as any).targetViewportY).toBe(0);
+      expect(frames.callbacks.size).toBe(0);
+    } finally {
+      frames.restore();
+    }
+  });
+
+  test('keeps a live-bottom target across multiple growing and in-place writes', () => {
+    const frames = installScrollFrameHarness();
+    try {
+      term.options.smoothScrollDuration = 100;
+      term.scrollLines(-20);
+      (term as any).smoothScrollTo(0);
+
+      const startTime = (term as any).scrollAnimationStartTime as number;
+      frames.runNext(startTime + 25);
+      const viewportBeforeWrites = term.getViewportY();
+      const scrollbackBeforeWrites = term.getScrollbackLength();
+      term.write('First output\r\n');
+      const scrollbackAfterGrowingWrite = term.getScrollbackLength();
+      term.write('\rstatus update');
+      expect(term.getScrollbackLength()).toBe(scrollbackAfterGrowingWrite);
+      expect((term as any).targetViewportY).toBe(0);
+      term.write('\r\nSecond output');
+
+      const scrollbackGrowth = term.getScrollbackLength() - scrollbackBeforeWrites;
+      expect(scrollbackGrowth).toBe(2);
+      expect(term.getViewportY()).toBe(viewportBeforeWrites + scrollbackGrowth);
+      expect((term as any).targetViewportY).toBe(0);
+
+      const restoredViewport = term.getViewportY();
+      frames.runNext(startTime + 50);
+      const expectedViewport = restoredViewport * (0.5 ** 3 / 0.75 ** 3);
+      expect(term.getViewportY()).toBeCloseTo(expectedViewport, 10);
+
+      frames.runNext(startTime + 100);
+      expect(term.getViewportY()).toBe(0);
+      expect((term as any).targetViewportY).toBe(0);
+      expect(frames.callbacks.size).toBe(0);
+
+      term.write('Following output\r\n');
+      expect(term.getViewportY()).toBe(0);
+    } finally {
+      frames.restore();
+    }
+  });
+
+  test('continues preserving nonzero historical targets as output grows', () => {
+    const frames = installScrollFrameHarness();
+    try {
+      term.options.smoothScrollDuration = 100;
+
+      for (const target of [10, 30]) {
+        term.scrollToLine(20);
+        (term as any).smoothScrollTo(target);
+
+        const startTime = (term as any).scrollAnimationStartTime as number;
+        const viewportBeforeWrite = term.getViewportY();
+        const scrollbackBeforeWrite = term.getScrollbackLength();
+        term.write(`Output toward ${target}\r\n`);
+
+        expect(term.getScrollbackLength()).toBe(scrollbackBeforeWrite + 1);
+        expect(term.getViewportY()).toBe(viewportBeforeWrite + 1);
+        expect((term as any).targetViewportY).toBe(target + 1);
+
+        frames.runNext(startTime + 100);
+        expect(term.getViewportY()).toBe(target + 1);
+        expect(frames.callbacks.size).toBe(0);
+      }
+    } finally {
+      frames.restore();
+    }
+  });
+
   test('a reentrant direct scroll prevents the old callback from rescheduling', () => {
     const frames = installScrollFrameHarness();
     try {
