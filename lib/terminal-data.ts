@@ -7,6 +7,7 @@ export class TerminalDataChannel {
   private pending: ITerminalDataEvent[] = [];
   private delivering = false;
   private disposed = false;
+  private deliveryFailure?: { error: unknown };
 
   readonly onData: IEvent<string> = (listener) => this.subscribe((event) => listener(event.data));
   readonly onDataWithSource: IEvent<ITerminalDataEvent> = (listener) => this.subscribe(listener);
@@ -25,6 +26,9 @@ export class TerminalDataChannel {
       this.pending = [];
       this.delivering = false;
     }
+    const failure = this.deliveryFailure;
+    this.deliveryFailure = undefined;
+    if (failure) throw failure.error;
   }
 
   dispose(): void {
@@ -38,7 +42,14 @@ export class TerminalDataChannel {
     if (this.disposed) return { dispose: () => {} };
     let active = !this.disposed;
     const subscription = this.emitter.event((event) => {
-      if (active && !this.disposed) listener(event);
+      if (!active || this.disposed) return;
+      try {
+        listener(event);
+      } catch (error) {
+        // A subscriber cannot discard later subscribers' or nested producers' bytes.
+        // Preserve the first error and rethrow only after this delivery drains.
+        this.deliveryFailure ??= { error };
+      }
     });
     return {
       dispose: () => {

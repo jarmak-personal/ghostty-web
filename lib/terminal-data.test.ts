@@ -35,6 +35,43 @@ describe('PTY-bound data delivery', () => {
     channel.dispose();
   });
 
+  test.each([
+    ['Error', new Error('subscriber failed')],
+    ['undefined', undefined],
+  ] as const)(
+    'drains both views and nested producers before rethrowing a subscriber error (%s)',
+    (_description, failure) => {
+      const channel = new TerminalDataChannel();
+      const tagged: ITerminalDataEvent[] = [];
+      const legacy: string[] = [];
+      channel.onData((data) => {
+        if (data === 'first') channel.emit('\x1b[0n', 'terminal-response');
+      });
+      channel.onDataWithSource((event) => {
+        if (event.data === 'first') throw failure;
+        if (event.source === 'terminal-response') throw new Error('later subscriber failure');
+      });
+      channel.onData((data) => legacy.push(data));
+      channel.onDataWithSource((event) => tagged.push(event));
+      let thrown = false;
+      try {
+        channel.emit('first', 'user');
+      } catch (error) {
+        thrown = true;
+        expect(error).toBe(failure);
+      }
+      expect(thrown).toBe(true);
+      channel.emit('later', 'user');
+      expect(legacy).toEqual(['first', '\x1b[0n', 'later']);
+      expect(tagged).toEqual([
+        { data: 'first', source: 'user' },
+        { data: '\x1b[0n', source: 'terminal-response' },
+        { data: 'later', source: 'user' },
+      ]);
+      channel.dispose();
+    }
+  );
+
   test('subscription revocation and channel disposal reject late and queued delivery', async () => {
     const channel = new TerminalDataChannel();
     const legacy: string[] = [];
