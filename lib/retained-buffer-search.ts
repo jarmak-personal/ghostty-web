@@ -8,57 +8,67 @@ import type {
 
 const SEARCH_TASK_BUDGET_MS = 4;
 const SEARCH_RANGE_BATCH_SIZE = 128;
+const REFRESH_DELAY_MS = 75;
 
 interface RangeIdentity {
   sessionId: number;
-  matchIndex: number;
+  occurrenceId: number;
 }
-
 interface SearchJob {
   terminal: GhosttyTerminal;
-  sessionId: number;
-  query: string;
-  caseSensitive: boolean;
-  signal?: AbortSignal;
-  abortListener?: () => void;
-  timer?: ReturnType<typeof setTimeout>;
+  result: RetainedBufferSearchResult;
   phase: 'search' | 'ranges';
   matchCount: number;
   nextMatch: number;
-  ranges: RetainedBufferRange[];
-  resolve: (value: IRetainedBufferSearchResult) => void;
-  reject: (reason: Error) => void;
-  settled: boolean;
-}
-
-class RetainedBufferRange implements IRetainedBufferRange {
-  constructor(
-    public readonly start: Readonly<{ row: number; column: number }>,
-    public readonly end: Readonly<{ row: number; column: number }>
-  ) {
-    Object.freeze(this);
-  }
+  ranges: IRetainedBufferRange[];
+  timer?: ReturnType<typeof setTimeout>;
+  resolve?: (value: IRetainedBufferSearchResult) => void;
+  reject?: (reason: Error) => void;
 }
 
 class RetainedBufferSearchResult implements IRetainedBufferSearchResult {
-  private disposed = false;
-
+  matches: readonly IRetainedBufferRange[] = Object.freeze([]);
+  pending = true;
+  invalidated = false;
+  disposed = false;
+  dirty = false;
+  refreshTimer?: ReturnType<typeof setTimeout>;
+  readonly ranges = new Map<number, IRetainedBufferRange>();
+  private readonly listeners = new Set<() => void>();
   constructor(
     private readonly owner: RetainedBufferSearchManager,
-    public readonly query: string,
-    public readonly caseSensitive: boolean,
-    public readonly matches: readonly IRetainedBufferRange[],
-    readonly sessionId: number
+    readonly query: string,
+    readonly caseSensitive: boolean,
+    readonly sessionId: number,
+    readonly signal?: AbortSignal
   ) {}
-
+  readonly abort = (): void => this.owner.cancel();
+  onUpdate(listener: () => void): IDisposable {
+    if (this.disposed) return { dispose: () => {} };
+    this.listeners.add(listener);
+    return { dispose: () => this.listeners.delete(listener) };
+  }
+  publish(): void {
+    for (const listener of [...this.listeners]) listener();
+  }
+  revoke(): void {
+    const listeners = [...this.listeners];
+    this.invalidated = true;
+    this.pending = false;
+    this.matches = Object.freeze([]);
+    this.owner.releaseResult(this);
+    for (const listener of listeners) listener();
+  }
+  clearListeners(): void {
+    this.listeners.clear();
+  }
   extract(range: IRetainedBufferRange): string | undefined {
-    if (this.disposed) return undefined;
     return this.owner.extract(this, range);
   }
-
+  resolve(range: IRetainedBufferRange): IRetainedBufferRange | undefined {
+    return this.owner.resolve(this, range);
+  }
   dispose(): void {
-    if (this.disposed) return;
-    this.disposed = true;
     this.owner.releaseResult(this);
   }
 }
@@ -69,21 +79,12 @@ function abortError(message: string): Error {
   return error;
 }
 
-function now(): number {
-  return typeof performance === 'undefined' ? Date.now() : performance.now();
-}
-
-/**
- * Owns one terminal's current retained-buffer query and its native lifetime.
- * Native search advances one bounded Ghostty page step at a time; range
- * materialization is separately time-sliced for high-match buffers.
- */
+/** Finite native scans with authenticated cell identity and one coalesced refresh. */
 export class RetainedBufferSearchManager implements IDisposable {
   private currentJob?: SearchJob;
   private currentResult?: RetainedBufferSearchResult;
   private readonly identities = new WeakMap<IRetainedBufferRange, RangeIdentity>();
   private disposed = false;
-
   constructor(private readonly getTerminal: () => GhosttyTerminal | undefined) {}
 
   search(
@@ -91,99 +92,140 @@ export class RetainedBufferSearchManager implements IDisposable {
     options: IRetainedBufferSearchOptions
   ): Promise<IRetainedBufferSearchResult> {
     if (this.disposed) return Promise.reject(new Error('Terminal search is disposed'));
-    this.cancelCurrent(abortError('Retained-buffer search was replaced'));
-
-    if (options.signal?.aborted) {
+    this.cancel();
+    if (options.signal?.aborted)
       return Promise.reject(abortError('Retained-buffer search was aborted'));
-    }
-
-    if (query.length === 0) {
-      const result = new RetainedBufferSearchResult(
-        this,
-        query,
-        options.caseSensitive,
-        Object.freeze([]),
-        0
-      );
-      this.currentResult = result;
-      return Promise.resolve(result);
-    }
-
     const terminal = this.getTerminal();
     if (!terminal) return Promise.reject(new Error('Terminal is not open'));
-    const sessionId = terminal.createRetainedSearch(query, options.caseSensitive);
-    if (sessionId === 0) {
+    const sessionId =
+      query.length === 0 ? 0 : terminal.createRetainedSearch(query, options.caseSensitive);
+    if (query.length > 0 && sessionId === 0)
       return Promise.reject(new Error('Unable to create retained-buffer search'));
+    const result = new RetainedBufferSearchResult(
+      this,
+      query,
+      options.caseSensitive,
+      sessionId,
+      options.signal
+    );
+    this.currentResult = result;
+    options.signal?.addEventListener('abort', result.abort, { once: true });
+    if (sessionId === 0) {
+      result.pending = false;
+      return Promise.resolve(result);
     }
-
-    return new Promise<IRetainedBufferSearchResult>((resolve, reject) => {
+    return new Promise((resolve, reject) => {
       const job: SearchJob = {
         terminal,
-        sessionId,
-        query,
-        caseSensitive: options.caseSensitive,
-        signal: options.signal,
+        result,
         phase: 'search',
         matchCount: 0,
         nextMatch: 0,
         ranges: [],
         resolve,
         reject,
-        settled: false,
       };
-      if (options.signal) {
-        job.abortListener = () => {
-          if (this.currentJob === job) {
-            this.cancelJob(job, abortError('Retained-buffer search was aborted'));
-          }
-        };
-        options.signal.addEventListener('abort', job.abortListener, { once: true });
-      }
       this.currentJob = job;
       this.schedule(job);
     });
   }
 
-  /** A primary-affecting parser write invalidates the whole native snapshot. */
   noteWrite(): void {
-    if (this.disposed) return;
-    this.cancelCurrent(abortError('Terminal changed during retained-buffer search'));
+    const result = this.currentResult;
+    if (!result || result.disposed || result.sessionId === 0) return;
+    result.dirty = true;
+    // Revocation from a parser reset must be observable even after resolution.
+    if (
+      this.getTerminal()?.getRetainedSearchMatchCount(result.sessionId) === -1 &&
+      !this.currentJob
+    ) {
+      // A valid refreshing query also reports -1, but owns currentJob.
+      this.invalidateAll();
+      return;
+    }
+    result.publish();
+    this.scheduleRefresh(result);
   }
 
-  /** Reflow/reset invalidates every range, including immutable history rows. */
   invalidateAll(): void {
-    if (this.disposed) return;
-    this.cancelCurrent(abortError('Terminal buffer identity changed'));
+    const result = this.currentResult;
+    if (result && !result.disposed) result.revoke();
   }
 
   cancel(): void {
-    this.cancelCurrent(abortError('Retained-buffer search was cancelled'));
+    const job = this.currentJob;
+    this.currentJob = undefined;
+    if (job?.timer !== undefined) clearTimeout(job.timer);
+    job?.reject?.(abortError('Retained-buffer search was revoked'));
+    if (this.currentResult) this.releaseResult(this.currentResult);
+  }
+
+  private identity(
+    result: RetainedBufferSearchResult,
+    range: IRetainedBufferRange
+  ): RangeIdentity | undefined {
+    if (this.disposed || result.disposed || result.invalidated || this.currentResult !== result)
+      return;
+    const identity = this.identities.get(range);
+    return identity?.sessionId === result.sessionId ? identity : undefined;
   }
 
   extract(result: RetainedBufferSearchResult, range: IRetainedBufferRange): string | undefined {
-    if (this.disposed || this.currentResult !== result || result.sessionId === 0) return undefined;
-    const identity = this.identities.get(range);
-    if (!identity || identity.sessionId !== result.sessionId) return undefined;
-    return (
-      this.getTerminal()?.getRetainedSearchMatchText(identity.sessionId, identity.matchIndex) ??
-      undefined
+    const identity = this.identity(result, range);
+    return identity
+      ? (this.getTerminal()?.getRetainedSearchMatchText(
+          identity.sessionId,
+          identity.occurrenceId
+        ) ?? undefined)
+      : undefined;
+  }
+
+  resolve(
+    result: RetainedBufferSearchResult,
+    range: IRetainedBufferRange
+  ): IRetainedBufferRange | undefined {
+    const identity = this.identity(result, range);
+    if (!identity) return;
+    const cells = this.getTerminal()?.getRetainedSearchMatchRange(
+      identity.sessionId,
+      identity.occurrenceId
     );
+    if (!cells) return;
+    const resolved = Object.freeze({
+      id: identity.occurrenceId,
+      start: Object.freeze({ row: cells.startRow, column: cells.startColumn }),
+      end: Object.freeze({ row: cells.endRow, column: cells.endColumn }),
+    });
+    this.identities.set(resolved, identity);
+    return resolved;
   }
 
   extractCurrent(range: IRetainedBufferRange): string | undefined {
-    const result = this.currentResult;
-    return result ? this.extract(result, range) : undefined;
+    return this.currentResult ? this.extract(this.currentResult, range) : undefined;
   }
 
   releaseResult(result: RetainedBufferSearchResult): void {
+    if (result.disposed) return;
+    result.disposed = true;
+    if (result.refreshTimer !== undefined) clearTimeout(result.refreshTimer);
+    result.signal?.removeEventListener('abort', result.abort);
+    result.clearListeners();
+    result.ranges.clear();
     if (result.sessionId !== 0) this.getTerminal()?.cancelRetainedSearch(result.sessionId);
     if (this.currentResult === result) this.currentResult = undefined;
+    const job = this.currentJob;
+    if (job?.result === result) {
+      this.currentJob = undefined;
+      if (job.timer !== undefined) clearTimeout(job.timer);
+      job.reject?.(abortError('Retained-buffer search was disposed'));
+    }
   }
 
   dispose(): void {
-    if (this.disposed) return;
-    this.cancelCurrent(abortError('Terminal search was disposed'));
-    this.disposed = true;
+    if (!this.disposed) {
+      this.cancel();
+      this.disposed = true;
+    }
   }
 
   private schedule(job: SearchJob): void {
@@ -193,107 +235,97 @@ export class RetainedBufferSearchManager implements IDisposable {
     }, 0);
   }
 
-  private run(job: SearchJob): void {
-    if (this.currentJob !== job || job.settled) return;
-    if (job.signal?.aborted) {
-      this.cancelJob(job, abortError('Retained-buffer search was aborted'));
+  private scheduleRefresh(result: RetainedBufferSearchResult): void {
+    if (
+      this.currentResult !== result ||
+      result.disposed ||
+      this.currentJob ||
+      result.refreshTimer !== undefined ||
+      !result.dirty
+    )
       return;
-    }
-    if (this.getTerminal() !== job.terminal) {
-      this.cancelJob(job, abortError('Terminal changed during retained-buffer search'));
-      return;
-    }
-
-    if (job.phase === 'search') {
-      const status = job.terminal.stepRetainedSearch(job.sessionId);
-      if (status < 0) {
-        this.cancelJob(job, new Error('Retained-buffer search failed'));
+    result.refreshTimer = setTimeout(() => {
+      result.refreshTimer = undefined;
+      if (this.currentResult !== result || result.disposed) return;
+      const terminal = this.getTerminal();
+      if (!terminal || !terminal.refreshRetainedSearch(result.sessionId)) {
+        this.invalidateAll();
         return;
       }
-      if (status === 0) {
+      result.dirty = false;
+      result.pending = true;
+      const job: SearchJob = {
+        terminal,
+        result,
+        phase: 'search',
+        matchCount: 0,
+        nextMatch: 0,
+        ranges: [],
+      };
+      this.currentJob = job;
+      result.publish();
+      if (this.currentJob === job && !result.disposed) this.schedule(job);
+    }, REFRESH_DELAY_MS);
+  }
+
+  private run(job: SearchJob): void {
+    if (this.currentJob !== job || job.result.disposed) return;
+    if (this.getTerminal() !== job.terminal || job.result.signal?.aborted) {
+      this.cancel();
+      return;
+    }
+    const deadline = performance.now() + SEARCH_TASK_BUDGET_MS;
+    if (job.phase === 'search') {
+      do {
+        const status = job.terminal.stepRetainedSearch(job.result.sessionId);
+        if (status < 0) {
+          job.reject?.(new Error('Retained-buffer search failed'));
+          this.invalidateAll();
+          return;
+        }
+        if (status === 1) {
+          job.matchCount = job.terminal.getRetainedSearchMatchCount(job.result.sessionId);
+          job.phase = 'ranges';
+          break;
+        }
+      } while (performance.now() < deadline);
+      if (job.phase === 'search') {
         this.schedule(job);
         return;
       }
-      job.matchCount = job.terminal.getRetainedSearchMatchCount(job.sessionId);
-      if (job.matchCount < 0) {
-        this.cancelJob(job, new Error('Retained-buffer search results became stale'));
-        return;
-      }
-      job.phase = 'ranges';
     }
-
-    const deadline = now() + SEARCH_TASK_BUDGET_MS;
     let processed = 0;
     while (
       job.nextMatch < job.matchCount &&
       processed < SEARCH_RANGE_BATCH_SIZE &&
-      now() < deadline
+      performance.now() < deadline
     ) {
-      const matchIndex = job.nextMatch;
-      const nativeRange = job.terminal.getRetainedSearchMatchRange(job.sessionId, matchIndex);
-      if (!nativeRange) {
-        this.cancelJob(job, new Error('Retained-buffer search range became stale'));
-        return;
-      }
-      const range = new RetainedBufferRange(
-        Object.freeze({ row: nativeRange.startRow, column: nativeRange.startColumn }),
-        Object.freeze({ row: nativeRange.endRow, column: nativeRange.endColumn })
-      );
-      this.identities.set(range, {
-        sessionId: job.sessionId,
-        matchIndex,
-      });
-      job.ranges.push(range);
-      job.nextMatch++;
+      const id = job.terminal.getRetainedSearchMatchId(job.result.sessionId, job.nextMatch++);
       processed++;
+      const cells = job.terminal.getRetainedSearchMatchRange(job.result.sessionId, id);
+      if (!cells) continue;
+      let range = job.result.ranges.get(id);
+      if (!range) {
+        range = Object.freeze({
+          id,
+          start: Object.freeze({ row: cells.startRow, column: cells.startColumn }),
+          end: Object.freeze({ row: cells.endRow, column: cells.endColumn }),
+        });
+        this.identities.set(range, { sessionId: job.result.sessionId, occurrenceId: id });
+      }
+      job.ranges.push(range);
     }
-
     if (job.nextMatch < job.matchCount) {
       this.schedule(job);
       return;
     }
-
-    this.finishJob(job);
-  }
-
-  private finishJob(job: SearchJob): void {
-    if (this.currentJob !== job || job.settled) return;
-    this.cleanupJob(job);
-    job.settled = true;
     this.currentJob = undefined;
-    const result = new RetainedBufferSearchResult(
-      this,
-      job.query,
-      job.caseSensitive,
-      Object.freeze(job.ranges.slice()),
-      job.sessionId
-    );
-    this.currentResult = result;
-    job.resolve(result);
-  }
-
-  private cancelCurrent(error: Error): void {
-    if (this.currentJob) this.cancelJob(this.currentJob, error);
-    this.currentResult?.dispose();
-  }
-
-  private cancelJob(job: SearchJob, error: Error): void {
-    if (job.settled) return;
-    this.cleanupJob(job);
-    job.settled = true;
-    job.terminal.cancelRetainedSearch(job.sessionId);
-    if (this.currentJob === job) this.currentJob = undefined;
-    job.reject(error);
-  }
-
-  private cleanupJob(job: SearchJob): void {
-    if (job.timer !== undefined) {
-      clearTimeout(job.timer);
-      job.timer = undefined;
-    }
-    if (job.signal && job.abortListener) {
-      job.signal.removeEventListener('abort', job.abortListener);
-      job.abortListener = undefined;
-    }
+    job.result.ranges.clear();
+    for (const range of job.ranges) job.result.ranges.set(range.id, range);
+    job.result.matches = Object.freeze(job.ranges);
+    job.result.pending = false;
+    job.resolve?.(job.result);
+    job.result.publish();
+    this.scheduleRefresh(job.result);
   }
 }

@@ -7,6 +7,24 @@ index 74f3f85eb..814e13ccd 100644
  vgcore.*
  
 +node_modules/
+diff --git a/build.zig b/build.zig
+index f9d861b19..3f2527dc8 100644
+--- a/build.zig
++++ b/build.zig
+@@ -33,6 +33,13 @@ pub fn build(b: *std.Build) !void {
+         &deps,
+     );
+ 
++    if (b.option(bool, "retained-fixture-only", "Run retained-search fixtures without application SDKs") orelse false) {
++        const step = b.step("test-lib-vt", "Run retained-search native fixtures");
++        const exe = b.addTest(.{ .root_module = mod.vt_c, .filters = &.{"streaming retained search"} });
++        step.dependOn(&b.addRunArtifact(exe).step);
++        return;
++    }
++
+     // All our steps which we'll hook up later. The steps are shown
+     // up here just so that they are more self-documenting.
+     const libvt_step = b.step("lib-vt", "Build libghostty-vt");
 diff --git a/include/ghostty/vt.h b/include/ghostty/vt.h
 index 4f8fef88e..ca9fb1d4d 100644
 --- a/include/ghostty/vt.h
@@ -27,12 +45,1192 @@ index 4f8fef88e..ca9fb1d4d 100644
  #include <ghostty/vt/osc.h>
  #include <ghostty/vt/sgr.h>
  #include <ghostty/vt/key.h>
+diff --git a/src/lib_vt.zig b/src/lib_vt.zig
+index 426660621..ab6451414 100644
+--- a/src/lib_vt.zig
++++ b/src/lib_vt.zig
+@@ -143,6 +143,86 @@ comptime {
+         @export(&c.sgr_unknown_partial, .{ .name = "ghostty_sgr_unknown_partial" });
+         @export(&c.sgr_attribute_tag, .{ .name = "ghostty_sgr_attribute_tag" });
+         @export(&c.sgr_attribute_value, .{ .name = "ghostty_sgr_attribute_value" });
++        // Terminal lifecycle
++        @export(&c.terminal_new, .{ .name = "ghostty_terminal_new" });
++        @export(&c.terminal_new_with_config, .{ .name = "ghostty_terminal_new_with_config" });
++        @export(&c.terminal_free, .{ .name = "ghostty_terminal_free" });
++        @export(&c.terminal_resize, .{ .name = "ghostty_terminal_resize" });
++        @export(&c.terminal_set_color_config, .{ .name = "ghostty_terminal_set_color_config" });
++        @export(&c.terminal_set_cursor_config, .{ .name = "ghostty_terminal_set_cursor_config" });
++        @export(&c.terminal_write, .{ .name = "ghostty_terminal_write" });
++        @export(&c.terminal_retained_search_create, .{ .name = "ghostty_terminal_retained_search_create" });
++        @export(&c.terminal_retained_search_step, .{ .name = "ghostty_terminal_retained_search_step" });
++        @export(&c.terminal_retained_search_refresh, .{ .name = "ghostty_terminal_retained_search_refresh" });
++        @export(&c.terminal_retained_search_match_id, .{ .name = "ghostty_terminal_retained_search_match_id" });
++        @export(&c.terminal_retained_search_cancel, .{ .name = "ghostty_terminal_retained_search_cancel" });
++        @export(&c.terminal_retained_search_match_count, .{ .name = "ghostty_terminal_retained_search_match_count" });
++        @export(&c.terminal_retained_search_match_range, .{ .name = "ghostty_terminal_retained_search_match_range" });
++        @export(&c.terminal_retained_search_match_text, .{ .name = "ghostty_terminal_retained_search_match_text" });
++        @export(&c.terminal_get_primary_screen_generation, .{ .name = "ghostty_terminal_get_primary_screen_generation" });
++        @export(&c.terminal_get_alternate_screen_generation, .{ .name = "ghostty_terminal_get_alternate_screen_generation" });
++        @export(&c.terminal_capture_retained_buffer_boundary, .{ .name = "ghostty_terminal_capture_retained_buffer_boundary" });
++        @export(&c.terminal_capture_retained_buffer_position, .{ .name = "ghostty_terminal_capture_retained_buffer_position" });
++        @export(&c.terminal_release_retained_buffer_boundary, .{ .name = "ghostty_terminal_release_retained_buffer_boundary" });
++        @export(&c.terminal_retained_range_create, .{ .name = "ghostty_terminal_retained_range_create" });
++        @export(&c.terminal_retained_range_step, .{ .name = "ghostty_terminal_retained_range_step" });
++        @export(&c.terminal_retained_range_cancel, .{ .name = "ghostty_terminal_retained_range_cancel" });
++        @export(&c.terminal_retained_range_text, .{ .name = "ghostty_terminal_retained_range_text" });
++
++        // Structured terminal events
++        @export(&c.terminal_peek_event_size, .{ .name = "ghostty_terminal_peek_event_size" });
++        @export(&c.terminal_read_event, .{ .name = "ghostty_terminal_read_event" });
++        @export(&c.terminal_resolve_event_provenance, .{ .name = "ghostty_terminal_resolve_event_provenance" });
++        @export(&c.terminal_resolve_event_boundary, .{ .name = "ghostty_terminal_resolve_event_boundary" });
++
++        // RenderState API - high-performance rendering
++        @export(&c.render_state_update, .{ .name = "ghostty_render_state_update" });
++        @export(&c.render_state_get_cols, .{ .name = "ghostty_render_state_get_cols" });
++        @export(&c.render_state_get_rows, .{ .name = "ghostty_render_state_get_rows" });
++        @export(&c.render_state_get_cursor_x, .{ .name = "ghostty_render_state_get_cursor_x" });
++        @export(&c.render_state_get_cursor_y, .{ .name = "ghostty_render_state_get_cursor_y" });
++        @export(&c.render_state_get_cursor_visible, .{ .name = "ghostty_render_state_get_cursor_visible" });
++        @export(&c.render_state_get_cursor_blinking, .{ .name = "ghostty_render_state_get_cursor_blinking" });
++        @export(&c.render_state_get_cursor_style, .{ .name = "ghostty_render_state_get_cursor_style" });
++        @export(&c.render_state_get_cursor_default, .{ .name = "ghostty_render_state_get_cursor_default" });
++        @export(&c.render_state_get_bg_color, .{ .name = "ghostty_render_state_get_bg_color" });
++        @export(&c.render_state_get_fg_color, .{ .name = "ghostty_render_state_get_fg_color" });
++        @export(&c.render_state_get_cursor_color, .{ .name = "ghostty_render_state_get_cursor_color" });
++        @export(&c.render_state_get_palette_color, .{ .name = "ghostty_render_state_get_palette_color" });
++        @export(&c.render_state_is_row_dirty, .{ .name = "ghostty_render_state_is_row_dirty" });
++        @export(&c.render_state_mark_clean, .{ .name = "ghostty_render_state_mark_clean" });
++        @export(&c.render_state_get_viewport, .{ .name = "ghostty_render_state_get_viewport" });
++        @export(&c.render_state_get_grapheme, .{ .name = "ghostty_render_state_get_grapheme" });
++
++        // Terminal modes
++        @export(&c.terminal_is_alternate_screen, .{ .name = "ghostty_terminal_is_alternate_screen" });
++        @export(&c.terminal_get_buffer_info, .{ .name = "ghostty_terminal_get_buffer_info" });
++        @export(&c.terminal_get_buffer_line, .{ .name = "ghostty_terminal_get_buffer_line" });
++        @export(&c.terminal_get_buffer_grapheme, .{ .name = "ghostty_terminal_get_buffer_grapheme" });
++        @export(&c.terminal_is_buffer_row_wrapped, .{ .name = "ghostty_terminal_is_buffer_row_wrapped" });
++        @export(&c.terminal_has_mouse_tracking, .{ .name = "ghostty_terminal_has_mouse_tracking" });
++        @export(&c.terminal_get_synchronized_output_generation, .{ .name = "ghostty_terminal_get_synchronized_output_generation" });
++        @export(&c.terminal_reset_synchronized_output, .{ .name = "ghostty_terminal_reset_synchronized_output" });
++        @export(&c.terminal_get_mode, .{ .name = "ghostty_terminal_get_mode" });
++        @export(&c.terminal_get_kitty_keyboard_flags, .{ .name = "ghostty_terminal_get_kitty_keyboard_flags" });
++        @export(&c.terminal_has_modify_other_keys_state_2, .{ .name = "ghostty_terminal_has_modify_other_keys_state_2" });
++
++        // Scrollback API
++        @export(&c.terminal_get_scrollback_limit_bytes, .{ .name = "ghostty_terminal_get_scrollback_limit_bytes" });
++        @export(&c.terminal_get_scrollback_length, .{ .name = "ghostty_terminal_get_scrollback_length" });
++        @export(&c.terminal_get_scrollback_generation, .{ .name = "ghostty_terminal_get_scrollback_generation" });
++        @export(&c.terminal_get_scrollback_line, .{ .name = "ghostty_terminal_get_scrollback_line" });
++        @export(&c.terminal_get_scrollback_viewport, .{ .name = "ghostty_terminal_get_scrollback_viewport" });
++        @export(&c.terminal_get_scrollback_grapheme, .{ .name = "ghostty_terminal_get_scrollback_grapheme" });
++        @export(&c.terminal_is_row_wrapped, .{ .name = "ghostty_terminal_is_row_wrapped" });
++
++        // Hyperlink API
++        @export(&c.terminal_get_hyperlink_uri, .{ .name = "ghostty_terminal_get_hyperlink_uri" });
++        @export(&c.terminal_get_scrollback_hyperlink_uri, .{ .name = "ghostty_terminal_get_scrollback_hyperlink_uri" });
++
++        // Response API (for DSR and other queries)
++        @export(&c.terminal_has_response, .{ .name = "ghostty_terminal_has_response" });
++        @export(&c.terminal_read_response, .{ .name = "ghostty_terminal_read_response" });
+ 
+         // On Wasm we need to export our allocator convenience functions.
+         if (builtin.target.cpu.arch.isWasm()) {
+diff --git a/src/terminal/PageList.zig b/src/terminal/PageList.zig
+index 6e39428db..c98b50385 100644
+--- a/src/terminal/PageList.zig
++++ b/src/terminal/PageList.zig
+@@ -449,6 +449,7 @@ fn initPages(
+     errdefer {
+         var it = page_list.first;
+         while (it) |node| : (it = node.next) {
++            node.data.clearRetainedCellIds();
+             if (node.data.memory.len > std_size) {
+                 page_alloc.free(node.data.memory);
+             }
+@@ -477,10 +478,10 @@ fn initPages(
+         else
+             page_alloc.free(page_buf);
+ 
+-        // In runtime safety modes we have to memset because the Zig allocator
+-        // interface will always memset to 0xAA for undefined. In non-safe modes
+-        // we use a page allocator and the OS guarantees zeroed memory.
+-        if (comptime std.debug.runtime_safety) @memset(page_buf, 0);
++        // Runtime safety allocators initialize to undefined, 0xAA. WASM also
++        // reuses page allocations without guaranteeing zeroed contents.
++        if (comptime builtin.target.cpu.arch.isWasm() or std.debug.runtime_safety)
++            @memset(page_buf, 0);
+ 
+         // Initialize the first set of pages to contain our viewport so that
+         // the top of the first page is always the active area.
+@@ -635,6 +636,7 @@ pub fn deinit(self: *PageList) void {
+     const page_alloc = self.pool.pages.arena.child_allocator;
+     var it = self.pages.first;
+     while (it) |node| : (it = node.next) {
++        node.data.clearRetainedCellIds();
+         if (node.data.memory.len > std_size) {
+             page_alloc.free(node.data.memory);
+         }
+@@ -676,6 +678,7 @@ pub fn reset(self: *PageList) void {
+         const page_alloc = self.pool.pages.arena.child_allocator;
+         var it = self.pages.first;
+         while (it) |node| : (it = node.next) {
++            node.data.clearRetainedCellIds();
+             if (node.data.memory.len > std_size) {
+                 page_alloc.free(node.data.memory);
+             }
+@@ -3171,6 +3174,7 @@ pub fn grow(self: *PageList) Allocator.Error!?*List.Node {
+         }
+ 
+         // Reset our memory
++        first.data.clearRetainedCellIds();
+         const buf = first.data.memory;
+         @memset(buf, 0);
+         assert(buf.len <= std_size);
+@@ -3385,9 +3389,10 @@ inline fn createPageExt(
+     else
+         page_alloc.free(page_buf);
+ 
+-    // Required only with runtime safety because allocators initialize
+-    // to undefined, 0xAA.
+-    if (comptime std.debug.runtime_safety) @memset(page_buf, 0);
++    // Runtime safety allocators initialize to undefined, 0xAA. WASM also
++    // reuses page allocations without guaranteeing zeroed contents.
++    if (comptime builtin.target.cpu.arch.isWasm() or std.debug.runtime_safety)
++        @memset(page_buf, 0);
+ 
+     page.* = .{
+         .data = .initBuf(.init(page_buf), layout),
+@@ -3423,6 +3428,7 @@ fn destroyNodeExt(
+     total_size: ?*usize,
+ ) void {
+     const page: *Page = &node.data;
++    page.clearRetainedCellIds();
+ 
+     // Update our accounting for page size
+     if (total_size) |v| v.* -= page.memory.len;
+diff --git a/src/terminal/Parser.zig b/src/terminal/Parser.zig
+index 88e7edf7c..b5c3896e1 100644
+--- a/src/terminal/Parser.zig
++++ b/src/terminal/Parser.zig
+@@ -27,6 +27,7 @@ pub const State = enum {
+     dcs_ignore,
+     osc_string,
+     sos_pm_apc_string,
++    screen_title_string,
+ };
+ 
+ /// Transition action is an action that can be taken during a state
+diff --git a/src/terminal/Screen.zig b/src/terminal/Screen.zig
+index ea8ca1445..1ad1eaf93 100644
+--- a/src/terminal/Screen.zig
++++ b/src/terminal/Screen.zig
+@@ -871,15 +871,24 @@ pub fn cursorDownScroll(self: *Screen) !void {
+         // Our new row is always dirty
+         self.cursorMarkDirty();
+ 
+-        // Clear the new row so it gets our bg color. We only do this
+-        // if we have a bg color at all.
+-        if (self.cursor.style.bg_color != .none) {
++        // Always clear the new row's cells. When pages.grow() extends an
++        // existing page, the new row's cell memory may contain stale data
++        // from previously erased rows. Without clearing, these stale cells
++        // become visible when the row isn't fully overwritten, such as after
++        // bare CRLF output with the default cursor style.
++        {
+             const page: *Page = &self.cursor.page_pin.node.data;
++            const row = self.cursor.page_row;
++            const cells_offset = row.cells;
++            const dirty = row.dirty;
+             self.clearCells(
+                 page,
+-                self.cursor.page_row,
+-                page.getCells(self.cursor.page_row),
++                row,
++                page.getCells(row),
+             );
++            // Reset row-level metadata that clearCells does not touch while
++            // preserving the backing cell offset and dirty state.
++            row.* = .{ .cells = cells_offset, .dirty = dirty };
+         }
+     }
+ 
+@@ -889,6 +898,7 @@ pub fn cursorDownScroll(self: *Screen) !void {
+         if (self.cursor.style.bgCell()) |blank_cell| {
+             const cell_current: [*]pagepkg.Cell = @ptrCast(self.cursor.page_cell);
+             const cells = cell_current - self.cursor.x;
++            self.cursor.page_pin.node.data.revokeRetainedCells(cells[0..self.pages.cols]);
+             @memset(cells[0..self.pages.cols], blank_cell);
+         }
+     }
+@@ -987,6 +997,7 @@ pub fn cursorScrollAbove(self: *Screen) !void {
+         if (self.cursor.style.bgCell()) |blank_cell| {
+             const cell_current: [*]pagepkg.Cell = @ptrCast(self.cursor.page_cell);
+             const cells = cell_current - self.cursor.x;
++            self.cursor.page_pin.node.data.revokeRetainedCells(cells[0..self.pages.cols]);
+             @memset(cells[0..self.pages.cols], blank_cell);
+         }
+     }
+@@ -1446,6 +1457,7 @@ pub fn clearCells(
+         }
+     }
+ 
++    page.revokeRetainedCells(cells);
+     @memset(cells, self.blankCell());
+ }
+ 
+@@ -8254,8 +8266,10 @@ test "Screen: selectWord" {
+ 
+     // Default boundary codepoints for word selection
+     const boundary_codepoints = &[_]u21{
+-        0,   ' ', '\t', '\'', '"', '│', '`', '|', ':', ';',
+-        ',', '(', ')',  '[',  ']', '{',   '}', '<', '>', '$',
++        0,     ' ', '\t', '\'', '"',
++        '│', '`', '|',  ':',  ';',
++        ',',   '(', ')',  '[',  ']',
++        '{',   '}', '<',  '>',  '$',
+     };
+ 
+     // Outside of active area
+@@ -8375,8 +8389,10 @@ test "Screen: selectWord across soft-wrap" {
+ 
+     // Default boundary codepoints for word selection
+     const boundary_codepoints = &[_]u21{
+-        0,   ' ', '\t', '\'', '"', '│', '`', '|', ':', ';',
+-        ',', '(', ')',  '[',  ']', '{',   '}', '<', '>', '$',
++        0,     ' ', '\t', '\'', '"',
++        '│', '`', '|',  ':',  ';',
++        ',',   '(', ')',  '[',  ']',
++        '{',   '}', '<',  '>',  '$',
+     };
+ 
+     {
+@@ -8447,8 +8463,10 @@ test "Screen: selectWord whitespace across soft-wrap" {
+ 
+     // Default boundary codepoints for word selection
+     const boundary_codepoints = &[_]u21{
+-        0,   ' ', '\t', '\'', '"', '│', '`', '|', ':', ';',
+-        ',', '(', ')',  '[',  ']', '{',   '}', '<', '>', '$',
++        0,     ' ', '\t', '\'', '"',
++        '│', '`', '|',  ':',  ';',
++        ',',   '(', ')',  '[',  ']',
++        '{',   '}', '<',  '>',  '$',
+     };
+ 
+     // Going forward
+@@ -8509,8 +8527,10 @@ test "Screen: selectWord with character boundary" {
+ 
+     // Default boundary codepoints for word selection
+     const boundary_codepoints = &[_]u21{
+-        0,   ' ', '\t', '\'', '"', '│', '`', '|', ':', ';',
+-        ',', '(', ')',  '[',  ']', '{',   '}', '<', '>', '$',
++        0,     ' ', '\t', '\'', '"',
++        '│', '`', '|',  ':',  ';',
++        ',',   '(', ')',  '[',  ']',
++        '{',   '}', '<',  '>',  '$',
+     };
+ 
+     const cases = [_][]const u8{
+diff --git a/src/terminal/Terminal.zig b/src/terminal/Terminal.zig
+index 706f235c7..9393973d4 100644
+--- a/src/terminal/Terminal.zig
++++ b/src/terminal/Terminal.zig
+@@ -795,6 +795,9 @@ fn printCell(
+     // Keep track if we had a hyperlink so we can unset it.
+     const had_hyperlink = cell.hyperlink;
+ 
++    // Every overwrite creates a new retained-cell incarnation, including
++    // writes of identical text. Styling alone does not revoke provenance.
++    self.screens.active.cursor.page_pin.node.data.revokeRetainedCells(cell[0..1]);
+     // Write
+     cell.* = .{
+         .content_tag = .codepoint,
+diff --git a/src/terminal/c/main.zig b/src/terminal/c/main.zig
+index bc92597f5..a5db14eee 100644
+--- a/src/terminal/c/main.zig
++++ b/src/terminal/c/main.zig
+@@ -4,6 +4,7 @@ pub const key_event = @import("key_event.zig");
+ pub const key_encode = @import("key_encode.zig");
+ pub const paste = @import("paste.zig");
+ pub const sgr = @import("sgr.zig");
++pub const terminal = @import("terminal.zig");
+ 
+ // The full C API, unexported.
+ pub const osc_new = osc.new;
+@@ -52,6 +53,85 @@ pub const key_encoder_encode = key_encode.encode;
+ 
+ pub const paste_is_safe = paste.is_safe;
+ 
++// Terminal lifecycle
++pub const terminal_new = terminal.new;
++pub const terminal_new_with_config = terminal.newWithConfig;
++pub const terminal_free = terminal.free;
++pub const terminal_resize = terminal.resize;
++pub const terminal_set_color_config = terminal.setColorConfig;
++pub const terminal_set_cursor_config = terminal.setCursorConfig;
++pub const terminal_write = terminal.write;
++pub const terminal_retained_search_create = terminal.retainedSearchCreate;
++pub const terminal_retained_search_step = terminal.retainedSearchStep;
++pub const terminal_retained_search_cancel = terminal.retainedSearchCancel;
++pub const terminal_retained_search_match_count = terminal.retainedSearchMatchCount;
++pub const terminal_retained_search_match_range = terminal.retainedSearchMatchRange;
++pub const terminal_retained_search_match_text = terminal.retainedSearchMatchText;
++pub const terminal_get_primary_screen_generation = terminal.getPrimaryScreenGeneration;
++pub const terminal_get_alternate_screen_generation = terminal.getAlternateScreenGeneration;
++pub const terminal_capture_retained_buffer_boundary = terminal.captureRetainedBufferBoundary;
++pub const terminal_capture_retained_buffer_position = terminal.captureRetainedBufferPosition;
++pub const terminal_release_retained_buffer_boundary = terminal.releaseRetainedBufferBoundary;
++pub const terminal_retained_range_create = terminal.retainedRangeCreate;
++pub const terminal_retained_range_step = terminal.retainedRangeStep;
++pub const terminal_retained_range_cancel = terminal.retainedRangeCancel;
++pub const terminal_retained_range_text = terminal.retainedRangeText;
++
++// Structured terminal events
++pub const terminal_peek_event_size = terminal.peekEventSize;
++pub const terminal_read_event = terminal.readEvent;
++pub const terminal_resolve_event_provenance = terminal.resolveEventProvenance;
++pub const terminal_resolve_event_boundary = terminal.resolveEventBoundary;
++
++// RenderState API - high-performance rendering
++pub const render_state_update = terminal.renderStateUpdate;
++pub const render_state_get_cols = terminal.renderStateGetCols;
++pub const render_state_get_rows = terminal.renderStateGetRows;
++pub const render_state_get_cursor_x = terminal.renderStateGetCursorX;
++pub const render_state_get_cursor_y = terminal.renderStateGetCursorY;
++pub const render_state_get_cursor_visible = terminal.renderStateGetCursorVisible;
++pub const render_state_get_cursor_blinking = terminal.renderStateGetCursorBlinking;
++pub const render_state_get_cursor_style = terminal.renderStateGetCursorStyle;
++pub const render_state_get_cursor_default = terminal.renderStateGetCursorDefault;
++pub const render_state_get_bg_color = terminal.renderStateGetBgColor;
++pub const render_state_get_fg_color = terminal.renderStateGetFgColor;
++pub const render_state_get_cursor_color = terminal.renderStateGetCursorColor;
++pub const render_state_get_palette_color = terminal.renderStateGetPaletteColor;
++pub const render_state_is_row_dirty = terminal.renderStateIsRowDirty;
++pub const render_state_mark_clean = terminal.renderStateMarkClean;
++pub const render_state_get_viewport = terminal.renderStateGetViewport;
++pub const render_state_get_grapheme = terminal.renderStateGetGrapheme;
++
++// Terminal modes
++pub const terminal_is_alternate_screen = terminal.isAlternateScreen;
++pub const terminal_get_buffer_info = terminal.getBufferInfo;
++pub const terminal_get_buffer_line = terminal.getBufferLine;
++pub const terminal_get_buffer_grapheme = terminal.getBufferGrapheme;
++pub const terminal_is_buffer_row_wrapped = terminal.isBufferRowWrapped;
++pub const terminal_has_mouse_tracking = terminal.hasMouseTracking;
++pub const terminal_get_synchronized_output_generation = terminal.getSynchronizedOutputGeneration;
++pub const terminal_reset_synchronized_output = terminal.resetSynchronizedOutput;
++pub const terminal_get_mode = terminal.getMode;
++pub const terminal_get_kitty_keyboard_flags = terminal.getKittyKeyboardFlags;
++pub const terminal_has_modify_other_keys_state_2 = terminal.hasModifyOtherKeysState2;
++
++// Scrollback API
++pub const terminal_get_scrollback_limit_bytes = terminal.getScrollbackLimitBytes;
++pub const terminal_get_scrollback_length = terminal.getScrollbackLength;
++pub const terminal_get_scrollback_generation = terminal.getScrollbackGeneration;
++pub const terminal_get_scrollback_line = terminal.getScrollbackLine;
++pub const terminal_get_scrollback_viewport = terminal.getScrollbackViewport;
++pub const terminal_get_scrollback_grapheme = terminal.getScrollbackGrapheme;
++pub const terminal_is_row_wrapped = terminal.isRowWrapped;
++
++// Hyperlink API
++pub const terminal_get_hyperlink_uri = terminal.getHyperlinkUri;
++pub const terminal_get_scrollback_hyperlink_uri = terminal.getScrollbackHyperlinkUri;
++
++// Response API (for DSR and other queries)
++pub const terminal_has_response = terminal.hasResponse;
++pub const terminal_read_response = terminal.readResponse;
++
+ test {
+     _ = color;
+     _ = osc;
+@@ -59,7 +139,11 @@ test {
+     _ = key_encode;
+     _ = paste;
+     _ = sgr;
++    _ = terminal;
+ 
+     // We want to make sure we run the tests for the C allocator interface.
+     _ = @import("../../lib/allocator.zig");
+ }
++
++pub const terminal_retained_search_refresh = terminal.retainedSearchRefresh;
++pub const terminal_retained_search_match_id = terminal.retainedSearchMatchId;
+diff --git a/src/terminal/color.zig b/src/terminal/color.zig
+index 3b806f8b8..869496c0f 100644
+--- a/src/terminal/color.zig
++++ b/src/terminal/color.zig
+@@ -257,11 +257,30 @@ pub const DynamicRGB = struct {
+         self.override = color;
+     }
+ 
++    /// Change the configured default while preserving an active override.
++    pub fn changeDefault(self: *DynamicRGB, color: RGB) void {
++        self.default = color;
++    }
++
+     pub fn reset(self: *DynamicRGB) void {
+-        self.override = self.default;
++        self.override = null;
+     }
+ };
+ 
++test "DynamicRGB configured default and override lifecycle" {
++    const first: RGB = .{ .r = 1, .g = 2, .b = 3 };
++    const second: RGB = .{ .r = 4, .g = 5, .b = 6 };
++    const application: RGB = .{ .r = 7, .g = 8, .b = 9 };
++
++    var dynamic: DynamicRGB = .init(first);
++    dynamic.set(application);
++    dynamic.changeDefault(second);
++    try std.testing.expectEqual(application, dynamic.get().?);
++
++    dynamic.reset();
++    try std.testing.expectEqual(second, dynamic.get().?);
++}
++
+ /// Color names in the standard 8 or 16 color palette.
+ pub const Name = enum(u8) {
+     black = 0,
+diff --git a/src/terminal/formatter.zig b/src/terminal/formatter.zig
+index 062e3969a..7ada25876 100644
+--- a/src/terminal/formatter.zig
++++ b/src/terminal/formatter.zig
+@@ -289,7 +289,7 @@ pub const TerminalFormatter = struct {
+                 m.map.appendNTimes(
+                     m.alloc,
+                     self.terminal.screens.active.pages.getTopLeft(.screen),
+-                    discarding.count,
++                    @intCast(discarding.count),
+                 ) catch return error.WriteFailed;
+             }
+         }
+@@ -327,7 +327,7 @@ pub const TerminalFormatter = struct {
+                 m.map.appendNTimes(
+                     m.alloc,
+                     self.terminal.screens.active.pages.getTopLeft(.screen),
+-                    discarding.count,
++                    @intCast(discarding.count),
+                 ) catch return error.WriteFailed;
+             }
+         }
+@@ -411,7 +411,7 @@ pub const TerminalFormatter = struct {
+                             .y = last.y,
+                         };
+                     } else self.terminal.screens.active.pages.getTopLeft(.screen),
+-                    discarding.count,
++                    @intCast(discarding.count),
+                 ) catch return error.WriteFailed;
+             }
+         }
+@@ -684,7 +684,7 @@ pub const ScreenFormatter = struct {
+                         .y = last.y,
+                     };
+                 } else self.screen.pages.getTopLeft(.screen),
+-                discarding.count,
++                @intCast(discarding.count),
+             ) catch return error.WriteFailed;
+         }
+     }
+@@ -865,6 +865,27 @@ pub const PageFormatter = struct {
+         };
+     }
+ 
++    /// Initialize a formatter for one bounded page chunk. This is used by
++    /// retained-range consumers that deliberately yield between pages while
++    /// preserving soft-wrap and trailing-row state.
++    pub fn initRange(
++        page: *const Page,
++        opts: Options,
++        start_x: size.CellCountInt,
++        start_y: size.CellCountInt,
++        end_x: ?size.CellCountInt,
++        end_y: ?size.CellCountInt,
++        trailing_state: ?TrailingState,
++    ) PageFormatter {
++        var result: PageFormatter = .init(page, opts);
++        result.start_x = start_x;
++        result.start_y = start_y;
++        result.end_x = end_x;
++        result.end_y = end_y;
++        result.trailing_state = trailing_state;
++        return result;
++    }
++
+     pub fn format(
+         self: PageFormatter,
+         writer: *std.Io.Writer,
+@@ -1230,7 +1251,7 @@ pub const PageFormatter = struct {
+                             &discarding.writer,
+                             &style,
+                         );
+-                        for (0..discarding.count) |_| map.map.append(map.alloc, .{
++                        for (0..@as(usize, @intCast(discarding.count))) |_| map.map.append(map.alloc, .{
+                             .x = x,
+                             .y = y,
+                         }) catch return error.WriteFailed;
+@@ -1287,7 +1308,7 @@ pub const PageFormatter = struct {
+                             &discarding.writer,
+                             uri,
+                         );
+-                        for (0..discarding.count) |_| map.map.append(map.alloc, .{
++                        for (0..@as(usize, @intCast(discarding.count))) |_| map.map.append(map.alloc, .{
+                             .x = x,
+                             .y = y,
+                         }) catch return error.WriteFailed;
+@@ -1305,7 +1326,7 @@ pub const PageFormatter = struct {
+                         if (self.point_map) |*map| {
+                             var discarding: std.Io.Writer.Discarding = .init(&.{});
+                             try self.writeCell(tag, &discarding.writer, cell);
+-                            for (0..discarding.count) |_| map.map.append(map.alloc, .{
++                            for (0..@as(usize, @intCast(discarding.count))) |_| map.map.append(map.alloc, .{
+                                 .x = x,
+                                 .y = y,
+                             }) catch return error.WriteFailed;
+diff --git a/src/terminal/osc.zig b/src/terminal/osc.zig
+index 0086e48bc..6757628e1 100644
+--- a/src/terminal/osc.zig
++++ b/src/terminal/osc.zig
+@@ -93,6 +93,7 @@ pub const Command = union(Key) {
+ 
+     /// Show a desktop notification (OSC 9 or OSC 777)
+     show_desktop_notification: struct {
++        source: NotificationSource,
+         title: [:0]const u8,
+         body: [:0]const u8,
+     },
+@@ -164,6 +165,12 @@ pub const Command = union(Key) {
+ 
+     pub const KittyClipboardProtocol = parsers.kitty_clipboard_protocol.OSC;
+ 
++    /// Closed parser-owned origin for desktop notification requests.
++    pub const NotificationSource = enum {
++        osc_9,
++        osc_777,
++    };
++
+     pub const Key = LibEnum(
+         if (build_options.c_abi) .c else .zig,
+         // NOTE: Order matters, see LibEnum documentation.
+diff --git a/src/terminal/osc/parsers/osc9.zig b/src/terminal/osc/parsers/osc9.zig
+index f636813d9..cdd912d91 100644
+--- a/src/terminal/osc/parsers/osc9.zig
++++ b/src/terminal/osc/parsers/osc9.zig
+@@ -277,6 +277,7 @@ pub fn parse(parser: *Parser, _: ?u8) ?*Command {
+     const data = writer.buffered();
+     parser.command = .{
+         .show_desktop_notification = .{
++            .source = .osc_9,
+             .title = "",
+             .body = data[0 .. data.len - 1 :0],
+         },
+@@ -294,6 +295,7 @@ test "OSC 9: show desktop notification" {
+ 
+     const cmd = p.end('\x1b').?.*;
+     try testing.expect(cmd == .show_desktop_notification);
++    try testing.expectEqual(.osc_9, cmd.show_desktop_notification.source);
+     try testing.expectEqualStrings("", cmd.show_desktop_notification.title);
+     try testing.expectEqualStrings("Hello world", cmd.show_desktop_notification.body);
+ }
+diff --git a/src/terminal/osc/parsers/rxvt_extension.zig b/src/terminal/osc/parsers/rxvt_extension.zig
+index 94a0961d2..2aa4ba037 100644
+--- a/src/terminal/osc/parsers/rxvt_extension.zig
++++ b/src/terminal/osc/parsers/rxvt_extension.zig
+@@ -37,6 +37,7 @@ pub fn parse(parser: *Parser, _: ?u8) ?*Command {
+     const body = data[t + 1 .. data.len - 1 :0];
+     parser.command = .{
+         .show_desktop_notification = .{
++            .source = .osc_777,
+             .title = title,
+             .body = body,
+         },
+@@ -54,6 +55,7 @@ test "OSC: OSC 777 show desktop notification with title" {
+ 
+     const cmd = p.end('\x1b').?.*;
+     try testing.expect(cmd == .show_desktop_notification);
++    try testing.expectEqual(.osc_777, cmd.show_desktop_notification.source);
+     try testing.expectEqualStrings(cmd.show_desktop_notification.title, "Title");
+     try testing.expectEqualStrings(cmd.show_desktop_notification.body, "Body");
+ }
+diff --git a/src/terminal/osc/parsers/semantic_prompt.zig b/src/terminal/osc/parsers/semantic_prompt.zig
+index d3a117515..494807f73 100644
+--- a/src/terminal/osc/parsers/semantic_prompt.zig
++++ b/src/terminal/osc/parsers/semantic_prompt.zig
+@@ -3,6 +3,7 @@ const std = @import("std");
+ 
+ const Parser = @import("../../osc.zig").Parser;
+ const OSCCommand = @import("../../osc.zig").Command;
++const lib = @import("../../../lib/main.zig");
+ const string_encoding = @import("../../../os/string_encoding.zig");
+ 
+ const log = std.log.scoped(.osc_semantic_prompt);
+@@ -17,6 +18,18 @@ pub const Command = struct {
+     action: Action,
+     options_unvalidated: []const u8,
+ 
++    pub const C = extern struct {
++        action: c_int,
++        options_unvalidated: lib.String,
++    };
++
++    pub fn cval(self: Command) C {
++        return .{
++            .action = @intCast(@intFromEnum(self.action)),
++            .options_unvalidated = .init(self.options_unvalidated),
++        };
++    }
++
+     pub const Action = enum {
+         fresh_line, // 'L'
+         fresh_line_new_prompt, // 'A'
+diff --git a/src/terminal/page.zig b/src/terminal/page.zig
+index 3e7ca9ac3..756f3b06c 100644
+--- a/src/terminal/page.zig
++++ b/src/terminal/page.zig
+@@ -116,6 +116,10 @@ pub const Page = struct {
+     ///       have occurred since it was last cleared.
+     dirty: bool,
+ 
++    /// Lazy provenance for retained queries. Kept outside page bytes so
++    /// enabling search does not change the scrollback retention budget.
++    retained_cell_ids: ?RetainedCellIds = null,
++
+     /// The string allocator for this page used for shared utf-8 encoded
+     /// strings. Liveness of strings and memory management is deferred to
+     /// the individual use case.
+@@ -158,6 +162,66 @@ pub const Page = struct {
+     pause_integrity_checks: if (build_options.slow_runtime_safety) usize else void =
+         if (build_options.slow_runtime_safety) 0 else {},
+ 
++    const RetainedCellIds = struct {
++        alloc: std.mem.Allocator,
++        sequence: *u64,
++        values: []u64,
++    };
++
++    pub fn clearRetainedCellIds(self: *Page) void {
++        if (self.retained_cell_ids) |ids| ids.alloc.free(ids.values);
++        self.retained_cell_ids = null;
++    }
++
++    fn retainedCellIndex(self: *const Page, cell: *const Cell) usize {
++        return (@intFromPtr(cell) - @intFromPtr(self.cells.ptr(self.memory))) / @sizeOf(Cell);
++    }
++
++    pub fn retainedCellId(self: *Page, cell: *const Cell, alloc: std.mem.Allocator, sequence: *u64) !u64 {
++        if (self.retained_cell_ids == null) {
++            const values = try alloc.alloc(u64, @as(usize, self.capacity.rows) * self.capacity.cols);
++            @memset(values, 0);
++            self.retained_cell_ids = .{ .alloc = alloc, .sequence = sequence, .values = values };
++        }
++        const ids = &self.retained_cell_ids.?;
++        const value = &ids.values[self.retainedCellIndex(cell)];
++        if (value.* == 0) {
++            // Exhaustion fails instead of reusing a prior incarnation.
++            if (sequence.* == std.math.maxInt(u64)) return error.OutOfMemory;
++            sequence.* += 1;
++            value.* = sequence.*;
++        }
++        return value.*;
++    }
++
++    pub fn currentRetainedCellId(self: *const Page, cell: *const Cell) u64 {
++        const ids = self.retained_cell_ids orelse return 0;
++        return ids.values[self.retainedCellIndex(cell)];
++    }
++
++    pub fn revokeRetainedCells(self: *Page, cells: []const Cell) void {
++        const ids = self.retained_cell_ids orelse return;
++        if (cells.len == 0) return;
++        const start = self.retainedCellIndex(&cells[0]);
++        @memset(ids.values[start..][0..cells.len], 0);
++    }
++
++    fn copyRetainedCellIds(self: *Page, other: *const Page, dst: []const Cell, src: []const Cell) void {
++        const source = other.retained_cell_ids orelse {
++            self.revokeRetainedCells(dst);
++            return;
++        };
++        if (self.retained_cell_ids == null) {
++            const values = source.alloc.alloc(u64, @as(usize, self.capacity.rows) * self.capacity.cols) catch return;
++            @memset(values, 0);
++            self.retained_cell_ids = .{ .alloc = source.alloc, .sequence = source.sequence, .values = values };
++        }
++        const target = self.retained_cell_ids.?;
++        const from = source.values[other.retainedCellIndex(&src[0])..][0..src.len];
++        const to = target.values[self.retainedCellIndex(&dst[0])..][0..dst.len];
++        std.mem.copyForwards(u64, to, from);
++    }
++
+     /// Initialize a new page, allocating the required backing memory.
+     /// The size of the initialized page defaults to the full capacity.
+     ///
+@@ -245,12 +309,14 @@ pub const Page = struct {
+     /// this if you allocated the backing memory yourself (i.e. you used
+     /// initBuf).
+     pub inline fn deinit(self: *Page) void {
++        self.clearRetainedCellIds();
+         posix.munmap(self.memory);
+         self.* = undefined;
+     }
+ 
+     /// Reinitialize the page with the same capacity.
+     pub inline fn reinit(self: *Page) void {
++        self.clearRetainedCellIds();
+         // We zero the page memory as u64 instead of u8 because
+         // we can and it's empirically quite a bit faster.
+         @memset(@as([*]u64, @ptrCast(self.memory))[0 .. self.memory.len / 8], 0);
+@@ -600,6 +666,7 @@ pub const Page = struct {
+         // as offsets so we can do a simple linear copy of the backing
+         // memory and copy all the offsets and everything will work.
+         var result = self.*;
++        result.retained_cell_ids = null;
+         result.memory = buf[0..self.memory.len];
+ 
+         // This is a memcpy. We may want to investigate if there are
+@@ -816,6 +883,8 @@ pub const Page = struct {
+         // clear some state. This will free up the managed memory as well.
+         if (dst_row.managedMemory()) self.clearCells(dst_row, x_start, x_end);
+ 
++        self.copyRetainedCellIds(other, cells, other_cells);
++
+         // Copy all the row metadata but keep our cells offset
+         dst_row.* = copy: {
+             var copy = src_row.*;
+@@ -1038,6 +1107,8 @@ pub const Page = struct {
+         // Clear our destination now matter what
+         self.clearCells(dst_row, dst_left, dst_left + len);
+ 
++        self.copyRetainedCellIds(self, dst_cells, src_cells);
++
+         // If src has no managed memory, this is very fast.
+         if (!src_row.managedMemory()) {
+             fastmem.copy(Cell, dst_cells, src_cells);
+@@ -1078,6 +1149,7 @@ pub const Page = struct {
+         //
+         // Zero the cells as u64s since empirically this seems
+         // to be a bit faster than using @memset(src_cells, .{})
++        self.revokeRetainedCells(src_cells);
+         @memset(@as([]u64, @ptrCast(src_cells)), 0);
+         if (src_cells.len == self.size.cols) {
+             src_row.grapheme = false;
+@@ -1138,6 +1210,10 @@ pub const Page = struct {
+             }
+         }
+ 
++        if (self.retained_cell_ids) |ids| {
++            std.mem.swap(u64, &ids.values[self.retainedCellIndex(src)], &ids.values[self.retainedCellIndex(dst)]);
++        }
++
+         // Copy the metadata. Note that we do NOT have to worry about
+         // styles because styles are keyed by ID and we're preserving the
+         // exact ref count and row state here.
+@@ -1160,6 +1236,7 @@ pub const Page = struct {
+         defer self.assertIntegrity();
+ 
+         const cells = row.cells.ptr(self.memory)[left..end];
++        self.revokeRetainedCells(cells);
+ 
+         // If we have managed memory (styles, graphemes, or hyperlinks)
+         // in this row then we go cell by cell and clear them if present.
+@@ -1482,6 +1559,7 @@ pub const Page = struct {
+ 
+     /// Append a codepoint to the given cell as a grapheme.
+     pub fn appendGrapheme(self: *Page, row: *Row, cell: *Cell, cp: u21) Allocator.Error!void {
++        self.revokeRetainedCells(cell[0..1]);
+         defer self.assertIntegrity();
+ 
+         if (build_options.slow_runtime_safety) assert(cell.codepoint() != 0);
+@@ -1577,6 +1655,7 @@ pub const Page = struct {
+     /// `updateRowGraphemeFlag` after you finish clearing any
+     /// graphemes in the row.
+     pub fn clearGrapheme(self: *Page, cell: *Cell) void {
++        self.revokeRetainedCells(cell[0..1]);
+         defer self.assertIntegrity();
+         if (build_options.slow_runtime_safety) assert(cell.hasGrapheme());
+ 
+diff --git a/src/terminal/parse_table.zig b/src/terminal/parse_table.zig
+index 01bd569cb..66674d3b4 100644
+--- a/src/terminal/parse_table.zig
++++ b/src/terminal/parse_table.zig
+@@ -148,6 +148,10 @@ fn genTable() Table {
+         // => dcs_entry
+         single(&result, 0x50, source, .dcs_entry, .none);
+ 
++        // GNU screen/tmux title sequence: ESC k <text> ST/BEL
++        // Consume payload so it never reaches the visible grid.
++        single(&result, 0x6B, source, .screen_title_string, .none);
++
+         // => csi_entry
+         single(&result, 0x5B, source, .csi_entry, .none);
+ 
+@@ -324,6 +328,24 @@ fn genTable() Table {
+         range(&result, 0x3C, 0x3F, source, .csi_param, .collect);
+     }
+ 
++    // screen_title_string
++    {
++        const source = State.screen_title_string;
++
++        // events
++        single(&result, 0x19, source, source, .ignore);
++        range(&result, 0, 0x06, source, source, .ignore);
++        range(&result, 0x08, 0x17, source, source, .ignore);
++        range(&result, 0x1C, 0x1F, source, source, .ignore);
++        range(&result, 0x20, 0xFF, source, source, .ignore);
++        single(&result, 0x7F, source, source, .ignore);
++
++        // Accept BEL and the 8-bit ST terminator explicitly; ESC \\ exits
++        // through the existing anywhere ESC transition.
++        single(&result, 0x07, source, .ground, .none);
++        single(&result, 0x9C, source, .ground, .none);
++    }
++
+     // osc_string
+     {
+         const source = State.osc_string;
+diff --git a/src/terminal/render.zig b/src/terminal/render.zig
+index 2332866ac..dcfa15f57 100644
+--- a/src/terminal/render.zig
++++ b/src/terminal/render.zig
+@@ -322,13 +322,14 @@ pub const RenderState = struct {
+         // Colors.
+         self.colors.cursor = t.colors.cursor.get();
+         self.colors.palette = t.colors.palette.current;
+-        bg_fg: {
++        {
+             // Background/foreground can be unset initially which would
+-            // depend on "default" background/foreground. The expected use
+-            // case of Terminal is that the caller set their own configured
+-            // defaults on load so this doesn't happen.
+-            const bg = t.colors.background.get() orelse break :bg_fg;
+-            const fg = t.colors.foreground.get() orelse break :bg_fg;
++            // depend on "default" background/foreground. Use sensible defaults
++            // (black background, light gray foreground) when not explicitly set.
++            const default_bg: color.RGB = .{ .r = 0, .g = 0, .b = 0 };
++            const default_fg: color.RGB = .{ .r = 204, .g = 204, .b = 204 };
++            const bg = t.colors.background.get() orelse default_bg;
++            const fg = t.colors.foreground.get() orelse default_fg;
+             if (t.modes.get(.reverse_colors)) {
+                 self.colors.background = fg;
+                 self.colors.foreground = bg;
+diff --git a/src/terminal/search/active.zig b/src/terminal/search/active.zig
+index 236f4c7a6..37331505d 100644
+--- a/src/terminal/search/active.zig
++++ b/src/terminal/search/active.zig
+@@ -23,11 +23,24 @@ pub const ActiveSearch = struct {
+     pub fn init(
+         alloc: Allocator,
+         needle: []const u8,
++    ) Allocator.Error!ActiveSearch {
++        return initWithCaseSensitivity(alloc, needle, .ascii_insensitive);
++    }
++
++    pub fn initWithCaseSensitivity(
++        alloc: Allocator,
++        needle: []const u8,
++        case_sensitivity: SlidingWindow.CaseSensitivity,
+     ) Allocator.Error!ActiveSearch {
+         // We just do a forward search since the active area is usually
+         // pretty small so search results are instant anyways. This avoids
+         // a small amount of work to reverse things.
+-        var window: SlidingWindow = try .init(alloc, .forward, needle);
++        var window: SlidingWindow = try .initWithCaseSensitivity(
++            alloc,
++            .forward,
++            needle,
++            case_sensitivity,
++        );
+         errdefer window.deinit();
+         return .{ .window = window };
+     }
+diff --git a/src/terminal/search/pagelist.zig b/src/terminal/search/pagelist.zig
+index 4bfd241e7..ae5955f15 100644
+--- a/src/terminal/search/pagelist.zig
++++ b/src/terminal/search/pagelist.zig
+@@ -49,6 +49,22 @@ pub const PageListSearch = struct {
+         needle: []const u8,
+         list: *PageList,
+         start: *PageList.List.Node,
++    ) Allocator.Error!PageListSearch {
++        return initWithCaseSensitivity(
++            alloc,
++            needle,
++            list,
++            start,
++            .ascii_insensitive,
++        );
++    }
++
++    pub fn initWithCaseSensitivity(
++        alloc: Allocator,
++        needle: []const u8,
++        list: *PageList,
++        start: *PageList.List.Node,
++        case_sensitivity: SlidingWindow.CaseSensitivity,
+     ) Allocator.Error!PageListSearch {
+         // We put a tracked pin into the node that we're starting from.
+         // By using a tracked pin, we can keep our pagelist references safe
+@@ -62,7 +78,12 @@ pub const PageListSearch = struct {
+         errdefer list.untrackPin(pin);
+ 
+         // Create our sliding window we'll use for searching.
+-        var window: SlidingWindow = try .init(alloc, .reverse, needle);
++        var window: SlidingWindow = try .initWithCaseSensitivity(
++            alloc,
++            .reverse,
++            needle,
++            case_sensitivity,
++        );
+         errdefer window.deinit();
+ 
+         // We always feed our initial page data into the window, because
+diff --git a/src/terminal/search/screen.zig b/src/terminal/search/screen.zig
+index 74828d879..f7ccec00e 100644
+--- a/src/terminal/search/screen.zig
++++ b/src/terminal/search/screen.zig
+@@ -38,6 +38,8 @@ const reloadActive_tw = tripwire.module(enum {
+ /// nasty UX where going to alt screen (e.g. neovim) and then back would
+ /// restart the full scrollback search.
+ pub const ScreenSearch = struct {
++    pub const CaseSensitivity = SlidingWindow.CaseSensitivity;
++
+     /// The screen being searched.
+     screen: *Screen,
+ 
+@@ -137,12 +139,30 @@ pub const ScreenSearch = struct {
+         alloc: Allocator,
+         screen: *Screen,
+         needle_unowned: []const u8,
++    ) Allocator.Error!ScreenSearch {
++        return initWithCaseSensitivity(
++            alloc,
++            screen,
++            needle_unowned,
++            .ascii_insensitive,
++        );
++    }
++
++    pub fn initWithCaseSensitivity(
++        alloc: Allocator,
++        screen: *Screen,
++        needle_unowned: []const u8,
++        case_sensitivity: CaseSensitivity,
+     ) Allocator.Error!ScreenSearch {
+         var result: ScreenSearch = .{
+             .screen = screen,
+             .rows = screen.pages.rows,
+             .cols = screen.pages.cols,
+-            .active = try .init(alloc, needle_unowned),
++            .active = try .initWithCaseSensitivity(
++                alloc,
++                needle_unowned,
++                case_sensitivity,
++            ),
+             .history = null,
+             .state = .active,
+             .active_results = .empty,
+@@ -268,10 +288,11 @@ pub const ScreenSearch = struct {
+             self.screen.pages.cols != self.cols)
+         {
+             // Reinit
+-            const new: ScreenSearch = try .init(
++            const new: ScreenSearch = try .initWithCaseSensitivity(
+                 self.allocator(),
+                 self.screen,
+                 self.needle(),
++                self.active.window.case_sensitivity,
+             );
+ 
+             // Deinit/reinit
+@@ -445,11 +466,12 @@ pub const ScreenSearch = struct {
+                 // No history search yet, but we now have history. So let's
+                 // initialize.
+ 
+-                var search: PageListSearch = try .init(
++                var search: PageListSearch = try .initWithCaseSensitivity(
+                     alloc,
+                     self.needle(),
+                     list,
+                     history_node,
++                    self.active.window.case_sensitivity,
+                 );
+                 errdefer search.deinit();
+ 
+@@ -475,10 +497,11 @@ pub const ScreenSearch = struct {
+             // collect all the results into a new list. We ASSUME that
+             // reloadActive is being called frequently enough that there isn't
+             // a massive amount of history to search here.
+-            var window: SlidingWindow = try .init(
++            var window: SlidingWindow = try .initWithCaseSensitivity(
+                 alloc,
+                 .forward,
+                 self.needle(),
++                self.active.window.case_sensitivity,
+             );
+             defer window.deinit();
+             while (true) {
+diff --git a/src/terminal/search/sliding_window.zig b/src/terminal/search/sliding_window.zig
+index c3c29e085..0c6762f2c 100644
+--- a/src/terminal/search/sliding_window.zig
++++ b/src/terminal/search/sliding_window.zig
+@@ -36,6 +36,13 @@ const FlattenedHighlight = terminal.highlight.Flattened;
+ /// pages become invalid, the caller should clear the sliding window and
+ /// start over.
+ pub const SlidingWindow = struct {
++    /// Literal byte matching mode. Unicode input remains byte-exact in both
++    /// modes; insensitive matching folds ASCII bytes only.
++    pub const CaseSensitivity = enum {
++        sensitive,
++        ascii_insensitive,
++    };
++
+     /// The allocator to use for all the data within this window. We
+     /// store this rather than passing it around because its already
+     /// part of multiple elements (eg. Meta's CellMap) and we want to
+@@ -78,6 +85,9 @@ pub const SlidingWindow = struct {
+     /// concurrently from that point).
+     direction: Direction,
+ 
++    /// Whether literal byte matching folds ASCII case.
++    case_sensitivity: CaseSensitivity,
++
+     /// A buffer to store the overlap search data. This is used to search
+     /// overlaps between pages where the match starts on one page and
+     /// ends on another. The length is always `needle.len * 2`.
+@@ -100,6 +110,20 @@ pub const SlidingWindow = struct {
+         alloc: Allocator,
+         direction: Direction,
+         needle_unowned: []const u8,
++    ) Allocator.Error!SlidingWindow {
++        return initWithCaseSensitivity(
++            alloc,
++            direction,
++            needle_unowned,
++            .ascii_insensitive,
++        );
++    }
++
++    pub fn initWithCaseSensitivity(
++        alloc: Allocator,
++        direction: Direction,
++        needle_unowned: []const u8,
++        case_sensitivity: CaseSensitivity,
+     ) Allocator.Error!SlidingWindow {
+         var data = try DataBuf.init(alloc, 0);
+         errdefer data.deinit(alloc);
+@@ -124,10 +148,18 @@ pub const SlidingWindow = struct {
+             .chunk_buf = .empty,
+             .needle = needle,
+             .direction = direction,
++            .case_sensitivity = case_sensitivity,
+             .overlap_buf = overlap_buf,
+         };
+     }
+ 
++    fn indexOf(self: *const SlidingWindow, haystack: []const u8) ?usize {
++        return switch (self.case_sensitivity) {
++            .sensitive => std.mem.indexOf(u8, haystack, self.needle),
++            .ascii_insensitive => std.ascii.indexOfIgnoreCase(haystack, self.needle),
++        };
++    }
++
+     pub fn deinit(self: *SlidingWindow) void {
+         self.alloc.free(self.overlap_buf);
+         self.alloc.free(self.needle);
+@@ -176,7 +208,7 @@ pub const SlidingWindow = struct {
+         };
+ 
+         // Search the first slice for the needle.
+-        if (std.ascii.indexOfIgnoreCase(slices[0], self.needle)) |idx| {
++        if (self.indexOf(slices[0])) |idx| {
+             return self.highlight(
+                 idx,
+                 self.needle.len,
+@@ -202,10 +234,7 @@ pub const SlidingWindow = struct {
+             @memcpy(self.overlap_buf[prefix.len..overlap_len], suffix);
+ 
+             // Search the overlap
+-            const idx = std.ascii.indexOfIgnoreCase(
+-                self.overlap_buf[0..overlap_len],
+-                self.needle,
+-            ) orelse break :overlap;
++            const idx = self.indexOf(self.overlap_buf[0..overlap_len]) orelse break :overlap;
+ 
+             // We found a match in the overlap buffer. We need to map the
+             // index back to the data buffer in order to get our selection.
+@@ -216,7 +245,7 @@ pub const SlidingWindow = struct {
+         }
+ 
+         // Search the last slice for the needle.
+-        if (std.ascii.indexOfIgnoreCase(slices[1], self.needle)) |idx| {
++        if (self.indexOf(slices[1])) |idx| {
+             return self.highlight(
+                 slices[0].len + idx,
+                 self.needle.len,
+@@ -732,6 +761,37 @@ test "SlidingWindow single append case insensitive ASCII" {
+     try testing.expect(w.next() == null);
+ }
+ 
++test "SlidingWindow single append case sensitive" {
++    const testing = std.testing;
++    const alloc = testing.allocator;
++
++    var w: SlidingWindow = try .initWithCaseSensitivity(
++        alloc,
++        .forward,
++        "Boo!",
++        .sensitive,
++    );
++    defer w.deinit();
++
++    var s = try Screen.init(alloc, .{ .cols = 80, .rows = 24, .max_scrollback = 0 });
++    defer s.deinit();
++    try s.testWriteString("boo! Boo! É é");
++
++    const node: *PageList.List.Node = s.pages.pages.first.?;
++    _ = try w.append(node);
++
++    const sel = w.next().?.untracked();
++    try testing.expectEqual(point.Point{ .active = .{
++        .x = 5,
++        .y = 0,
++    } }, s.pages.pointFromPin(.active, sel.start));
++    try testing.expectEqual(point.Point{ .active = .{
++        .x = 8,
++        .y = 0,
++    } }, s.pages.pointFromPin(.active, sel.end));
++    try testing.expect(w.next() == null);
++}
++
+ test "SlidingWindow single append single char" {
+     const testing = std.testing;
+     const alloc = testing.allocator;
+diff --git a/src/terminal/stream.zig b/src/terminal/stream.zig
+index e89c73e66..6893c9c84 100644
+--- a/src/terminal/stream.zig
++++ b/src/terminal/stream.zig
+@@ -333,6 +333,7 @@ pub const Action = union(Key) {
+     };
+ 
+     pub const ShowDesktopNotification = struct {
++        source: osc.Command.NotificationSource,
+         title: []const u8,
+         body: []const u8,
+ 
+@@ -2021,6 +2022,7 @@ pub fn Stream(comptime Handler: type) type {
+ 
+                 .show_desktop_notification => |v| {
+                     try self.handler.vt(.show_desktop_notification, .{
++                        .source = v.source,
+                         .title = v.title,
+                         .body = v.body,
+                     });
 diff --git a/include/ghostty/vt/terminal.h b/include/ghostty/vt/terminal.h
 new file mode 100644
-index 000000000..7b4c2a47c
+index 000000000..81cbed033
 --- /dev/null
 +++ b/include/ghostty/vt/terminal.h
-@@ -0,0 +1,535 @@
+@@ -0,0 +1,539 @@
 +/**
 + * @file terminal.h
 + *
@@ -207,7 +1405,7 @@ index 000000000..7b4c2a47c
 +int ghostty_terminal_retained_search_match_range(
 +    GhosttyTerminal term,
 +    uint32_t search_id,
-+    uint32_t match_index,
++    uint32_t occurrence_id,
 +    uint32_t* out_buffer,
 +    size_t buffer_size
 +);
@@ -219,7 +1417,7 @@ index 000000000..7b4c2a47c
 +int ghostty_terminal_retained_search_match_text(
 +    GhosttyTerminal term,
 +    uint32_t search_id,
-+    uint32_t match_index,
++    uint32_t occurrence_id,
 +    uint8_t* out_buffer,
 +    size_t buffer_size
 +);
@@ -563,291 +1761,21 @@ index 000000000..7b4c2a47c
 +    size_t buffer_size
 +);
 +
++/** Start one finite refresh, preserving surviving occurrence identities. */
++bool ghostty_terminal_retained_search_refresh(GhosttyTerminal term, uint32_t search_id);
++uint32_t ghostty_terminal_retained_search_match_id(GhosttyTerminal term, uint32_t search_id, uint32_t index);
++
 +#ifdef __cplusplus
 +}
 +#endif
 +
 +#endif /* GHOSTTY_VT_TERMINAL_H */
-diff --git a/src/lib_vt.zig b/src/lib_vt.zig
-index 426660621..30a91c593 100644
---- a/src/lib_vt.zig
-+++ b/src/lib_vt.zig
-@@ -143,6 +143,84 @@ comptime {
-         @export(&c.sgr_unknown_partial, .{ .name = "ghostty_sgr_unknown_partial" });
-         @export(&c.sgr_attribute_tag, .{ .name = "ghostty_sgr_attribute_tag" });
-         @export(&c.sgr_attribute_value, .{ .name = "ghostty_sgr_attribute_value" });
-+        // Terminal lifecycle
-+        @export(&c.terminal_new, .{ .name = "ghostty_terminal_new" });
-+        @export(&c.terminal_new_with_config, .{ .name = "ghostty_terminal_new_with_config" });
-+        @export(&c.terminal_free, .{ .name = "ghostty_terminal_free" });
-+        @export(&c.terminal_resize, .{ .name = "ghostty_terminal_resize" });
-+        @export(&c.terminal_set_color_config, .{ .name = "ghostty_terminal_set_color_config" });
-+        @export(&c.terminal_set_cursor_config, .{ .name = "ghostty_terminal_set_cursor_config" });
-+        @export(&c.terminal_write, .{ .name = "ghostty_terminal_write" });
-+        @export(&c.terminal_retained_search_create, .{ .name = "ghostty_terminal_retained_search_create" });
-+        @export(&c.terminal_retained_search_step, .{ .name = "ghostty_terminal_retained_search_step" });
-+        @export(&c.terminal_retained_search_cancel, .{ .name = "ghostty_terminal_retained_search_cancel" });
-+        @export(&c.terminal_retained_search_match_count, .{ .name = "ghostty_terminal_retained_search_match_count" });
-+        @export(&c.terminal_retained_search_match_range, .{ .name = "ghostty_terminal_retained_search_match_range" });
-+        @export(&c.terminal_retained_search_match_text, .{ .name = "ghostty_terminal_retained_search_match_text" });
-+        @export(&c.terminal_get_primary_screen_generation, .{ .name = "ghostty_terminal_get_primary_screen_generation" });
-+        @export(&c.terminal_get_alternate_screen_generation, .{ .name = "ghostty_terminal_get_alternate_screen_generation" });
-+        @export(&c.terminal_capture_retained_buffer_boundary, .{ .name = "ghostty_terminal_capture_retained_buffer_boundary" });
-+        @export(&c.terminal_capture_retained_buffer_position, .{ .name = "ghostty_terminal_capture_retained_buffer_position" });
-+        @export(&c.terminal_release_retained_buffer_boundary, .{ .name = "ghostty_terminal_release_retained_buffer_boundary" });
-+        @export(&c.terminal_retained_range_create, .{ .name = "ghostty_terminal_retained_range_create" });
-+        @export(&c.terminal_retained_range_step, .{ .name = "ghostty_terminal_retained_range_step" });
-+        @export(&c.terminal_retained_range_cancel, .{ .name = "ghostty_terminal_retained_range_cancel" });
-+        @export(&c.terminal_retained_range_text, .{ .name = "ghostty_terminal_retained_range_text" });
-+
-+        // Structured terminal events
-+        @export(&c.terminal_peek_event_size, .{ .name = "ghostty_terminal_peek_event_size" });
-+        @export(&c.terminal_read_event, .{ .name = "ghostty_terminal_read_event" });
-+        @export(&c.terminal_resolve_event_provenance, .{ .name = "ghostty_terminal_resolve_event_provenance" });
-+        @export(&c.terminal_resolve_event_boundary, .{ .name = "ghostty_terminal_resolve_event_boundary" });
-+
-+        // RenderState API - high-performance rendering
-+        @export(&c.render_state_update, .{ .name = "ghostty_render_state_update" });
-+        @export(&c.render_state_get_cols, .{ .name = "ghostty_render_state_get_cols" });
-+        @export(&c.render_state_get_rows, .{ .name = "ghostty_render_state_get_rows" });
-+        @export(&c.render_state_get_cursor_x, .{ .name = "ghostty_render_state_get_cursor_x" });
-+        @export(&c.render_state_get_cursor_y, .{ .name = "ghostty_render_state_get_cursor_y" });
-+        @export(&c.render_state_get_cursor_visible, .{ .name = "ghostty_render_state_get_cursor_visible" });
-+        @export(&c.render_state_get_cursor_blinking, .{ .name = "ghostty_render_state_get_cursor_blinking" });
-+        @export(&c.render_state_get_cursor_style, .{ .name = "ghostty_render_state_get_cursor_style" });
-+        @export(&c.render_state_get_cursor_default, .{ .name = "ghostty_render_state_get_cursor_default" });
-+        @export(&c.render_state_get_bg_color, .{ .name = "ghostty_render_state_get_bg_color" });
-+        @export(&c.render_state_get_fg_color, .{ .name = "ghostty_render_state_get_fg_color" });
-+        @export(&c.render_state_get_cursor_color, .{ .name = "ghostty_render_state_get_cursor_color" });
-+        @export(&c.render_state_get_palette_color, .{ .name = "ghostty_render_state_get_palette_color" });
-+        @export(&c.render_state_is_row_dirty, .{ .name = "ghostty_render_state_is_row_dirty" });
-+        @export(&c.render_state_mark_clean, .{ .name = "ghostty_render_state_mark_clean" });
-+        @export(&c.render_state_get_viewport, .{ .name = "ghostty_render_state_get_viewport" });
-+        @export(&c.render_state_get_grapheme, .{ .name = "ghostty_render_state_get_grapheme" });
-+
-+        // Terminal modes
-+        @export(&c.terminal_is_alternate_screen, .{ .name = "ghostty_terminal_is_alternate_screen" });
-+        @export(&c.terminal_get_buffer_info, .{ .name = "ghostty_terminal_get_buffer_info" });
-+        @export(&c.terminal_get_buffer_line, .{ .name = "ghostty_terminal_get_buffer_line" });
-+        @export(&c.terminal_get_buffer_grapheme, .{ .name = "ghostty_terminal_get_buffer_grapheme" });
-+        @export(&c.terminal_is_buffer_row_wrapped, .{ .name = "ghostty_terminal_is_buffer_row_wrapped" });
-+        @export(&c.terminal_has_mouse_tracking, .{ .name = "ghostty_terminal_has_mouse_tracking" });
-+        @export(&c.terminal_get_synchronized_output_generation, .{ .name = "ghostty_terminal_get_synchronized_output_generation" });
-+        @export(&c.terminal_reset_synchronized_output, .{ .name = "ghostty_terminal_reset_synchronized_output" });
-+        @export(&c.terminal_get_mode, .{ .name = "ghostty_terminal_get_mode" });
-+        @export(&c.terminal_get_kitty_keyboard_flags, .{ .name = "ghostty_terminal_get_kitty_keyboard_flags" });
-+        @export(&c.terminal_has_modify_other_keys_state_2, .{ .name = "ghostty_terminal_has_modify_other_keys_state_2" });
-+
-+        // Scrollback API
-+        @export(&c.terminal_get_scrollback_limit_bytes, .{ .name = "ghostty_terminal_get_scrollback_limit_bytes" });
-+        @export(&c.terminal_get_scrollback_length, .{ .name = "ghostty_terminal_get_scrollback_length" });
-+        @export(&c.terminal_get_scrollback_generation, .{ .name = "ghostty_terminal_get_scrollback_generation" });
-+        @export(&c.terminal_get_scrollback_line, .{ .name = "ghostty_terminal_get_scrollback_line" });
-+        @export(&c.terminal_get_scrollback_viewport, .{ .name = "ghostty_terminal_get_scrollback_viewport" });
-+        @export(&c.terminal_get_scrollback_grapheme, .{ .name = "ghostty_terminal_get_scrollback_grapheme" });
-+        @export(&c.terminal_is_row_wrapped, .{ .name = "ghostty_terminal_is_row_wrapped" });
-+
-+        // Hyperlink API
-+        @export(&c.terminal_get_hyperlink_uri, .{ .name = "ghostty_terminal_get_hyperlink_uri" });
-+        @export(&c.terminal_get_scrollback_hyperlink_uri, .{ .name = "ghostty_terminal_get_scrollback_hyperlink_uri" });
-+
-+        // Response API (for DSR and other queries)
-+        @export(&c.terminal_has_response, .{ .name = "ghostty_terminal_has_response" });
-+        @export(&c.terminal_read_response, .{ .name = "ghostty_terminal_read_response" });
- 
-         // On Wasm we need to export our allocator convenience functions.
-         if (builtin.target.cpu.arch.isWasm()) {
-diff --git a/src/terminal/PageList.zig b/src/terminal/PageList.zig
-index 6e39428db..aac4b567c 100644
---- a/src/terminal/PageList.zig
-+++ b/src/terminal/PageList.zig
-@@ -477,10 +477,10 @@ fn initPages(
-         else
-             page_alloc.free(page_buf);
- 
--        // In runtime safety modes we have to memset because the Zig allocator
--        // interface will always memset to 0xAA for undefined. In non-safe modes
--        // we use a page allocator and the OS guarantees zeroed memory.
--        if (comptime std.debug.runtime_safety) @memset(page_buf, 0);
-+        // Runtime safety allocators initialize to undefined, 0xAA. WASM also
-+        // reuses page allocations without guaranteeing zeroed contents.
-+        if (comptime builtin.target.cpu.arch.isWasm() or std.debug.runtime_safety)
-+            @memset(page_buf, 0);
- 
-         // Initialize the first set of pages to contain our viewport so that
-         // the top of the first page is always the active area.
-@@ -3385,9 +3385,10 @@ inline fn createPageExt(
-     else
-         page_alloc.free(page_buf);
- 
--    // Required only with runtime safety because allocators initialize
--    // to undefined, 0xAA.
--    if (comptime std.debug.runtime_safety) @memset(page_buf, 0);
-+    // Runtime safety allocators initialize to undefined, 0xAA. WASM also
-+    // reuses page allocations without guaranteeing zeroed contents.
-+    if (comptime builtin.target.cpu.arch.isWasm() or std.debug.runtime_safety)
-+        @memset(page_buf, 0);
- 
-     page.* = .{
-         .data = .initBuf(.init(page_buf), layout),
-diff --git a/src/terminal/Parser.zig b/src/terminal/Parser.zig
-index 88e7edf7c..b5c3896e1 100644
---- a/src/terminal/Parser.zig
-+++ b/src/terminal/Parser.zig
-@@ -27,6 +27,7 @@ pub const State = enum {
-     dcs_ignore,
-     osc_string,
-     sos_pm_apc_string,
-+    screen_title_string,
- };
- 
- /// Transition action is an action that can be taken during a state
-diff --git a/src/terminal/Screen.zig b/src/terminal/Screen.zig
-index ea8ca1445..75a72480b 100644
---- a/src/terminal/Screen.zig
-+++ b/src/terminal/Screen.zig
-@@ -871,15 +871,24 @@ pub fn cursorDownScroll(self: *Screen) !void {
-         // Our new row is always dirty
-         self.cursorMarkDirty();
- 
--        // Clear the new row so it gets our bg color. We only do this
--        // if we have a bg color at all.
--        if (self.cursor.style.bg_color != .none) {
-+        // Always clear the new row's cells. When pages.grow() extends an
-+        // existing page, the new row's cell memory may contain stale data
-+        // from previously erased rows. Without clearing, these stale cells
-+        // become visible when the row isn't fully overwritten, such as after
-+        // bare CRLF output with the default cursor style.
-+        {
-             const page: *Page = &self.cursor.page_pin.node.data;
-+            const row = self.cursor.page_row;
-+            const cells_offset = row.cells;
-+            const dirty = row.dirty;
-             self.clearCells(
-                 page,
--                self.cursor.page_row,
--                page.getCells(self.cursor.page_row),
-+                row,
-+                page.getCells(row),
-             );
-+            // Reset row-level metadata that clearCells does not touch while
-+            // preserving the backing cell offset and dirty state.
-+            row.* = .{ .cells = cells_offset, .dirty = dirty };
-         }
-     }
- 
-diff --git a/src/terminal/c/main.zig b/src/terminal/c/main.zig
-index bc92597f5..e351e9a58 100644
---- a/src/terminal/c/main.zig
-+++ b/src/terminal/c/main.zig
-@@ -4,6 +4,7 @@ pub const key_event = @import("key_event.zig");
- pub const key_encode = @import("key_encode.zig");
- pub const paste = @import("paste.zig");
- pub const sgr = @import("sgr.zig");
-+pub const terminal = @import("terminal.zig");
- 
- // The full C API, unexported.
- pub const osc_new = osc.new;
-@@ -52,6 +53,85 @@ pub const key_encoder_encode = key_encode.encode;
- 
- pub const paste_is_safe = paste.is_safe;
- 
-+// Terminal lifecycle
-+pub const terminal_new = terminal.new;
-+pub const terminal_new_with_config = terminal.newWithConfig;
-+pub const terminal_free = terminal.free;
-+pub const terminal_resize = terminal.resize;
-+pub const terminal_set_color_config = terminal.setColorConfig;
-+pub const terminal_set_cursor_config = terminal.setCursorConfig;
-+pub const terminal_write = terminal.write;
-+pub const terminal_retained_search_create = terminal.retainedSearchCreate;
-+pub const terminal_retained_search_step = terminal.retainedSearchStep;
-+pub const terminal_retained_search_cancel = terminal.retainedSearchCancel;
-+pub const terminal_retained_search_match_count = terminal.retainedSearchMatchCount;
-+pub const terminal_retained_search_match_range = terminal.retainedSearchMatchRange;
-+pub const terminal_retained_search_match_text = terminal.retainedSearchMatchText;
-+pub const terminal_get_primary_screen_generation = terminal.getPrimaryScreenGeneration;
-+pub const terminal_get_alternate_screen_generation = terminal.getAlternateScreenGeneration;
-+pub const terminal_capture_retained_buffer_boundary = terminal.captureRetainedBufferBoundary;
-+pub const terminal_capture_retained_buffer_position = terminal.captureRetainedBufferPosition;
-+pub const terminal_release_retained_buffer_boundary = terminal.releaseRetainedBufferBoundary;
-+pub const terminal_retained_range_create = terminal.retainedRangeCreate;
-+pub const terminal_retained_range_step = terminal.retainedRangeStep;
-+pub const terminal_retained_range_cancel = terminal.retainedRangeCancel;
-+pub const terminal_retained_range_text = terminal.retainedRangeText;
-+
-+// Structured terminal events
-+pub const terminal_peek_event_size = terminal.peekEventSize;
-+pub const terminal_read_event = terminal.readEvent;
-+pub const terminal_resolve_event_provenance = terminal.resolveEventProvenance;
-+pub const terminal_resolve_event_boundary = terminal.resolveEventBoundary;
-+
-+// RenderState API - high-performance rendering
-+pub const render_state_update = terminal.renderStateUpdate;
-+pub const render_state_get_cols = terminal.renderStateGetCols;
-+pub const render_state_get_rows = terminal.renderStateGetRows;
-+pub const render_state_get_cursor_x = terminal.renderStateGetCursorX;
-+pub const render_state_get_cursor_y = terminal.renderStateGetCursorY;
-+pub const render_state_get_cursor_visible = terminal.renderStateGetCursorVisible;
-+pub const render_state_get_cursor_blinking = terminal.renderStateGetCursorBlinking;
-+pub const render_state_get_cursor_style = terminal.renderStateGetCursorStyle;
-+pub const render_state_get_cursor_default = terminal.renderStateGetCursorDefault;
-+pub const render_state_get_bg_color = terminal.renderStateGetBgColor;
-+pub const render_state_get_fg_color = terminal.renderStateGetFgColor;
-+pub const render_state_get_cursor_color = terminal.renderStateGetCursorColor;
-+pub const render_state_get_palette_color = terminal.renderStateGetPaletteColor;
-+pub const render_state_is_row_dirty = terminal.renderStateIsRowDirty;
-+pub const render_state_mark_clean = terminal.renderStateMarkClean;
-+pub const render_state_get_viewport = terminal.renderStateGetViewport;
-+pub const render_state_get_grapheme = terminal.renderStateGetGrapheme;
-+
-+// Terminal modes
-+pub const terminal_is_alternate_screen = terminal.isAlternateScreen;
-+pub const terminal_get_buffer_info = terminal.getBufferInfo;
-+pub const terminal_get_buffer_line = terminal.getBufferLine;
-+pub const terminal_get_buffer_grapheme = terminal.getBufferGrapheme;
-+pub const terminal_is_buffer_row_wrapped = terminal.isBufferRowWrapped;
-+pub const terminal_has_mouse_tracking = terminal.hasMouseTracking;
-+pub const terminal_get_synchronized_output_generation = terminal.getSynchronizedOutputGeneration;
-+pub const terminal_reset_synchronized_output = terminal.resetSynchronizedOutput;
-+pub const terminal_get_mode = terminal.getMode;
-+pub const terminal_get_kitty_keyboard_flags = terminal.getKittyKeyboardFlags;
-+pub const terminal_has_modify_other_keys_state_2 = terminal.hasModifyOtherKeysState2;
-+
-+// Scrollback API
-+pub const terminal_get_scrollback_limit_bytes = terminal.getScrollbackLimitBytes;
-+pub const terminal_get_scrollback_length = terminal.getScrollbackLength;
-+pub const terminal_get_scrollback_generation = terminal.getScrollbackGeneration;
-+pub const terminal_get_scrollback_line = terminal.getScrollbackLine;
-+pub const terminal_get_scrollback_viewport = terminal.getScrollbackViewport;
-+pub const terminal_get_scrollback_grapheme = terminal.getScrollbackGrapheme;
-+pub const terminal_is_row_wrapped = terminal.isRowWrapped;
-+
-+// Hyperlink API
-+pub const terminal_get_hyperlink_uri = terminal.getHyperlinkUri;
-+pub const terminal_get_scrollback_hyperlink_uri = terminal.getScrollbackHyperlinkUri;
-+
-+// Response API (for DSR and other queries)
-+pub const terminal_has_response = terminal.hasResponse;
-+pub const terminal_read_response = terminal.readResponse;
-+
- test {
-     _ = color;
-     _ = osc;
-@@ -59,6 +137,7 @@ test {
-     _ = key_encode;
-     _ = paste;
-     _ = sgr;
-+    _ = terminal;
- 
-     // We want to make sure we run the tests for the C allocator interface.
-     _ = @import("../../lib/allocator.zig");
 diff --git a/src/terminal/c/terminal.zig b/src/terminal/c/terminal.zig
 new file mode 100644
-index 000000000..fb903e7aa
+index 000000000..d2fa07a6f
 --- /dev/null
 +++ b/src/terminal/c/terminal.zig
-@@ -0,0 +1,3057 @@
+@@ -0,0 +1,3367 @@
 +//! C API wrapper for Terminal
 +//!
 +//! This provides a minimal, high-performance interface to Ghostty's Terminal
@@ -1542,67 +2470,117 @@ index 000000000..fb903e7aa
 +}, Allocator.Error);
 +
 +const RetainedSearchRegistry = struct {
-+    const Entry = struct {
-+        search: ScreenSearch,
-+        phase: enum { search, index, complete } = .search,
-+        index_node: ?*PageList.List.Node = null,
-+        index_row: u32 = 0,
-+        node_rows: std.AutoHashMapUnmanaged(*PageList.List.Node, NodeRows) = .empty,
++    const Occurrence = struct {
++        start: *PageList.Pin,
++        end: *PageList.Pin,
++        cells: []u64,
++        wraps: []bool,
++        seen: u64,
 +
-+        fn deinit(self: *Entry, alloc: Allocator) void {
-+            self.search.deinit();
-+            self.node_rows.deinit(alloc);
++        fn deinit(self: *Occurrence, alloc: Allocator, screen: *@import("../Screen.zig")) void {
++            screen.pages.untrackPin(self.start);
++            screen.pages.untrackPin(self.end);
++            alloc.free(self.cells);
++            alloc.free(self.wraps);
++        }
++
++        fn valid(self: *const Occurrence) bool {
++            if (self.start.garbage or self.end.garbage or
++                self.start.y >= self.start.node.data.size.rows or self.end.y >= self.end.node.data.size.rows or
++                self.start.x >= self.start.node.data.size.cols or self.end.x >= self.end.node.data.size.cols) return false;
++            var it = self.start.rowIterator(.right_down, self.end.*);
++            var index: usize = 0;
++            var row_index: usize = 0;
++            while (it.next()) |row| {
++                const left: usize = if (index == 0) self.start.x else 0;
++                const right: usize = if (row.node == self.end.node and row.y == self.end.y) self.end.x + 1 else row.node.data.size.cols;
++                if (left >= right or right > row.node.data.size.cols) return false;
++                const cells = row.node.data.getCells(row.rowAndCell().row)[left..right];
++                for (cells) |*cell| {
++                    if (index >= self.cells.len or row.node.data.currentRetainedCellId(cell) != self.cells[index]) return false;
++                    index += 1;
++                }
++                if (index < self.cells.len and (row_index >= self.wraps.len or row.rowAndCell().row.wrap != self.wraps[row_index])) return false;
++                row_index += 1;
++            }
++            return index == self.cells.len;
 +        }
 +    };
 +
-+    const NodeRows = struct {
-+        serial: u64,
-+        row: u32,
++    const Entry = struct {
++        screen: *@import("../Screen.zig"),
++        scan: ?ScreenSearch,
++        query: []u8,
++        case_sensitive: bool,
++        phase: enum { search, ranges, cleanup, compact, order, complete } = .search,
++        next_match: usize = 0,
++        cleanup_index: usize = 0,
++        compact_read: usize = 0,
++        compact_write: usize = 0,
++        sort_width: usize = 1,
++        sort_left: usize = 0,
++        sort_a: usize = 0,
++        sort_b: usize = 0,
++        sort_mid: usize = 0,
++        sort_end: usize = 0,
++        cycle: u64 = 1,
++        next_id: u32 = 1,
++        occurrences: std.AutoArrayHashMapUnmanaged(u32, Occurrence) = .empty,
++        by_cell: std.AutoHashMapUnmanaged(u64, u32) = .empty,
++        published: std.ArrayList(u32) = .empty,
++        building: std.ArrayList(u32) = .empty,
++        ordering: std.ArrayList(u32) = .empty,
++
++        fn deinit(self: *Entry, alloc: Allocator) void {
++            if (self.scan) |*scan| scan.deinit();
++            for (self.occurrences.values()) |*occ| occ.deinit(alloc, self.screen);
++            self.occurrences.deinit(alloc);
++            self.by_cell.deinit(alloc);
++            self.published.deinit(alloc);
++            self.building.deinit(alloc);
++            self.ordering.deinit(alloc);
++            alloc.free(self.query);
++        }
 +    };
 +
 +    entries: std.AutoHashMapUnmanaged(u32, Entry) = .empty,
 +    next_id: u32 = 1,
++    cell_sequence: u64 = 0,
 +
 +    fn deinit(self: *RetainedSearchRegistry, alloc: Allocator) void {
-+        var it = self.entries.valueIterator();
-+        while (it.next()) |entry| entry.deinit(alloc);
++        self.clear(alloc);
 +        self.entries.deinit(alloc);
-+        self.* = .{};
 +    }
 +
 +    fn clear(self: *RetainedSearchRegistry, alloc: Allocator) void {
 +        var it = self.entries.valueIterator();
-+        while (it.next()) |entry| entry.deinit(alloc);
++        while (it.next()) |entry| {
++            entry.deinit(alloc);
++            var node = entry.screen.pages.pages.first;
++            while (node) |n| : (node = n.next) n.data.clearRetainedCellIds();
++        }
 +        self.entries.clearRetainingCapacity();
 +    }
 +
-+    fn create(
-+        self: *RetainedSearchRegistry,
-+        alloc: Allocator,
-+        terminal: *Terminal,
-+        query: []const u8,
-+        case_sensitive: bool,
-+    ) ?u32 {
++    fn create(self: *RetainedSearchRegistry, alloc: Allocator, terminal: *Terminal, query: []const u8, case_sensitive: bool) ?u32 {
 +        if (query.len == 0 or query.len > max_search_query_bytes) return null;
 +        const primary = terminal.screens.get(.primary) orelse return null;
-+        var search = ScreenSearch.initWithCaseSensitivity(
-+            alloc,
-+            primary,
-+            query,
-+            if (case_sensitive) .sensitive else .ascii_insensitive,
-+        ) catch return null;
-+
++        var scan = ScreenSearch.initWithCaseSensitivity(alloc, primary, query, if (case_sensitive) .sensitive else .ascii_insensitive) catch return null;
++        const owned = alloc.dupe(u8, query) catch {
++            scan.deinit();
++            return null;
++        };
 +        var id = self.next_id;
 +        while (id == 0 or self.entries.contains(id)) id +%= 1;
 +        self.next_id = id +% 1;
-+        if (self.next_id == 0) self.next_id = 1;
 +        const inserted = inserted: {
 +            retained_search_create_tw.check(.registry_insert) catch break :inserted false;
-+            self.entries.put(alloc, id, .{ .search = search }) catch break :inserted false;
++            self.entries.put(alloc, id, .{ .screen = primary, .scan = scan, .query = owned, .case_sensitive = case_sensitive }) catch break :inserted false;
 +            break :inserted true;
 +        };
 +        if (!inserted) {
-+            search.deinit();
++            scan.deinit();
++            alloc.free(owned);
 +            return null;
 +        }
 +        return id;
@@ -1612,42 +2590,214 @@ index 000000000..fb903e7aa
 +        if (self.entries.fetchRemove(id)) |removed| {
 +            var entry = removed.value;
 +            entry.deinit(alloc);
++            if (self.entries.count() == 0) {
++                var node = entry.screen.pages.pages.first;
++                while (node) |n| : (node = n.next) n.data.clearRetainedCellIds();
++            }
 +        }
 +    }
 +
-+    /// One call performs at most one core tick, one page feed, or indexes one
-+    /// retained page for constant-time range materialization.
++    fn refresh(self: *RetainedSearchRegistry, alloc: Allocator, id: u32) bool {
++        const entry = self.entries.getPtr(id) orelse return false;
++        if (entry.phase != .complete) return false;
++        entry.scan = ScreenSearch.initWithCaseSensitivity(alloc, entry.screen, entry.query, if (entry.case_sensitive) .sensitive else .ascii_insensitive) catch return false;
++        entry.cycle += 1;
++        entry.next_match = 0;
++        entry.cleanup_index = 0;
++        entry.compact_read = 0;
++        entry.compact_write = 0;
++        entry.sort_width = 1;
++        entry.sort_left = 0;
++        entry.sort_a = 0;
++        entry.sort_b = 0;
++        entry.sort_mid = 0;
++        entry.sort_end = 0;
++        entry.ordering.clearRetainingCapacity();
++        entry.building.clearRetainingCapacity();
++        entry.phase = .search;
++        return true;
++    }
++
++    /// A finite scan never restarts or extends its frontier on parser writes.
++    /// One step performs one search tick/page feed or materializes one range.
 +    fn step(self: *RetainedSearchRegistry, alloc: Allocator, id: u32) c_int {
 +        const entry = self.entries.getPtr(id) orelse return -1;
 +        switch (entry.phase) {
-+            .search => entry.search.tick() catch |err| switch (err) {
++            .search => entry.scan.?.tick() catch |err| switch (err) {
 +                error.FeedRequired => {
-+                    entry.search.feed() catch return -1;
++                    entry.scan.?.feed() catch return -1;
 +                    return 0;
 +                },
 +                error.SearchComplete => {
-+                    entry.phase = .index;
-+                    entry.index_node = entry.search.screen.pages.pages.first;
++                    entry.phase = .ranges;
 +                    return 0;
 +                },
 +                error.OutOfMemory => return -1,
 +            },
-+            .index => {
-+                const node = entry.index_node orelse {
-+                    entry.phase = .complete;
-+                    return 1;
++            .ranges => {
++                const scan = &entry.scan.?;
++                if (entry.next_match >= scan.matchesLen()) {
++                    entry.phase = .cleanup;
++                    return 0;
++                }
++                const index = entry.next_match;
++                entry.next_match += 1;
++                const history = scan.history_results.items;
++                const hl = if (index < history.len) &history[history.len - index - 1] else &scan.active_results.items[index - history.len];
++                // Check serials before dereferencing a snapshot's borrowed pins.
++                for (hl.chunks.items(.serial), hl.chunks.items(.node)) |serial, node| {
++                    // A pruned page may have been recycled at the same address.
++                    if (serial < entry.screen.pages.page_serial_min) return 0;
++                    var live = entry.screen.pages.pages.first;
++                    while (live) |n| : (live = n.next) {
++                        if (n == node) break;
++                    }
++                    if (live == null or live.?.serial != serial) return 0;
++                }
++                const start = hl.startPin();
++                const end = hl.endPin();
++                if (entry.screen.pages.pointFromPin(.screen, start) == null or entry.screen.pages.pointFromPin(.screen, end) == null) return 0;
++                // A scan may have copied active cells before an interleaved write.
++                // Never publish that snapshot as a match of replacement text.
++                const text = extractSearchText(alloc, entry.screen, start, end) catch return -1;
++                defer alloc.free(text);
++                const equal = if (entry.case_sensitive) std.mem.eql(u8, text, entry.query) else std.ascii.eqlIgnoreCase(text, entry.query);
++                if (!equal) return 0;
++                const first_cell = start.rowAndCell().cell;
++                const first_id = start.node.data.retainedCellId(first_cell, alloc, &self.cell_sequence) catch return -1;
++                if (entry.by_cell.get(first_id)) |existing| {
++                    const occ = entry.occurrences.getPtr(existing).?;
++                    if (occ.valid()) {
++                        occ.seen = entry.cycle;
++                        entry.building.append(alloc, existing) catch return -1;
++                        return 0;
++                    }
++                }
++                var ids: std.ArrayList(u64) = .empty;
++                defer ids.deinit(alloc);
++                var wraps: std.ArrayList(bool) = .empty;
++                defer wraps.deinit(alloc);
++                var rows = start.rowIterator(.right_down, end);
++                var first = true;
++                while (rows.next()) |row| {
++                    wraps.append(alloc, row.rowAndCell().row.wrap) catch return -1;
++                    const left: usize = if (first) start.x else 0;
++                    const right: usize = if (row.node == end.node and row.y == end.y) end.x + 1 else row.node.data.size.cols;
++                    first = false;
++                    for (row.node.data.getCells(row.rowAndCell().row)[left..right]) |*cell| {
++                        ids.append(alloc, row.node.data.retainedCellId(cell, alloc, &self.cell_sequence) catch return -1) catch return -1;
++                    }
++                }
++                const owned_wraps = wraps.toOwnedSlice(alloc) catch return -1;
++                const start_pin = entry.screen.pages.trackPin(start) catch {
++                    alloc.free(owned_wraps);
++                    return -1;
 +                };
-+                entry.node_rows.put(alloc, node, .{
-+                    .serial = node.serial,
-+                    .row = entry.index_row,
-+                }) catch return -1;
-+                entry.index_row = std.math.add(
-+                    u32,
-+                    entry.index_row,
-+                    node.data.size.rows,
-+                ) catch return -1;
-+                entry.index_node = node.next;
++                const end_pin = entry.screen.pages.trackPin(end) catch {
++                    entry.screen.pages.untrackPin(start_pin);
++                    alloc.free(owned_wraps);
++                    return -1;
++                };
++                const cells = ids.toOwnedSlice(alloc) catch {
++                    alloc.free(owned_wraps);
++                    entry.screen.pages.untrackPin(start_pin);
++                    entry.screen.pages.untrackPin(end_pin);
++                    return -1;
++                };
++                if (entry.next_id == std.math.maxInt(u32)) {
++                    alloc.free(cells);
++                    alloc.free(owned_wraps);
++                    entry.screen.pages.untrackPin(start_pin);
++                    entry.screen.pages.untrackPin(end_pin);
++                    return -1;
++                }
++                const occurrence_id = entry.next_id;
++                entry.next_id += 1;
++                var occ: Occurrence = .{ .start = start_pin, .end = end_pin, .cells = cells, .wraps = owned_wraps, .seen = entry.cycle };
++                entry.occurrences.put(alloc, occurrence_id, occ) catch {
++                    occ.deinit(alloc, entry.screen);
++                    return -1;
++                };
++                entry.by_cell.put(alloc, first_id, occurrence_id) catch return -1;
++                entry.building.append(alloc, occurrence_id) catch return -1;
++            },
++            .cleanup => {
++                if (entry.cleanup_index < entry.occurrences.count()) {
++                    const key = entry.occurrences.keys()[entry.cleanup_index];
++                    const occ = &entry.occurrences.values()[entry.cleanup_index];
++                    if (occ.valid()) {
++                        // Borrowed scan coordinates may expire during page
++                        // compaction. Surviving cells still own their identity.
++                        if (occ.seen != entry.cycle) entry.building.append(alloc, key) catch return -1;
++                        entry.cleanup_index += 1;
++                        return 0;
++                    }
++                    const first_id = occ.cells[0];
++                    if (entry.by_cell.get(first_id) == key) _ = entry.by_cell.remove(first_id);
++                    occ.deinit(alloc, entry.screen);
++                    _ = entry.occurrences.swapRemove(key);
++                    return 0;
++                }
++                entry.phase = .compact;
 +                return 0;
++            },
++            .compact => {
++                if (entry.compact_read < entry.building.items.len) {
++                    const key = entry.building.items[entry.compact_read];
++                    entry.compact_read += 1;
++                    if (entry.occurrences.getPtr(key)) |occ| {
++                        if (occ.valid()) {
++                            entry.building.items[entry.compact_write] = key;
++                            entry.compact_write += 1;
++                        }
++                    }
++                    return 0;
++                }
++                entry.building.items.len = entry.compact_write;
++                entry.phase = .order;
++                return 0;
++            },
++            .order => {
++                const count = entry.building.items.len;
++                // Bottom-up merge sort materializes at most one ID per step.
++                // No whole-result sort can monopolize the render task.
++                if (entry.sort_width < count) {
++                    if (entry.sort_left >= count) {
++                        std.mem.swap(std.ArrayList(u32), &entry.building, &entry.ordering);
++                        entry.ordering.clearRetainingCapacity();
++                        entry.sort_width *= 2;
++                        entry.sort_left = 0;
++                        entry.sort_end = 0;
++                        return 0;
++                    }
++                    if (entry.sort_end == 0) {
++                        entry.sort_a = entry.sort_left;
++                        entry.sort_mid = @min(count, entry.sort_left + entry.sort_width);
++                        entry.sort_b = entry.sort_mid;
++                        entry.sort_end = @min(count, entry.sort_mid + entry.sort_width);
++                    }
++                    if (entry.sort_a == entry.sort_mid and entry.sort_b == entry.sort_end) {
++                        entry.sort_left = entry.sort_end;
++                        entry.sort_end = 0;
++                        return 0;
++                    }
++                    const take_a = if (entry.sort_b == entry.sort_end) true else if (entry.sort_a == entry.sort_mid) false else order: {
++                        const a = entry.occurrences.getPtr(entry.building.items[entry.sort_a]).?;
++                        const b = entry.occurrences.getPtr(entry.building.items[entry.sort_b]).?;
++                        if (a.start.garbage) break :order false;
++                        if (b.start.garbage) break :order true;
++                        break :order a.start.before(b.start.*);
++                    };
++                    const key = if (take_a) entry.building.items[entry.sort_a] else entry.building.items[entry.sort_b];
++                    entry.ordering.append(alloc, key) catch return -1;
++                    if (take_a) entry.sort_a += 1 else entry.sort_b += 1;
++                    return 0;
++                }
++                std.mem.swap(std.ArrayList(u32), &entry.published, &entry.building);
++                entry.scan.?.deinit();
++                entry.scan = null;
++                entry.phase = .complete;
++                return 1;
 +            },
 +            .complete => return 1,
 +        }
@@ -1657,25 +2807,16 @@ index 000000000..fb903e7aa
 +    fn matchCount(self: *const RetainedSearchRegistry, id: u32) ?usize {
 +        const entry = self.entries.getPtr(id) orelse return null;
 +        if (entry.phase != .complete) return null;
-+        return entry.search.matchesLen();
++        return entry.published.items.len;
 +    }
 +
-+    fn matchAt(self: *const RetainedSearchRegistry, id: u32, index: usize) ?*const @import("../highlight.zig").Flattened {
-+        const entry = self.entries.getPtr(id) orelse return null;
-+        if (entry.phase != .complete) return null;
-+        const history = entry.search.history_results.items;
-+        if (index < history.len) return &history[history.len - index - 1];
-+        const active_index = index - history.len;
-+        const active = entry.search.active_results.items;
-+        if (active_index >= active.len) return null;
-+        return &active[active_index];
++    fn matchId(self: *const RetainedSearchRegistry, id: u32, index: usize) u32 {
++        const entry = self.entries.getPtr(id) orelse return 0;
++        if (index >= entry.published.items.len) return 0;
++        return entry.published.items[index];
 +    }
 +
-+    fn validatedPins(
-+        self: *const RetainedSearchRegistry,
-+        id: u32,
-+        index: usize,
-+    ) ?struct {
++    fn validatedPins(self: *const RetainedSearchRegistry, id: u32, occurrence_id: u32) ?struct {
 +        screen: *@import("../Screen.zig"),
 +        start: PageList.Pin,
 +        end: PageList.Pin,
@@ -1683,33 +2824,17 @@ index 000000000..fb903e7aa
 +        end_row: u32,
 +    } {
 +        const entry = self.entries.getPtr(id) orelse return null;
-+        const highlight = self.matchAt(id, index) orelse return null;
-+        const chunks = highlight.chunks.slice();
-+        if (chunks.len == 0) return null;
-+
-+        const nodes = chunks.items(.node);
-+        const serials = chunks.items(.serial);
-+        const starts = chunks.items(.start);
-+        const ends = chunks.items(.end);
-+        for (nodes, serials, starts, ends) |node, serial, start, end| {
-+            const indexed = entry.node_rows.get(node) orelse return null;
-+            if (indexed.serial != serial or start >= end or end > node.data.size.rows) return null;
-+        }
-+
-+        const start = highlight.startPin();
-+        const end = highlight.endPin();
-+        if (start.x >= start.node.data.size.cols or end.x >= end.node.data.size.cols) return null;
-+        const start_page = entry.node_rows.get(start.node) orelse return null;
-+        const end_page = entry.node_rows.get(end.node) orelse return null;
-+        return .{
-+            .screen = entry.search.screen,
-+            .start = start,
-+            .end = end,
-+            .start_row = std.math.add(u32, start_page.row, start.y) catch return null,
-+            .end_row = std.math.add(u32, end_page.row, end.y) catch return null,
-+        };
++        const occ = entry.occurrences.getPtr(occurrence_id) orelse return null;
++        if (!occ.valid()) return null;
++        const start = entry.screen.pages.pointFromPin(.screen, occ.start.*) orelse return null;
++        const end = entry.screen.pages.pointFromPin(.screen, occ.end.*) orelse return null;
++        return .{ .screen = entry.screen, .start = occ.start.*, .end = occ.end.*, .start_row = @intCast(start.screen.y), .end_row = @intCast(end.screen.y) };
 +    }
 +};
++
++fn extractSearchText(alloc: Allocator, screen: *Screen, start: PageList.Pin, end: PageList.Pin) ![:0]const u8 {
++    return screen.selectionString(alloc, .{ .sel = Selection.init(start, end, false), .trim = false });
++}
 +
 +/// Response handler that processes VT sequences and queues responses.
 +/// This extends the readonly stream handler to also handle queries.
@@ -1720,6 +2845,7 @@ index 000000000..fb903e7aa
 +    events: *EventQueue,
 +    provenance: *ProvenanceRegistry,
 +    retained_ranges: *RetainedRangeRegistry,
++    retained_searches: *RetainedSearchRegistry,
 +    cursor_defaults: *CursorDefaults,
 +    synchronized_output_generation: *u32,
 +    write_screen_mask: *u8,
@@ -1731,6 +2857,7 @@ index 000000000..fb903e7aa
 +        events: *EventQueue,
 +        provenance: *ProvenanceRegistry,
 +        retained_ranges: *RetainedRangeRegistry,
++        retained_searches: *RetainedSearchRegistry,
 +        cursor_defaults: *CursorDefaults,
 +        synchronized_output_generation: *u32,
 +        write_screen_mask: *u8,
@@ -1742,6 +2869,7 @@ index 000000000..fb903e7aa
 +            .events = events,
 +            .provenance = provenance,
 +            .retained_ranges = retained_ranges,
++            .retained_searches = retained_searches,
 +            .cursor_defaults = cursor_defaults,
 +            .synchronized_output_generation = synchronized_output_generation,
 +            .write_screen_mask = write_screen_mask,
@@ -1888,6 +3016,7 @@ index 000000000..fb903e7aa
 +            .active_status_display => self.terminal.status_display = value,
 +            .decaln => try self.terminal.decaln(),
 +            .full_reset => {
++                self.retained_searches.clear(self.alloc);
 +                const before = self.terminal.screens.active_key;
 +                self.events.clearRetainingScreenChanges();
 +                self.retained_ranges.clear(self.terminal);
@@ -2456,6 +3585,7 @@ index 000000000..fb903e7aa
 +        &wrapper.events,
 +        &wrapper.provenance,
 +        &wrapper.retained_ranges,
++        &wrapper.retained_searches,
 +        &wrapper.cursor_defaults,
 +        &wrapper.synchronized_output_generation,
 +        &wrapper.write_screen_mask,
@@ -2542,7 +3672,6 @@ index 000000000..fb903e7aa
 +        if (touched & primary_screen_touched != 0) {
 +            wrapper.primary_screen_generation +%= 1;
 +            if (wrapper.primary_screen_generation == 0) wrapper.primary_screen_generation = 1;
-+            wrapper.retained_searches.clear(wrapper.alloc);
 +            wrapper.retained_ranges.invalidateScreen(&wrapper.terminal, .primary);
 +        }
 +        if (touched & alternate_screen_touched != 0) {
@@ -2582,6 +3711,16 @@ index 000000000..fb903e7aa
 +pub fn retainedSearchCancel(ptr: ?*anyopaque, search_id: u32) callconv(.c) void {
 +    const wrapper: *TerminalWrapper = @ptrCast(@alignCast(ptr orelse return));
 +    wrapper.retained_searches.remove(wrapper.alloc, search_id);
++}
++
++pub fn retainedSearchRefresh(ptr: ?*anyopaque, search_id: u32) callconv(.c) bool {
++    const wrapper: *TerminalWrapper = @ptrCast(@alignCast(ptr orelse return false));
++    return wrapper.retained_searches.refresh(wrapper.alloc, search_id);
++}
++
++pub fn retainedSearchMatchId(ptr: ?*anyopaque, search_id: u32, index: u32) callconv(.c) u32 {
++    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return 0));
++    return wrapper.retained_searches.matchId(search_id, index);
 +}
 +
 +pub fn retainedSearchMatchCount(ptr: ?*anyopaque, search_id: u32) callconv(.c) c_int {
@@ -3905,607 +5044,102 @@ index 000000000..fb903e7aa
 +    try std.testing.expectEqual(@as(c_int, -2), retainedRangeStep(term, large_id));
 +    try std.testing.expect(wrapper.retained_ranges.entry == null);
 +}
-diff --git a/src/terminal/color.zig b/src/terminal/color.zig
-index 3b806f8b8..869496c0f 100644
---- a/src/terminal/color.zig
-+++ b/src/terminal/color.zig
-@@ -257,11 +257,30 @@ pub const DynamicRGB = struct {
-         self.override = color;
-     }
- 
-+    /// Change the configured default while preserving an active override.
-+    pub fn changeDefault(self: *DynamicRGB, color: RGB) void {
-+        self.default = color;
++
++fn finishRetainedSearchFixture(term: ?*anyopaque, id: u32) !void {
++    for (0..100_000) |_| {
++        const status = retainedSearchStep(term, id);
++        try std.testing.expect(status >= 0);
++        if (status == 1) return;
 +    }
-+
-     pub fn reset(self: *DynamicRGB) void {
--        self.override = self.default;
-+        self.override = null;
-     }
- };
- 
-+test "DynamicRGB configured default and override lifecycle" {
-+    const first: RGB = .{ .r = 1, .g = 2, .b = 3 };
-+    const second: RGB = .{ .r = 4, .g = 5, .b = 6 };
-+    const application: RGB = .{ .r = 7, .g = 8, .b = 9 };
-+
-+    var dynamic: DynamicRGB = .init(first);
-+    dynamic.set(application);
-+    dynamic.changeDefault(second);
-+    try std.testing.expectEqual(application, dynamic.get().?);
-+
-+    dynamic.reset();
-+    try std.testing.expectEqual(second, dynamic.get().?);
++    return error.SearchFixtureTimeout;
 +}
 +
- /// Color names in the standard 8 or 16 color palette.
- pub const Name = enum(u8) {
-     black = 0,
-diff --git a/src/terminal/formatter.zig b/src/terminal/formatter.zig
-index 062e3969a..7ada25876 100644
---- a/src/terminal/formatter.zig
-+++ b/src/terminal/formatter.zig
-@@ -289,7 +289,7 @@ pub const TerminalFormatter = struct {
-                 m.map.appendNTimes(
-                     m.alloc,
-                     self.terminal.screens.active.pages.getTopLeft(.screen),
--                    discarding.count,
-+                    @intCast(discarding.count),
-                 ) catch return error.WriteFailed;
-             }
-         }
-@@ -327,7 +327,7 @@ pub const TerminalFormatter = struct {
-                 m.map.appendNTimes(
-                     m.alloc,
-                     self.terminal.screens.active.pages.getTopLeft(.screen),
--                    discarding.count,
-+                    @intCast(discarding.count),
-                 ) catch return error.WriteFailed;
-             }
-         }
-@@ -411,7 +411,7 @@ pub const TerminalFormatter = struct {
-                             .y = last.y,
-                         };
-                     } else self.terminal.screens.active.pages.getTopLeft(.screen),
--                    discarding.count,
-+                    @intCast(discarding.count),
-                 ) catch return error.WriteFailed;
-             }
-         }
-@@ -684,7 +684,7 @@ pub const ScreenFormatter = struct {
-                         .y = last.y,
-                     };
-                 } else self.screen.pages.getTopLeft(.screen),
--                discarding.count,
-+                @intCast(discarding.count),
-             ) catch return error.WriteFailed;
-         }
-     }
-@@ -865,6 +865,27 @@ pub const PageFormatter = struct {
-         };
-     }
- 
-+    /// Initialize a formatter for one bounded page chunk. This is used by
-+    /// retained-range consumers that deliberately yield between pages while
-+    /// preserving soft-wrap and trailing-row state.
-+    pub fn initRange(
-+        page: *const Page,
-+        opts: Options,
-+        start_x: size.CellCountInt,
-+        start_y: size.CellCountInt,
-+        end_x: ?size.CellCountInt,
-+        end_y: ?size.CellCountInt,
-+        trailing_state: ?TrailingState,
-+    ) PageFormatter {
-+        var result: PageFormatter = .init(page, opts);
-+        result.start_x = start_x;
-+        result.start_y = start_y;
-+        result.end_x = end_x;
-+        result.end_y = end_y;
-+        result.trailing_state = trailing_state;
-+        return result;
++test "streaming retained search progresses and preserves native occurrence identity" {
++    const term = new(40, 4);
++    defer free(term);
++    const initial = "needle-first\r\nneedle-second\r\n";
++    write(term, initial, initial.len);
++    const id = retainedSearchCreate(term, "needle", 6, true);
++    try std.testing.expect(id != 0);
++    var completed: ?usize = null;
++    for (0..500) |producer_step| {
++        const append = "other output\r\n";
++        write(term, append, append.len);
++        const status = retainedSearchStep(term, id);
++        try std.testing.expect(status >= 0);
++        if (status == 1 and completed == null) completed = producer_step;
 +    }
-+
-     pub fn format(
-         self: PageFormatter,
-         writer: *std.Io.Writer,
-@@ -1230,7 +1251,7 @@ pub const PageFormatter = struct {
-                             &discarding.writer,
-                             &style,
-                         );
--                        for (0..discarding.count) |_| map.map.append(map.alloc, .{
-+                        for (0..@as(usize, @intCast(discarding.count))) |_| map.map.append(map.alloc, .{
-                             .x = x,
-                             .y = y,
-                         }) catch return error.WriteFailed;
-@@ -1287,7 +1308,7 @@ pub const PageFormatter = struct {
-                             &discarding.writer,
-                             uri,
-                         );
--                        for (0..discarding.count) |_| map.map.append(map.alloc, .{
-+                        for (0..@as(usize, @intCast(discarding.count))) |_| map.map.append(map.alloc, .{
-                             .x = x,
-                             .y = y,
-                         }) catch return error.WriteFailed;
-@@ -1305,7 +1326,7 @@ pub const PageFormatter = struct {
-                         if (self.point_map) |*map| {
-                             var discarding: std.Io.Writer.Discarding = .init(&.{});
-                             try self.writeCell(tag, &discarding.writer, cell);
--                            for (0..discarding.count) |_| map.map.append(map.alloc, .{
-+                            for (0..@as(usize, @intCast(discarding.count))) |_| map.map.append(map.alloc, .{
-                                 .x = x,
-                                 .y = y,
-                             }) catch return error.WriteFailed;
-diff --git a/src/terminal/osc.zig b/src/terminal/osc.zig
-index 0086e48bc..6757628e1 100644
---- a/src/terminal/osc.zig
-+++ b/src/terminal/osc.zig
-@@ -93,6 +93,7 @@ pub const Command = union(Key) {
- 
-     /// Show a desktop notification (OSC 9 or OSC 777)
-     show_desktop_notification: struct {
-+        source: NotificationSource,
-         title: [:0]const u8,
-         body: [:0]const u8,
-     },
-@@ -164,6 +165,12 @@ pub const Command = union(Key) {
- 
-     pub const KittyClipboardProtocol = parsers.kitty_clipboard_protocol.OSC;
- 
-+    /// Closed parser-owned origin for desktop notification requests.
-+    pub const NotificationSource = enum {
-+        osc_9,
-+        osc_777,
-+    };
-+
-     pub const Key = LibEnum(
-         if (build_options.c_abi) .c else .zig,
-         // NOTE: Order matters, see LibEnum documentation.
-diff --git a/src/terminal/osc/parsers/osc9.zig b/src/terminal/osc/parsers/osc9.zig
-index f636813d9..cdd912d91 100644
---- a/src/terminal/osc/parsers/osc9.zig
-+++ b/src/terminal/osc/parsers/osc9.zig
-@@ -277,6 +277,7 @@ pub fn parse(parser: *Parser, _: ?u8) ?*Command {
-     const data = writer.buffered();
-     parser.command = .{
-         .show_desktop_notification = .{
-+            .source = .osc_9,
-             .title = "",
-             .body = data[0 .. data.len - 1 :0],
-         },
-@@ -294,6 +295,7 @@ test "OSC 9: show desktop notification" {
- 
-     const cmd = p.end('\x1b').?.*;
-     try testing.expect(cmd == .show_desktop_notification);
-+    try testing.expectEqual(.osc_9, cmd.show_desktop_notification.source);
-     try testing.expectEqualStrings("", cmd.show_desktop_notification.title);
-     try testing.expectEqualStrings("Hello world", cmd.show_desktop_notification.body);
- }
-diff --git a/src/terminal/osc/parsers/rxvt_extension.zig b/src/terminal/osc/parsers/rxvt_extension.zig
-index 94a0961d2..2aa4ba037 100644
---- a/src/terminal/osc/parsers/rxvt_extension.zig
-+++ b/src/terminal/osc/parsers/rxvt_extension.zig
-@@ -37,6 +37,7 @@ pub fn parse(parser: *Parser, _: ?u8) ?*Command {
-     const body = data[t + 1 .. data.len - 1 :0];
-     parser.command = .{
-         .show_desktop_notification = .{
-+            .source = .osc_777,
-             .title = title,
-             .body = body,
-         },
-@@ -54,6 +55,7 @@ test "OSC: OSC 777 show desktop notification with title" {
- 
-     const cmd = p.end('\x1b').?.*;
-     try testing.expect(cmd == .show_desktop_notification);
-+    try testing.expectEqual(.osc_777, cmd.show_desktop_notification.source);
-     try testing.expectEqualStrings(cmd.show_desktop_notification.title, "Title");
-     try testing.expectEqualStrings(cmd.show_desktop_notification.body, "Body");
- }
-diff --git a/src/terminal/osc/parsers/semantic_prompt.zig b/src/terminal/osc/parsers/semantic_prompt.zig
-index d3a117515..494807f73 100644
---- a/src/terminal/osc/parsers/semantic_prompt.zig
-+++ b/src/terminal/osc/parsers/semantic_prompt.zig
-@@ -3,6 +3,7 @@ const std = @import("std");
- 
- const Parser = @import("../../osc.zig").Parser;
- const OSCCommand = @import("../../osc.zig").Command;
-+const lib = @import("../../../lib/main.zig");
- const string_encoding = @import("../../../os/string_encoding.zig");
- 
- const log = std.log.scoped(.osc_semantic_prompt);
-@@ -17,6 +18,18 @@ pub const Command = struct {
-     action: Action,
-     options_unvalidated: []const u8,
- 
-+    pub const C = extern struct {
-+        action: c_int,
-+        options_unvalidated: lib.String,
-+    };
-+
-+    pub fn cval(self: Command) C {
-+        return .{
-+            .action = @intCast(@intFromEnum(self.action)),
-+            .options_unvalidated = .init(self.options_unvalidated),
-+        };
++    try std.testing.expect(completed != null and completed.? < 499);
++    try std.testing.expectEqual(@as(c_int, 2), retainedSearchMatchCount(term, id));
++    const selected = retainedSearchMatchId(term, id, 1);
++    try std.testing.expect(selected != 0);
++    const more = "needle-third\r\n";
++    write(term, more, more.len);
++    try std.testing.expect(retainedSearchRefresh(term, id));
++    for (0..500) |producer_step| {
++        const append = "unrelated\r\n";
++        write(term, append, append.len);
++        const status = retainedSearchStep(term, id);
++        try std.testing.expect(status >= 0);
++        if (status == 1) {
++            try std.testing.expect(producer_step < 499);
++            break;
++        }
 +    }
-+
-     pub const Action = enum {
-         fresh_line, // 'L'
-         fresh_line_new_prompt, // 'A'
-diff --git a/src/terminal/parse_table.zig b/src/terminal/parse_table.zig
-index 01bd569cb..66674d3b4 100644
---- a/src/terminal/parse_table.zig
-+++ b/src/terminal/parse_table.zig
-@@ -148,6 +148,10 @@ fn genTable() Table {
-         // => dcs_entry
-         single(&result, 0x50, source, .dcs_entry, .none);
- 
-+        // GNU screen/tmux title sequence: ESC k <text> ST/BEL
-+        // Consume payload so it never reaches the visible grid.
-+        single(&result, 0x6B, source, .screen_title_string, .none);
-+
-         // => csi_entry
-         single(&result, 0x5B, source, .csi_entry, .none);
- 
-@@ -324,6 +328,24 @@ fn genTable() Table {
-         range(&result, 0x3C, 0x3F, source, .csi_param, .collect);
-     }
- 
-+    // screen_title_string
-+    {
-+        const source = State.screen_title_string;
-+
-+        // events
-+        single(&result, 0x19, source, source, .ignore);
-+        range(&result, 0, 0x06, source, source, .ignore);
-+        range(&result, 0x08, 0x17, source, source, .ignore);
-+        range(&result, 0x1C, 0x1F, source, source, .ignore);
-+        range(&result, 0x20, 0xFF, source, source, .ignore);
-+        single(&result, 0x7F, source, source, .ignore);
-+
-+        // Accept BEL and the 8-bit ST terminator explicitly; ESC \\ exits
-+        // through the existing anywhere ESC transition.
-+        single(&result, 0x07, source, .ground, .none);
-+        single(&result, 0x9C, source, .ground, .none);
-+    }
-+
-     // osc_string
-     {
-         const source = State.osc_string;
-diff --git a/src/terminal/render.zig b/src/terminal/render.zig
-index 2332866ac..dcfa15f57 100644
---- a/src/terminal/render.zig
-+++ b/src/terminal/render.zig
-@@ -322,13 +322,14 @@ pub const RenderState = struct {
-         // Colors.
-         self.colors.cursor = t.colors.cursor.get();
-         self.colors.palette = t.colors.palette.current;
--        bg_fg: {
-+        {
-             // Background/foreground can be unset initially which would
--            // depend on "default" background/foreground. The expected use
--            // case of Terminal is that the caller set their own configured
--            // defaults on load so this doesn't happen.
--            const bg = t.colors.background.get() orelse break :bg_fg;
--            const fg = t.colors.foreground.get() orelse break :bg_fg;
-+            // depend on "default" background/foreground. Use sensible defaults
-+            // (black background, light gray foreground) when not explicitly set.
-+            const default_bg: color.RGB = .{ .r = 0, .g = 0, .b = 0 };
-+            const default_fg: color.RGB = .{ .r = 204, .g = 204, .b = 204 };
-+            const bg = t.colors.background.get() orelse default_bg;
-+            const fg = t.colors.foreground.get() orelse default_fg;
-             if (t.modes.get(.reverse_colors)) {
-                 self.colors.background = fg;
-                 self.colors.foreground = bg;
-diff --git a/src/terminal/search/active.zig b/src/terminal/search/active.zig
-index 236f4c7a6..37331505d 100644
---- a/src/terminal/search/active.zig
-+++ b/src/terminal/search/active.zig
-@@ -23,11 +23,24 @@ pub const ActiveSearch = struct {
-     pub fn init(
-         alloc: Allocator,
-         needle: []const u8,
-+    ) Allocator.Error!ActiveSearch {
-+        return initWithCaseSensitivity(alloc, needle, .ascii_insensitive);
-+    }
-+
-+    pub fn initWithCaseSensitivity(
-+        alloc: Allocator,
-+        needle: []const u8,
-+        case_sensitivity: SlidingWindow.CaseSensitivity,
-     ) Allocator.Error!ActiveSearch {
-         // We just do a forward search since the active area is usually
-         // pretty small so search results are instant anyways. This avoids
-         // a small amount of work to reverse things.
--        var window: SlidingWindow = try .init(alloc, .forward, needle);
-+        var window: SlidingWindow = try .initWithCaseSensitivity(
-+            alloc,
-+            .forward,
-+            needle,
-+            case_sensitivity,
-+        );
-         errdefer window.deinit();
-         return .{ .window = window };
-     }
-diff --git a/src/terminal/search/pagelist.zig b/src/terminal/search/pagelist.zig
-index 4bfd241e7..ae5955f15 100644
---- a/src/terminal/search/pagelist.zig
-+++ b/src/terminal/search/pagelist.zig
-@@ -49,6 +49,22 @@ pub const PageListSearch = struct {
-         needle: []const u8,
-         list: *PageList,
-         start: *PageList.List.Node,
-+    ) Allocator.Error!PageListSearch {
-+        return initWithCaseSensitivity(
-+            alloc,
-+            needle,
-+            list,
-+            start,
-+            .ascii_insensitive,
-+        );
-+    }
-+
-+    pub fn initWithCaseSensitivity(
-+        alloc: Allocator,
-+        needle: []const u8,
-+        list: *PageList,
-+        start: *PageList.List.Node,
-+        case_sensitivity: SlidingWindow.CaseSensitivity,
-     ) Allocator.Error!PageListSearch {
-         // We put a tracked pin into the node that we're starting from.
-         // By using a tracked pin, we can keep our pagelist references safe
-@@ -62,7 +78,12 @@ pub const PageListSearch = struct {
-         errdefer list.untrackPin(pin);
- 
-         // Create our sliding window we'll use for searching.
--        var window: SlidingWindow = try .init(alloc, .reverse, needle);
-+        var window: SlidingWindow = try .initWithCaseSensitivity(
-+            alloc,
-+            .reverse,
-+            needle,
-+            case_sensitivity,
-+        );
-         errdefer window.deinit();
- 
-         // We always feed our initial page data into the window, because
-diff --git a/src/terminal/search/screen.zig b/src/terminal/search/screen.zig
-index 74828d879..f7ccec00e 100644
---- a/src/terminal/search/screen.zig
-+++ b/src/terminal/search/screen.zig
-@@ -38,6 +38,8 @@ const reloadActive_tw = tripwire.module(enum {
- /// nasty UX where going to alt screen (e.g. neovim) and then back would
- /// restart the full scrollback search.
- pub const ScreenSearch = struct {
-+    pub const CaseSensitivity = SlidingWindow.CaseSensitivity;
-+
-     /// The screen being searched.
-     screen: *Screen,
- 
-@@ -137,12 +139,30 @@ pub const ScreenSearch = struct {
-         alloc: Allocator,
-         screen: *Screen,
-         needle_unowned: []const u8,
-+    ) Allocator.Error!ScreenSearch {
-+        return initWithCaseSensitivity(
-+            alloc,
-+            screen,
-+            needle_unowned,
-+            .ascii_insensitive,
-+        );
-+    }
-+
-+    pub fn initWithCaseSensitivity(
-+        alloc: Allocator,
-+        screen: *Screen,
-+        needle_unowned: []const u8,
-+        case_sensitivity: CaseSensitivity,
-     ) Allocator.Error!ScreenSearch {
-         var result: ScreenSearch = .{
-             .screen = screen,
-             .rows = screen.pages.rows,
-             .cols = screen.pages.cols,
--            .active = try .init(alloc, needle_unowned),
-+            .active = try .initWithCaseSensitivity(
-+                alloc,
-+                needle_unowned,
-+                case_sensitivity,
-+            ),
-             .history = null,
-             .state = .active,
-             .active_results = .empty,
-@@ -268,10 +288,11 @@ pub const ScreenSearch = struct {
-             self.screen.pages.cols != self.cols)
-         {
-             // Reinit
--            const new: ScreenSearch = try .init(
-+            const new: ScreenSearch = try .initWithCaseSensitivity(
-                 self.allocator(),
-                 self.screen,
-                 self.needle(),
-+                self.active.window.case_sensitivity,
-             );
- 
-             // Deinit/reinit
-@@ -445,11 +466,12 @@ pub const ScreenSearch = struct {
-                 // No history search yet, but we now have history. So let's
-                 // initialize.
- 
--                var search: PageListSearch = try .init(
-+                var search: PageListSearch = try .initWithCaseSensitivity(
-                     alloc,
-                     self.needle(),
-                     list,
-                     history_node,
-+                    self.active.window.case_sensitivity,
-                 );
-                 errdefer search.deinit();
- 
-@@ -475,10 +497,11 @@ pub const ScreenSearch = struct {
-             // collect all the results into a new list. We ASSUME that
-             // reloadActive is being called frequently enough that there isn't
-             // a massive amount of history to search here.
--            var window: SlidingWindow = try .init(
-+            var window: SlidingWindow = try .initWithCaseSensitivity(
-                 alloc,
-                 .forward,
-                 self.needle(),
-+                self.active.window.case_sensitivity,
-             );
-             defer window.deinit();
-             while (true) {
-diff --git a/src/terminal/search/sliding_window.zig b/src/terminal/search/sliding_window.zig
-index c3c29e085..0c6762f2c 100644
---- a/src/terminal/search/sliding_window.zig
-+++ b/src/terminal/search/sliding_window.zig
-@@ -36,6 +36,13 @@ const FlattenedHighlight = terminal.highlight.Flattened;
- /// pages become invalid, the caller should clear the sliding window and
- /// start over.
- pub const SlidingWindow = struct {
-+    /// Literal byte matching mode. Unicode input remains byte-exact in both
-+    /// modes; insensitive matching folds ASCII bytes only.
-+    pub const CaseSensitivity = enum {
-+        sensitive,
-+        ascii_insensitive,
-+    };
-+
-     /// The allocator to use for all the data within this window. We
-     /// store this rather than passing it around because its already
-     /// part of multiple elements (eg. Meta's CellMap) and we want to
-@@ -78,6 +85,9 @@ pub const SlidingWindow = struct {
-     /// concurrently from that point).
-     direction: Direction,
- 
-+    /// Whether literal byte matching folds ASCII case.
-+    case_sensitivity: CaseSensitivity,
-+
-     /// A buffer to store the overlap search data. This is used to search
-     /// overlaps between pages where the match starts on one page and
-     /// ends on another. The length is always `needle.len * 2`.
-@@ -100,6 +110,20 @@ pub const SlidingWindow = struct {
-         alloc: Allocator,
-         direction: Direction,
-         needle_unowned: []const u8,
-+    ) Allocator.Error!SlidingWindow {
-+        return initWithCaseSensitivity(
-+            alloc,
-+            direction,
-+            needle_unowned,
-+            .ascii_insensitive,
-+        );
-+    }
-+
-+    pub fn initWithCaseSensitivity(
-+        alloc: Allocator,
-+        direction: Direction,
-+        needle_unowned: []const u8,
-+        case_sensitivity: CaseSensitivity,
-     ) Allocator.Error!SlidingWindow {
-         var data = try DataBuf.init(alloc, 0);
-         errdefer data.deinit(alloc);
-@@ -124,10 +148,18 @@ pub const SlidingWindow = struct {
-             .chunk_buf = .empty,
-             .needle = needle,
-             .direction = direction,
-+            .case_sensitivity = case_sensitivity,
-             .overlap_buf = overlap_buf,
-         };
-     }
- 
-+    fn indexOf(self: *const SlidingWindow, haystack: []const u8) ?usize {
-+        return switch (self.case_sensitivity) {
-+            .sensitive => std.mem.indexOf(u8, haystack, self.needle),
-+            .ascii_insensitive => std.ascii.indexOfIgnoreCase(haystack, self.needle),
-+        };
-+    }
-+
-     pub fn deinit(self: *SlidingWindow) void {
-         self.alloc.free(self.overlap_buf);
-         self.alloc.free(self.needle);
-@@ -176,7 +208,7 @@ pub const SlidingWindow = struct {
-         };
- 
-         // Search the first slice for the needle.
--        if (std.ascii.indexOfIgnoreCase(slices[0], self.needle)) |idx| {
-+        if (self.indexOf(slices[0])) |idx| {
-             return self.highlight(
-                 idx,
-                 self.needle.len,
-@@ -202,10 +234,7 @@ pub const SlidingWindow = struct {
-             @memcpy(self.overlap_buf[prefix.len..overlap_len], suffix);
- 
-             // Search the overlap
--            const idx = std.ascii.indexOfIgnoreCase(
--                self.overlap_buf[0..overlap_len],
--                self.needle,
--            ) orelse break :overlap;
-+            const idx = self.indexOf(self.overlap_buf[0..overlap_len]) orelse break :overlap;
- 
-             // We found a match in the overlap buffer. We need to map the
-             // index back to the data buffer in order to get our selection.
-@@ -216,7 +245,7 @@ pub const SlidingWindow = struct {
-         }
- 
-         // Search the last slice for the needle.
--        if (std.ascii.indexOfIgnoreCase(slices[1], self.needle)) |idx| {
-+        if (self.indexOf(slices[1])) |idx| {
-             return self.highlight(
-                 slices[0].len + idx,
-                 self.needle.len,
-@@ -732,6 +761,37 @@ test "SlidingWindow single append case insensitive ASCII" {
-     try testing.expect(w.next() == null);
- }
- 
-+test "SlidingWindow single append case sensitive" {
-+    const testing = std.testing;
-+    const alloc = testing.allocator;
-+
-+    var w: SlidingWindow = try .initWithCaseSensitivity(
-+        alloc,
-+        .forward,
-+        "Boo!",
-+        .sensitive,
-+    );
-+    defer w.deinit();
-+
-+    var s = try Screen.init(alloc, .{ .cols = 80, .rows = 24, .max_scrollback = 0 });
-+    defer s.deinit();
-+    try s.testWriteString("boo! Boo! É é");
-+
-+    const node: *PageList.List.Node = s.pages.pages.first.?;
-+    _ = try w.append(node);
-+
-+    const sel = w.next().?.untracked();
-+    try testing.expectEqual(point.Point{ .active = .{
-+        .x = 5,
-+        .y = 0,
-+    } }, s.pages.pointFromPin(.active, sel.start));
-+    try testing.expectEqual(point.Point{ .active = .{
-+        .x = 8,
-+        .y = 0,
-+    } }, s.pages.pointFromPin(.active, sel.end));
-+    try testing.expect(w.next() == null);
++    try std.testing.expectEqual(@as(c_int, 3), retainedSearchMatchCount(term, id));
++    try std.testing.expectEqual(selected, retainedSearchMatchId(term, id, 1));
++    var text: [6]u8 = undefined;
++    try std.testing.expectEqual(@as(c_int, 6), retainedSearchMatchText(term, id, selected, &text, text.len));
++    try std.testing.expectEqualStrings("needle", &text);
++    retainedSearchCancel(term, id);
++    try std.testing.expectEqual(@as(c_int, -1), retainedSearchMatchText(term, id, selected, null, 0));
++    const wrapper: *TerminalWrapper = @ptrCast(@alignCast(term.?));
++    var node = wrapper.terminal.screens.active.pages.pages.first;
++    while (node) |n| : (node = n.next) try std.testing.expect(n.data.retained_cell_ids == null);
 +}
 +
- test "SlidingWindow single append single char" {
-     const testing = std.testing;
-     const alloc = testing.allocator;
-diff --git a/src/terminal/stream.zig b/src/terminal/stream.zig
-index e89c73e66..6893c9c84 100644
---- a/src/terminal/stream.zig
-+++ b/src/terminal/stream.zig
-@@ -333,6 +333,7 @@ pub const Action = union(Key) {
-     };
- 
-     pub const ShowDesktopNotification = struct {
-+        source: osc.Command.NotificationSource,
-         title: []const u8,
-         body: []const u8,
- 
-@@ -2021,6 +2022,7 @@ pub fn Stream(comptime Handler: type) type {
- 
-                 .show_desktop_notification => |v| {
-                     try self.handler.vt(.show_desktop_notification, .{
-+                        .source = v.source,
-                         .title = v.title,
-                         .body = v.body,
-                     });
++test "streaming retained search rejects identical overwrite and revoked native ranges" {
++    const term = new(20, 3);
++    defer free(term);
++    write(term, "needle", 6);
++    const id = retainedSearchCreate(term, "needle", 6, true);
++    try finishRetainedSearchFixture(term, id);
++    const old = retainedSearchMatchId(term, id, 0);
++    const rewrite = "\rneedle";
++    write(term, rewrite, rewrite.len);
++    try std.testing.expectEqual(@as(c_int, -1), retainedSearchMatchText(term, id, old, null, 0));
++    try std.testing.expect(retainedSearchRefresh(term, id));
++    try finishRetainedSearchFixture(term, id);
++    const current = retainedSearchMatchId(term, id, 0);
++    try std.testing.expect(current != old);
++    var cells: [4]u32 = undefined;
++    try std.testing.expectEqual(@as(c_int, -1), retainedSearchMatchRange(term, id, old, &cells, cells.len));
++    resize(term, 21, 3);
++    try std.testing.expectEqual(@as(c_int, -1), retainedSearchMatchRange(term, id, current, &cells, cells.len));
++}
++
++test "streaming retained search eviction preserves the byte budget" {
++    var config = std.mem.zeroes(GhosttyTerminalConfig);
++    config.scrollback_limit = 65_536;
++    config.scrollback_unit = @intFromEnum(ScrollbackUnit.bytes);
++    const term = newWithConfig(80, 3, &config);
++    defer free(term);
++    const initial = "needle\r\n";
++    write(term, initial, initial.len);
++    const id = retainedSearchCreate(term, "needle", 6, true);
++    try finishRetainedSearchFixture(term, id);
++    const old = retainedSearchMatchId(term, id, 0);
++    for (0..4000) |_| write(term, "filler\r\n", 8);
++    try std.testing.expectEqual(@as(c_int, -1), retainedSearchMatchText(term, id, old, null, 0));
++    const wrapper: *TerminalWrapper = @ptrCast(@alignCast(term.?));
++    const baseline = newWithConfig(80, 3, &config);
++    defer free(baseline);
++    write(baseline, initial, initial.len);
++    for (0..4000) |_| write(baseline, "filler\r\n", 8);
++    const original: *TerminalWrapper = @ptrCast(@alignCast(baseline.?));
++    try std.testing.expectEqual(original.terminal.screens.active.pages.maxSize(), wrapper.terminal.screens.active.pages.maxSize());
++    try std.testing.expectEqual(original.terminal.screens.active.pages.total_rows, wrapper.terminal.screens.active.pages.total_rows);
++    try std.testing.expect(retainedSearchRefresh(term, id));
++    try finishRetainedSearchFixture(term, id);
++    try std.testing.expectEqual(@as(c_int, 0), retainedSearchMatchCount(term, id));
++}

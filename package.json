@@ -61,7 +61,8 @@
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "prepublishOnly": "bun run build",
-    "release-please": "tsx scripts/release-please-runner.ts"
+    "release-please": "tsx scripts/release-please-runner.ts",
+    "test:retained-native": "./scripts/test-retained-native.sh"
   },
   "devDependencies": {
     "@ai-sdk/anthropic": "^4.0.23",

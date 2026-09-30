@@ -241,9 +241,24 @@ result.dispose();
 `caseSensitive: false` folds ASCII case only; non-ASCII text remains byte-exact while Unicode,
 wide-cell, and grapheme-to-cell mapping remains exact. A new query supersedes the current one.
 Queries are capped at 64 KiB of UTF-8 so a single cross-page match remains bounded.
-`AbortSignal`, `cancelRetainedBufferSearch()`, reset, resize, disposal, scrollback mutation, or any
-primary-screen write invalidates outstanding work and ranges. Output that stays wholly in the
-alternate screen does not invalidate normal-buffer results.
+The query stays live through primary output. `result.onUpdate(listener)` observes coalesced,
+finite refreshes; `pending` describes refresh work, and `matches` publishes completed lists.
+Ranges carry a query-scoped `id`. `result.resolve(range)` authenticates surviving cells and returns
+current coordinates, while overwrite (even identical text) and eviction revoke old occurrences.
+Consumers can preserve a selected identity without revealing it again on every update.
+`AbortSignal`, `cancelRetainedBufferSearch()`, reset, resize, and disposal revoke the query and its
+subscriptions. Reflow sets `invalidated` before notifying listeners; a new query cannot claim the
+old selection. Output that stays wholly in the alternate screen preserves normal-buffer results.
+Search metadata is lazy, bounded by retained cells and matches, and released with the query. It is
+separate from the scrollback byte accounting, so enabling search does not reduce retained history.
+
+Run the deterministic native identity/progress fixtures with Zig 0.15.2:
+
+```sh
+bun run test:retained-native
+```
+
+This test entry builds only the terminal fixture, avoiding application and iOS SDK dependencies.
 
 Semantic provenance can also delimit exact, half-open `[start,end)` text regions without changing
 the visible selection. Use an emitted semantic token for a closed endpoint, or capture the current

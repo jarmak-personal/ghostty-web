@@ -140,6 +140,8 @@ export interface ILinkHandler {
 
 /** Inclusive retained normal-buffer cell coordinates. */
 export interface IRetainedBufferRange {
+  /** Opaque occurrence identity, scoped to one query. */
+  readonly id: number;
   readonly start: Readonly<{ row: number; column: number }>;
   readonly end: Readonly<{ row: number; column: number }>;
 }
@@ -150,7 +152,7 @@ export interface IRetainedBufferSearchOptions {
    * non-ASCII UTF-8 remains byte-exact, matching Ghostty's search semantics.
    */
   caseSensitive: boolean;
-  /** Cancels this invocation without publishing partial results. */
+  /** Revokes this query, its ranges, pending work, and update subscriptions. */
   signal?: AbortSignal;
 }
 
@@ -167,6 +169,12 @@ export interface IRetainedBufferSearchResult extends IDisposable {
 
   /** Extract exact plain Unicode text, or undefined when the range is stale/foreign. */
   extract(range: IRetainedBufferRange): string | undefined;
+  readonly pending: boolean;
+  readonly invalidated: boolean;
+  /** Query-owned updates. Disposal revokes all subscriptions. */
+  onUpdate(listener: () => void): IDisposable;
+  /** Current cells, or undefined after overwrite, eviction, or revocation. */
+  resolve(range: IRetainedBufferRange): IRetainedBufferRange | undefined;
 }
 
 /**

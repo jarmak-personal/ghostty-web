@@ -502,6 +502,12 @@ export interface GhosttyWasmExports extends WebAssembly.Exports {
   ): number;
   ghostty_terminal_retained_search_step(terminal: TerminalHandle, searchId: number): number;
   ghostty_terminal_retained_search_cancel(terminal: TerminalHandle, searchId: number): void;
+  ghostty_terminal_retained_search_refresh(terminal: TerminalHandle, searchId: number): boolean;
+  ghostty_terminal_retained_search_match_id(
+    terminal: TerminalHandle,
+    searchId: number,
+    index: number
+  ): number;
   ghostty_terminal_retained_search_match_count(terminal: TerminalHandle, searchId: number): number;
   ghostty_terminal_retained_search_match_range(
     terminal: TerminalHandle,

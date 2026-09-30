@@ -49,7 +49,7 @@ describe('retained normal-buffer search', () => {
     terminal.write('xx界e\u0301👩‍💻yy');
 
     const wide = await terminal.searchRetainedBuffer('界', { caseSensitive: true });
-    expect(wide.matches[0]).toEqual({
+    expect(wide.matches[0]).toMatchObject({
       start: { row: 0, column: 2 },
       end: { row: 0, column: 2 },
     });
@@ -81,7 +81,7 @@ describe('retained normal-buffer search', () => {
     soft.write('abcdeFGHIJ');
     const softResult = await soft.searchRetainedBuffer('deFG', { caseSensitive: true });
     expect(softResult.matches).toHaveLength(1);
-    expect(softResult.matches[0]).toEqual({
+    expect(softResult.matches[0]).toMatchObject({
       start: { row: 0, column: 3 },
       end: { row: 1, column: 1 },
     });
@@ -101,7 +101,7 @@ describe('retained normal-buffer search', () => {
 
     const result = await terminal.searchRetainedBuffer('zero\none', { caseSensitive: true });
     expect(result.matches).toHaveLength(1);
-    expect(result.matches[0]).toEqual({
+    expect(result.matches[0]).toMatchObject({
       start: { row: 0, column: 0 },
       end: { row: 1, column: 2 },
     });
@@ -133,17 +133,17 @@ describe('retained normal-buffer search', () => {
     // One parser slice that leaves alt, mutates primary, and re-enters alt
     // must not be mistaken for wholly alternate output.
     terminal.write('\x1b[?1049lX\x1b[?1049h');
-    expect(result.extract(result.matches[0])).toBeUndefined();
+    expect(result.extract(result.matches[0])).toBe('needle');
   });
 
   test('fails closed after primary output evicts retained scrollback', async () => {
-    const terminal = await openTerminal({ cols: 12, rows: 2, scrollback: 8 });
+    const terminal = await openTerminal({ cols: 80, rows: 2, scrollbackBytes: 65536 });
     terminal.write('evict-me\r\nline-1\r\nline-2');
     const result = await terminal.searchRetainedBuffer('evict-me', { caseSensitive: true });
     const range = result.matches[0];
     expect(result.extract(range)).toBe('evict-me');
 
-    for (let i = 0; i < 20; i++) terminal.write(`\r\nline-${i + 3}`);
+    for (let i = 0; i < 4000; i++) terminal.write(`\r\nline-${i + 3}`);
     expect(result.extract(range)).toBeUndefined();
     expect(terminal.extractRetainedBufferText(range)).toBeUndefined();
   });
@@ -274,4 +274,129 @@ describe('retained normal-buffer search', () => {
       globalThis.setTimeout = originalSetTimeout;
     }
   });
+});
+
+async function waitUntil(predicate: () => boolean, timeout = 2000): Promise<void> {
+  const deadline = performance.now() + timeout;
+  while (!predicate()) {
+    if (performance.now() > deadline) throw new Error('Search update timed out');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+test('finite producer allows initial completion and new counts while still writing', async () => {
+  const terminal = await openTerminal({ cols: 80, rows: 4, scrollbackBytes: 10_000_000 });
+  terminal.write('needle-first\r\nneedle-second\r\n');
+  let writes = 0;
+  let active = true;
+  const producer = setInterval(() => {
+    terminal.write(`unrelated ${writes++}\r\n`);
+    if (writes === 30) terminal.write('needle-third\r\n');
+    if (writes === 200) {
+      active = false;
+      clearInterval(producer);
+    }
+  }, 5);
+  try {
+    const result = await terminal.searchRetainedBuffer('needle', { caseSensitive: true });
+    expect(result.pending).toBe(false);
+    expect(result.matches).toHaveLength(2);
+    expect(active).toBe(true);
+    const selected = result.matches[1];
+    let updates = 0;
+    const subscription = result.onUpdate(() => updates++);
+    await waitUntil(() => !result.pending && result.matches.length === 3);
+    expect(active).toBe(true);
+    expect(result.matches[1]).toBe(selected);
+    expect(result.resolve(selected)?.id).toBe(selected.id);
+    expect(result.extract(selected)).toBe('needle');
+    expect(updates).toBeGreaterThan(0);
+    subscription.dispose();
+    const stopped = updates;
+    terminal.write('more\r\n');
+    expect(updates).toBe(stopped);
+  } finally {
+    clearInterval(producer);
+  }
+});
+
+test('same-row append preserves identity, identical overwrite and erase revoke it', async () => {
+  const terminal = await openTerminal({ cols: 80, rows: 4 });
+  terminal.write('needle');
+  const result = await terminal.searchRetainedBuffer('needle', { caseSensitive: true });
+  const old = result.matches[0];
+  terminal.write(' suffix');
+  expect(result.extract(old)).toBe('needle');
+  await waitUntil(() => !result.pending && result.matches.length === 1);
+  terminal.write('\rneedle');
+  expect(result.resolve(old)).toBeUndefined();
+  expect(result.extract(old)).toBeUndefined();
+  await waitUntil(() => !result.pending && result.matches[0]?.id !== old.id);
+  const replacement = result.matches[0];
+  expect(result.extract(replacement)).toBe('needle');
+  expect(result.extract({ ...replacement })).toBeUndefined();
+  terminal.write('\r\x1b[2K');
+  expect(result.extract(replacement)).toBeUndefined();
+  await waitUntil(() => !result.pending && result.matches.length === 0);
+});
+
+test('Unicode identity survives append and compaction; grapheme mutation revokes it', async () => {
+  const terminal = await openTerminal({ cols: 80, rows: 4, scrollbackBytes: 10_000_000 });
+  terminal.write('界e\u0301👩‍💻\r\n');
+  const result = await terminal.searchRetainedBuffer('界e\u0301👩‍💻', { caseSensitive: true });
+  const selected = result.matches[0];
+  for (let i = 0; i < 2000; i++) terminal.write(`other ${i}\r\n`);
+  expect(result.extract(selected)).toBe('界e\u0301👩‍💻');
+  expect(result.resolve(selected)).toBeDefined();
+  const combining = await openTerminal({ cols: 20, rows: 3 });
+  combining.write('e');
+  const plain = await combining.searchRetainedBuffer('e', { caseSensitive: true });
+  combining.write('\u0301');
+  expect(plain.extract(plain.matches[0])).toBeUndefined();
+});
+
+test('reflow revokes updates before a listener can synchronously replace the query', async () => {
+  const terminal = await openTerminal({ cols: 20, rows: 3 });
+  terminal.write('needle');
+  const old = await terminal.searchRetainedBuffer('needle', { caseSensitive: true });
+  let replacement: ReturnType<Terminal['searchRetainedBuffer']> | undefined;
+  let updates = 0;
+  old.onUpdate(() => {
+    updates++;
+    if (old.invalidated)
+      replacement = terminal.searchRetainedBuffer('needle', { caseSensitive: true });
+  });
+  terminal.resize(21, 3);
+  expect(old.invalidated).toBe(true);
+  expect(old.resolve(old.matches[0])).toBeUndefined();
+  expect(replacement).toBeDefined();
+  expect((await replacement!).matches).toHaveLength(1);
+  const revokedUpdates = updates;
+  terminal.write(' other');
+  expect(updates).toBe(revokedUpdates);
+});
+
+test('resolved-query abort, parser reset and disposal revoke subscriptions and ranges', async () => {
+  const terminal = await openTerminal({ cols: 20, rows: 3 });
+  terminal.write('needle');
+  const abort = new AbortController();
+  const result = await terminal.searchRetainedBuffer('needle', {
+    caseSensitive: true,
+    signal: abort.signal,
+  });
+  const range = result.matches[0];
+  let updates = 0;
+  result.onUpdate(() => updates++);
+  abort.abort();
+  terminal.write('more');
+  expect(result.extract(range)).toBeUndefined();
+  expect(updates).toBe(0);
+  const reset = await terminal.searchRetainedBuffer('needle', { caseSensitive: true });
+  let invalidated = false;
+  reset.onUpdate(() => {
+    invalidated = reset.invalidated;
+  });
+  terminal.write('\x1bc');
+  expect(invalidated).toBe(true);
+  expect(reset.extract(reset.matches[0])).toBeUndefined();
 });
