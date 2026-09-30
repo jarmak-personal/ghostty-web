@@ -108,9 +108,11 @@ export type {
   IRetainedBufferSearchResult,
   ITerminalAddon,
   ITerminalCore,
+  ITerminalDataEvent,
   ITerminalOptions,
   ITheme,
   IUnicodeVersionProvider,
+  TerminalDataSource,
 } from './interfaces';
 export { LinkDetector } from './link-detector';
 // Link providers
