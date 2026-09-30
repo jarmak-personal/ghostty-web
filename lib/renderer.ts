@@ -767,23 +767,26 @@ export class CanvasRenderer {
 
     if (
       this.retainedRangeHighlight &&
-      !this.retainedRangeHighlight.paint({
-        cols: dims.cols,
-        rows: dims.rows,
-        cellWidth: this.metrics.width,
-        cellHeight: this.metrics.height,
-        devicePixelRatio: this.devicePixelRatio,
-        firstVisibleRow: scrollbackLength - integerViewportY,
-        alternateScreen: buffer.isAlternateScreen?.() ?? false,
-        endCellWidth: (row, column) => {
-          const viewportRow = row - (scrollbackLength - integerViewportY);
-          const line =
-            viewportRow < historicalRows
-              ? getHistoricalLine(viewportRow)
-              : buffer.getLine(viewportRow - historicalRows);
-          return line?.[column]?.width ?? 1;
+      !this.retainedRangeHighlight.paint(
+        {
+          cols: dims.cols,
+          rows: dims.rows,
+          cellWidth: this.metrics.width,
+          cellHeight: this.metrics.height,
+          devicePixelRatio: this.devicePixelRatio,
+          firstVisibleRow: scrollbackLength - integerViewportY,
+          alternateScreen: buffer.isAlternateScreen?.() ?? false,
+          endCellWidth: (row, column) => {
+            const viewportRow = row - (scrollbackLength - integerViewportY);
+            const line =
+              viewportRow < historicalRows
+                ? getHistoricalLine(viewportRow)
+                : buffer.getLine(viewportRow - historicalRows);
+            return line?.[column]?.width ?? 1;
+          },
         },
-      })
+        forceAll
+      )
     )
       this.clearRetainedRangeHighlight();
 

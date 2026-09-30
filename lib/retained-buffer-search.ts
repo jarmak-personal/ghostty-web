@@ -164,9 +164,8 @@ export class RetainedBufferSearchManager implements IDisposable {
   }
 
   extract(result: RetainedBufferSearchResult, range: IRetainedBufferRange): string | undefined {
-    if (this.disposed || this.currentResult !== result || result.sessionId === 0) return undefined;
-    const identity = this.identities.get(range);
-    if (!identity || identity.sessionId !== result.sessionId) return undefined;
+    const identity = this.authenticate(result, range);
+    if (!identity) return undefined;
     return (
       this.getTerminal()?.getRetainedSearchMatchText(identity.sessionId, identity.matchIndex) ??
       undefined
@@ -181,9 +180,8 @@ export class RetainedBufferSearchManager implements IDisposable {
   /** Authenticate one current range without extracting its text. */
   resolveRange(range: IRetainedBufferRange): IRetainedBufferRange | undefined {
     const result = this.currentResult;
-    const identity = this.identities.get(range);
-    if (this.disposed || !result || !identity || identity.sessionId !== result.sessionId)
-      return undefined;
+    const identity = result ? this.authenticate(result, range) : undefined;
+    if (!identity) return undefined;
     const current = this.getTerminal()?.getRetainedSearchMatchRange(
       identity.sessionId,
       identity.matchIndex
@@ -194,6 +192,15 @@ export class RetainedBufferSearchManager implements IDisposable {
           end: { row: current.endRow, column: current.endColumn },
         }
       : undefined;
+  }
+
+  private authenticate(
+    result: RetainedBufferSearchResult,
+    range: IRetainedBufferRange
+  ): RangeIdentity | undefined {
+    if (this.disposed || this.currentResult !== result || result.sessionId === 0) return undefined;
+    const identity = this.identities.get(range);
+    return identity?.sessionId === result.sessionId ? identity : undefined;
   }
 
   releaseResult(result: RetainedBufferSearchResult): void {

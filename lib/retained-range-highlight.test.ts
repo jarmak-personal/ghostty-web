@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, test } from 'bun:test';
-import type { IDisposable, IRetainedBufferRange } from './interfaces';
+import { afterEach, describe, expect, mock, spyOn, test } from 'bun:test';
+import type { IDisposable, IRetainedBufferRange, IRetainedRangeHighlightStyle } from './interfaces';
 import {
   RetainedRangeHighlight,
   type RetainedRangeHighlightFrame,
@@ -27,10 +27,39 @@ async function openTerminal() {
   return { terminal, container };
 }
 
+function captureHighlightPaint(
+  terminal: Terminal,
+  range: IRetainedBufferRange,
+  presentation: IRetainedRangeHighlightStyle = style
+) {
+  // Record the real highlight's immediate Canvas boundary, retaining the native
+  // range manager, renderer frame construction, and production frame scheduler.
+  const acquireContext = spyOn(HTMLCanvasElement.prototype, 'getContext');
+  let context: CanvasRenderingContext2D;
+  try {
+    expect(terminal.highlightRetainedBufferRange(range, presentation)).toBeDefined();
+    context = acquireContext.mock.results.at(-1)!.value as CanvasRenderingContext2D;
+  } finally {
+    acquireContext.mockRestore();
+  }
+  const rectangles: number[][] = [];
+  context.fillRect = (...rectangle) => rectangles.push(rectangle);
+  const clear = spyOn(context, 'clearRect');
+  return { context, rectangles, clear };
+}
+
+async function presentFrame(terminal: Terminal, forceAll = false) {
+  const frames = terminal.getRenderStats().renderFrames;
+  terminal.requestRender(forceAll);
+  await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+  expect(terminal.getRenderStats().renderFrames).toBeGreaterThan(frames);
+}
+
 afterEach(() => {
   for (const terminal of terminals.splice(0)) terminal.dispose();
   for (const surface of surfaces.splice(0)) surface.dispose();
   for (const container of containers.splice(0)) container.remove();
+  mock.restore();
 });
 
 describe('retained range presentation', () => {
@@ -191,5 +220,116 @@ describe('retained range presentation', () => {
     expect(terminal.revealRetainedBufferRange(result.matches[0])).toBe(false);
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
     expect(!overlay.isConnected || overlay.style.visibility === 'hidden').toBe(true);
+  });
+
+  test('real renderer maps wrapped native history, clipped scrolling and fresh resize ranges', async () => {
+    const { terminal } = await openTerminal();
+    terminal.write('abcdef界Z\r\nplain\r\ntail\r\nlast');
+    const result = await terminal.searchRetainedBuffer('f界Z', { caseSensitive: true });
+    expect(result.extract(result.matches[0])).toBe('f界Z');
+    expect(terminal.revealRetainedBufferRange(result.matches[0])).toBe(true);
+    const paint = captureHighlightPaint(terminal, result.matches[0]);
+    await presentFrame(terminal);
+    const metrics = terminal.renderer!.getMetrics();
+    expect(paint.rectangles).toEqual([
+      [5 * metrics.width, 0, 3 * metrics.width, metrics.height],
+      [0, metrics.height, metrics.width, metrics.height],
+    ]);
+
+    paint.rectangles.length = 0;
+    terminal.scrollLines(1);
+    await presentFrame(terminal);
+    expect(paint.rectangles).toEqual([[0, 0, metrics.width, metrics.height]]);
+
+    terminal.resize(12, 3);
+    const fresh = await terminal.searchRetainedBuffer('f界Z', { caseSensitive: true });
+    expect(terminal.revealRetainedBufferRange(fresh.matches[0])).toBe(true);
+    const resized = captureHighlightPaint(terminal, fresh.matches[0]);
+    await presentFrame(terminal);
+    expect(resized.rectangles).toEqual([[5 * metrics.width, 0, 4 * metrics.width, metrics.height]]);
+    fresh.dispose();
+  });
+
+  test('real renderer includes native wide endpoints in both history and live rows', async () => {
+    const { terminal } = await openTerminal();
+    terminal.write('f界\r\nplain\r\ntail\r\nq界');
+    const metrics = terminal.renderer!.getMetrics();
+    for (const [query, top] of [
+      ['f界', 0],
+      ['q界', 2 * metrics.height],
+    ] as const) {
+      const result = await terminal.searchRetainedBuffer(query, { caseSensitive: true });
+      expect(result.extract(result.matches[0])).toBe(query);
+      expect(terminal.revealRetainedBufferRange(result.matches[0])).toBe(true);
+      const paint = captureHighlightPaint(terminal, result.matches[0]);
+      await presentFrame(terminal);
+      expect(paint.rectangles).toEqual([[0, top, 3 * metrics.width, metrics.height]]);
+      result.dispose();
+    }
+  });
+
+  test('unchanged cursor frames skip highlight work while full frames refresh live CSS colors', async () => {
+    const { terminal, container } = await openTerminal();
+    container.style.setProperty('--accent', 'red');
+    terminal.write('hit');
+    const result = await terminal.searchRetainedBuffer('hit', { caseSensitive: true });
+    const paint = captureHighlightPaint(terminal, result.matches[0], {
+      ...style,
+      fill: 'var(--accent)',
+    });
+    const styles = spyOn(globalThis, 'getComputedStyle');
+    const canvas = terminal.renderer!.getCanvas();
+    const offset = { left: canvas.offsetLeft, top: canvas.offsetTop };
+    let layoutReads = 0;
+    Object.defineProperties(canvas, {
+      offsetLeft: {
+        configurable: true,
+        get: () => {
+          layoutReads++;
+          return offset.left;
+        },
+      },
+      offsetTop: {
+        configurable: true,
+        get: () => {
+          layoutReads++;
+          return offset.top;
+        },
+      },
+    });
+    await presentFrame(terminal, true);
+    const color = paint.context.fillStyle;
+    const reads = { styles: styles.mock.calls.length, layout: layoutReads };
+    paint.rectangles.length = 0;
+    paint.clear.mockClear();
+    terminal.resetCursorBlink();
+    await presentFrame(terminal);
+    expect(paint.rectangles).toEqual([]);
+    expect(paint.clear).not.toHaveBeenCalled();
+    expect(styles.mock.calls.length).toBe(reads.styles);
+    expect(layoutReads).toBe(reads.layout);
+
+    container.style.setProperty('--accent', 'blue');
+    terminal.options.theme = { background: '#111111' };
+    await presentFrame(terminal);
+    expect(paint.rectangles).toHaveLength(1);
+    expect(paint.context.fillStyle).not.toBe(color);
+    expect(paint.context.fillStyle).toBe(
+      getComputedStyle(container.querySelector('[data-ghostty-retained-range-highlight]')!).color
+    );
+    result.dispose();
+  });
+
+  test('an empty replacement revokes both text and range-presentation authority', async () => {
+    const { terminal } = await openTerminal();
+    terminal.write('hit');
+    const result = await terminal.searchRetainedBuffer('hit', { caseSensitive: true });
+    const range = result.matches[0];
+    const empty = await terminal.searchRetainedBuffer('', { caseSensitive: true });
+    expect(empty.matches).toEqual([]);
+    expect(result.extract(range)).toBeUndefined();
+    expect(terminal.revealRetainedBufferRange(range)).toBe(false);
+    expect(terminal.highlightRetainedBufferRange(range, style)).toBeUndefined();
+    empty.dispose();
   });
 });

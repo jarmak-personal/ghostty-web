@@ -16,6 +16,7 @@ export class RetainedRangeHighlight {
   private readonly canvas: HTMLCanvasElement;
   private readonly context: CanvasRenderingContext2D;
   private disposed = false;
+  private lastPaintKey?: string;
 
   constructor(
     private readonly sourceCanvas: HTMLCanvasElement,
@@ -40,9 +41,10 @@ export class RetainedRangeHighlight {
 
   hide(): void {
     this.canvas.style.visibility = 'hidden';
+    this.lastPaintKey = undefined;
   }
 
-  paint(frame: RetainedRangeHighlightFrame): boolean {
+  paint(frame: RetainedRangeHighlightFrame, forceAll = false): boolean {
     if (this.disposed) return false;
     const range = this.resolveRange();
     if (!range) return false;
@@ -50,23 +52,47 @@ export class RetainedRangeHighlight {
       this.hide();
       return true;
     }
+    const cssWidth = this.sourceCanvas.style.width;
+    const cssHeight = this.sourceCanvas.style.height;
+    const paintKey = [
+      range.start.row,
+      range.start.column,
+      range.end.row,
+      range.end.column,
+      frame.cols,
+      frame.rows,
+      frame.firstVisibleRow,
+      frame.cellWidth,
+      frame.cellHeight,
+      frame.devicePixelRatio,
+      this.sourceCanvas.width,
+      this.sourceCanvas.height,
+      cssWidth,
+      cssHeight,
+    ].join(':');
+    if (!forceAll && this.lastPaintKey === paintKey) return true;
+
+    // Full presentation frames include theme changes: resolve CSS variables again,
+    // without reading layout or computed styles on unchanged cursor-only frames.
+    const left = `${this.sourceCanvas.offsetLeft}px`;
+    const top = `${this.sourceCanvas.offsetTop}px`;
+    const presentation = getComputedStyle(this.canvas);
+    const fill = presentation.color;
+    const border = presentation.borderTopColor;
     if (this.canvas.width !== this.sourceCanvas.width) this.canvas.width = this.sourceCanvas.width;
     if (this.canvas.height !== this.sourceCanvas.height)
       this.canvas.height = this.sourceCanvas.height;
-    Object.assign(this.canvas.style, {
-      left: `${this.sourceCanvas.offsetLeft}px`,
-      top: `${this.sourceCanvas.offsetTop}px`,
-      width: this.sourceCanvas.style.width,
-      height: this.sourceCanvas.style.height,
-      visibility: '',
-    });
+    if (this.canvas.style.left !== left) this.canvas.style.left = left;
+    if (this.canvas.style.top !== top) this.canvas.style.top = top;
+    if (this.canvas.style.width !== cssWidth) this.canvas.style.width = cssWidth;
+    if (this.canvas.style.height !== cssHeight) this.canvas.style.height = cssHeight;
+    if (this.canvas.style.visibility !== '') this.canvas.style.visibility = '';
     const ctx = this.context;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
     ctx.setTransform(frame.devicePixelRatio, 0, 0, frame.devicePixelRatio, 0, 0);
-    const presentation = getComputedStyle(this.canvas);
-    ctx.fillStyle = presentation.color;
-    ctx.strokeStyle = presentation.borderTopColor;
+    ctx.fillStyle = fill;
+    ctx.strokeStyle = border;
     ctx.lineWidth = this.style.borderWidth;
     const lastVisibleRow = frame.firstVisibleRow + frame.rows - 1;
     const startRow = Math.max(range.start.row, frame.firstVisibleRow);
@@ -86,6 +112,7 @@ export class RetainedRangeHighlight {
       if (inset > 0)
         ctx.strokeRect(left + inset, top + inset, width - inset * 2, frame.cellHeight - inset * 2);
     }
+    this.lastPaintKey = paintKey;
     return true;
   }
 
