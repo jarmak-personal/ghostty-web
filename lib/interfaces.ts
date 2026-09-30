@@ -164,7 +164,11 @@ export interface IRetainedBufferExtractionOptions {
 export interface IRetainedBufferSearchResult extends IDisposable {
   readonly query: string;
   readonly caseSensitive: boolean;
-  /** Oldest-to-newest matches with inclusive cell endpoints. */
+  /**
+   * Oldest-to-newest authenticated occurrence handles. Inclusive endpoints are
+   * snapshots from first materialization; call resolve() for current cells.
+   * An unchanged occurrence can keep its handle while its coordinates move.
+   */
   readonly matches: readonly IRetainedBufferRange[];
 
   /** Extract exact plain Unicode text, or undefined when the range is stale/foreign. */

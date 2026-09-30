@@ -41,6 +41,7 @@ class RetainedBufferSearchResult implements IRetainedBufferSearchResult {
     readonly query: string,
     readonly caseSensitive: boolean,
     readonly sessionId: number,
+    readonly terminal: GhosttyTerminal,
     readonly signal?: AbortSignal
   ) {}
   readonly abort = (): void => this.owner.cancel();
@@ -107,6 +108,7 @@ export class RetainedBufferSearchManager implements IDisposable {
       query,
       options.caseSensitive,
       sessionId,
+      terminal,
       options.signal
     );
     this.currentResult = result;
@@ -135,6 +137,10 @@ export class RetainedBufferSearchManager implements IDisposable {
   noteWrite(): void {
     const result = this.currentResult;
     if (!result || result.disposed || result.sessionId === 0) return;
+    if (this.getTerminal() !== result.terminal) {
+      this.invalidateAll();
+      return;
+    }
     result.dirty = true;
     // Revocation from a parser reset must be observable even after resolution.
     if (
@@ -166,7 +172,13 @@ export class RetainedBufferSearchManager implements IDisposable {
     result: RetainedBufferSearchResult,
     range: IRetainedBufferRange
   ): RangeIdentity | undefined {
-    if (this.disposed || result.disposed || result.invalidated || this.currentResult !== result)
+    if (
+      this.disposed ||
+      result.disposed ||
+      result.invalidated ||
+      this.currentResult !== result ||
+      this.getTerminal() !== result.terminal
+    )
       return;
     const identity = this.identities.get(range);
     return identity?.sessionId === result.sessionId ? identity : undefined;
@@ -175,10 +187,8 @@ export class RetainedBufferSearchManager implements IDisposable {
   extract(result: RetainedBufferSearchResult, range: IRetainedBufferRange): string | undefined {
     const identity = this.identity(result, range);
     return identity
-      ? (this.getTerminal()?.getRetainedSearchMatchText(
-          identity.sessionId,
-          identity.occurrenceId
-        ) ?? undefined)
+      ? (result.terminal.getRetainedSearchMatchText(identity.sessionId, identity.occurrenceId) ??
+          undefined)
       : undefined;
   }
 
@@ -188,7 +198,7 @@ export class RetainedBufferSearchManager implements IDisposable {
   ): IRetainedBufferRange | undefined {
     const identity = this.identity(result, range);
     if (!identity) return;
-    const cells = this.getTerminal()?.getRetainedSearchMatchRange(
+    const cells = result.terminal.getRetainedSearchMatchRange(
       identity.sessionId,
       identity.occurrenceId
     );
@@ -209,11 +219,14 @@ export class RetainedBufferSearchManager implements IDisposable {
   releaseResult(result: RetainedBufferSearchResult): void {
     if (result.disposed) return;
     result.disposed = true;
+    result.invalidated = true;
+    result.pending = false;
+    result.matches = Object.freeze([]);
     if (result.refreshTimer !== undefined) clearTimeout(result.refreshTimer);
     result.signal?.removeEventListener('abort', result.abort);
     result.clearListeners();
     result.ranges.clear();
-    if (result.sessionId !== 0) this.getTerminal()?.cancelRetainedSearch(result.sessionId);
+    if (result.sessionId !== 0) result.terminal.cancelRetainedSearch(result.sessionId);
     if (this.currentResult === result) this.currentResult = undefined;
     const job = this.currentJob;
     if (job?.result === result) {
@@ -225,8 +238,8 @@ export class RetainedBufferSearchManager implements IDisposable {
 
   dispose(): void {
     if (!this.disposed) {
-      this.cancel();
       this.disposed = true;
+      this.invalidateAll();
     }
   }
 
@@ -250,7 +263,11 @@ export class RetainedBufferSearchManager implements IDisposable {
       result.refreshTimer = undefined;
       if (this.currentResult !== result || result.disposed) return;
       const terminal = this.getTerminal();
-      if (!terminal || !terminal.refreshRetainedSearch(result.sessionId)) {
+      if (
+        !terminal ||
+        terminal !== result.terminal ||
+        !terminal.refreshRetainedSearch(result.sessionId)
+      ) {
         this.invalidateAll();
         return;
       }
@@ -273,7 +290,11 @@ export class RetainedBufferSearchManager implements IDisposable {
 
   private run(job: SearchJob): void {
     if (this.currentJob !== job || job.result.disposed) return;
-    if (this.getTerminal() !== job.terminal || job.result.signal?.aborted) {
+    if (this.getTerminal() !== job.terminal) {
+      this.invalidateAll();
+      return;
+    }
+    if (job.result.signal?.aborted) {
       this.cancel();
       return;
     }

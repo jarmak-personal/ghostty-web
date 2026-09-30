@@ -244,11 +244,13 @@ Queries are capped at 64 KiB of UTF-8 so a single cross-page match remains bound
 The query stays live through primary output. `result.onUpdate(listener)` observes coalesced,
 finite refreshes; `pending` describes refresh work, and `matches` publishes completed lists.
 Ranges carry a query-scoped `id`. `result.resolve(range)` authenticates surviving cells and returns
-current coordinates, while overwrite (even identical text) and eviction revoke old occurrences.
+current coordinates. The endpoints in `matches` are first-materialization snapshots, so resolve
+a handle before drawing or using its coordinates. Overwrite (even identical text) and eviction revoke old occurrences.
 Consumers can preserve a selected identity without revealing it again on every update.
 `AbortSignal`, `cancelRetainedBufferSearch()`, reset, resize, and disposal revoke the query and its
 subscriptions. Reflow sets `invalidated` before notifying listeners; a new query cannot claim the
 old selection. Output that stays wholly in the alternate screen preserves normal-buffer results.
+Native row anchors follow row movement without adding a parser tracked pin for every occurrence.
 Search metadata is lazy, bounded by retained cells and matches, and released with the query. It is
 separate from the scrollback byte accounting, so enabling search does not reduce retained history.
 

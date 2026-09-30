@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { GhosttyTerminal } from './ghostty';
 import type { ITerminalOptions } from './interfaces';
+import { RetainedBufferSearchManager } from './retained-buffer-search';
 import type { Terminal } from './terminal';
 import { createIsolatedTerminal } from './test-helpers';
 import type { GhosttyWasmExports } from './types';
@@ -399,4 +400,75 @@ test('resolved-query abort, parser reset and disposal revoke subscriptions and r
   terminal.write('\x1bc');
   expect(invalidated).toBe(true);
   expect(reset.extract(reset.matches[0])).toBeUndefined();
+});
+
+test('engine reset invalidates a resolved query before revoking its update subscription', async () => {
+  const terminal = await openTerminal({ cols: 20, rows: 3 });
+  terminal.write('needle');
+  const result = await terminal.searchRetainedBuffer('needle', { caseSensitive: true });
+  const range = result.matches[0];
+  let invalidations = 0;
+  result.onUpdate(() => {
+    expect(result.invalidated).toBe(true);
+    expect(result.pending).toBe(false);
+    expect(result.matches).toHaveLength(0);
+    expect(result.resolve(range)).toBeUndefined();
+    invalidations++;
+  });
+  terminal.reset();
+  expect(invalidations).toBe(1);
+  terminal.write('needle');
+  const fresh = await terminal.searchRetainedBuffer('needle', { caseSensitive: true });
+  expect(fresh.matches).toHaveLength(1);
+  expect(invalidations).toBe(1);
+});
+
+test('clear revokes erased cells through parser updates while the query remains live', async () => {
+  const terminal = await openTerminal({ cols: 20, rows: 3 });
+  terminal.write('needle');
+  const result = await terminal.searchRetainedBuffer('needle', { caseSensitive: true });
+  const range = result.matches[0];
+  let updates = 0;
+  result.onUpdate(() => updates++);
+  terminal.clear();
+  expect(result.resolve(range)).toBeUndefined();
+  expect(result.invalidated).toBe(false);
+  const deadline = performance.now() + 2000;
+  while (result.matches.length > 0 || result.pending) {
+    if (performance.now() > deadline) throw new Error('cleared query did not update');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  expect(updates).toBeGreaterThan(0);
+  terminal.write('needle');
+  while (result.matches.length === 0 || result.pending) {
+    if (performance.now() > deadline) throw new Error('live cleared query did not find new output');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  expect(result.extract(result.matches[0])).toBe('needle');
+});
+
+test('native replacement revokes the old owner without cancelling a foreign query with the same ID', async () => {
+  const first = await openTerminal({ cols: 20, rows: 3 });
+  const second = await openTerminal({ cols: 20, rows: 3 });
+  first.write('first');
+  second.write('second');
+  let current = first.wasmTerm;
+  const manager = new RetainedBufferSearchManager(() => current);
+  try {
+    const old = await manager.search('first', { caseSensitive: true });
+    const range = old.matches[0];
+    const foreign = await second.searchRetainedBuffer('second', { caseSensitive: true });
+    let invalidated = false;
+    old.onUpdate(() => {
+      invalidated = old.invalidated;
+    });
+    current = second.wasmTerm;
+    expect(old.extract(range)).toBeUndefined();
+    manager.noteWrite();
+    expect(invalidated).toBe(true);
+    expect(old.matches).toHaveLength(0);
+    expect(foreign.extract(foreign.matches[0])).toBe('second');
+  } finally {
+    manager.dispose();
+  }
 });
