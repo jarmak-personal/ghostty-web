@@ -84,7 +84,10 @@ export class RetainedBufferSearchManager implements IDisposable {
   private readonly identities = new WeakMap<IRetainedBufferRange, RangeIdentity>();
   private disposed = false;
 
-  constructor(private readonly getTerminal: () => GhosttyTerminal | undefined) {}
+  constructor(
+    private readonly getTerminal: () => GhosttyTerminal | undefined,
+    private readonly onInvalidate: () => void = () => {}
+  ) {}
 
   search(
     query: string,
@@ -175,9 +178,30 @@ export class RetainedBufferSearchManager implements IDisposable {
     return result ? this.extract(result, range) : undefined;
   }
 
+  /** Authenticate one current range without extracting its text. */
+  resolveRange(range: IRetainedBufferRange): IRetainedBufferRange | undefined {
+    const result = this.currentResult;
+    const identity = this.identities.get(range);
+    if (this.disposed || !result || !identity || identity.sessionId !== result.sessionId)
+      return undefined;
+    const current = this.getTerminal()?.getRetainedSearchMatchRange(
+      identity.sessionId,
+      identity.matchIndex
+    );
+    return current
+      ? {
+          start: { row: current.startRow, column: current.startColumn },
+          end: { row: current.endRow, column: current.endColumn },
+        }
+      : undefined;
+  }
+
   releaseResult(result: RetainedBufferSearchResult): void {
     if (result.sessionId !== 0) this.getTerminal()?.cancelRetainedSearch(result.sessionId);
-    if (this.currentResult === result) this.currentResult = undefined;
+    if (this.currentResult === result) {
+      this.currentResult = undefined;
+      this.onInvalidate();
+    }
   }
 
   dispose(): void {

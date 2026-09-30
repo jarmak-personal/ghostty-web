@@ -10,8 +10,14 @@
  * - Dirty line optimization for 60 FPS
  */
 
-import type { ITheme } from './interfaces';
+import type {
+  IDisposable,
+  IRetainedBufferRange,
+  IRetainedRangeHighlightStyle,
+  ITheme,
+} from './interfaces';
 import { ANSI_THEME_KEYS, DEFAULT_THEME, normalizeTheme, parsePaletteColor } from './palette';
+import { RetainedRangeHighlight } from './retained-range-highlight';
 import type { SelectionManager } from './selection-manager';
 import type {
   CursorStyle,
@@ -28,6 +34,7 @@ export { DEFAULT_THEME } from './palette';
 
 // Interface for objects that can be rendered
 export interface IRenderable {
+  isAlternateScreen?(): boolean;
   getLine(y: number): GhosttyCell[] | null;
   getRenderState(): RenderStateSnapshot;
   getDimensions(): { cols: number; rows: number };
@@ -215,6 +222,7 @@ function cloneRenderStateColors(colors: RenderStateColors): RenderStateColors {
 // ============================================================================
 
 export class CanvasRenderer {
+  private retainedRangeHighlight?: RetainedRangeHighlight;
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
   private fontSize: number;
@@ -756,6 +764,28 @@ export class CanvasRenderer {
         }
       }
     }
+
+    if (
+      this.retainedRangeHighlight &&
+      !this.retainedRangeHighlight.paint({
+        cols: dims.cols,
+        rows: dims.rows,
+        cellWidth: this.metrics.width,
+        cellHeight: this.metrics.height,
+        devicePixelRatio: this.devicePixelRatio,
+        firstVisibleRow: scrollbackLength - integerViewportY,
+        alternateScreen: buffer.isAlternateScreen?.() ?? false,
+        endCellWidth: (row, column) => {
+          const viewportRow = row - (scrollbackLength - integerViewportY);
+          const line =
+            viewportRow < historicalRows
+              ? getHistoricalLine(viewportRow)
+              : buffer.getLine(viewportRow - historicalRows);
+          return line?.[column]?.width ?? 1;
+        },
+      })
+    )
+      this.clearRetainedRangeHighlight();
 
     // Selection highlighting is now integrated into renderCellBackground/renderCellText
     // No separate overlay pass needed - this fixes z-order issues with complex glyphs
@@ -1404,6 +1434,7 @@ export class CanvasRenderer {
 
     this.renderPaused = paused;
     if (paused) {
+      this.retainedRangeHighlight?.hide();
       this.stopCursorBlink();
     }
   }
@@ -1594,8 +1625,34 @@ export class CanvasRenderer {
   public dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.clearRetainedRangeHighlight();
     window.removeEventListener('resize', this.handleDevicePixelRatioSignal);
     this.unwatchCurrentResolution();
     this.stopCursorBlink();
+  }
+
+  public showRetainedRangeHighlight(
+    resolveRange: () => IRetainedBufferRange | undefined,
+    style: IRetainedRangeHighlightStyle
+  ): IDisposable {
+    this.clearRetainedRangeHighlight();
+    const highlight = new RetainedRangeHighlight(
+      this.canvas,
+      resolveRange,
+      Object.freeze({ ...style })
+    );
+    this.retainedRangeHighlight = highlight;
+    this.requestRender();
+    return {
+      dispose: () => {
+        highlight.dispose();
+        if (this.retainedRangeHighlight === highlight) this.retainedRangeHighlight = undefined;
+      },
+    };
+  }
+
+  public clearRetainedRangeHighlight(): void {
+    this.retainedRangeHighlight?.dispose();
+    this.retainedRangeHighlight = undefined;
   }
 }
