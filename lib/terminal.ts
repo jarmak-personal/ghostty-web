@@ -414,6 +414,15 @@ export class Terminal implements ITerminalCore {
       this.selectionManager.clearSelection();
     }
 
+    for (const addon of [...this.addons]) {
+      if (this.isDisposed || !this.isOpen) break;
+      try {
+        addon.onCellMetricsChange?.();
+      } catch (error) {
+        console.error('Addon metric-change handler failed:', error);
+      }
+    }
+
     // CanvasRenderer owns the DPI-aware backing store. It will resize and
     // fully paint in the same presentation frame.
     this.requestRender(true);
