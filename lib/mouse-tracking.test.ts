@@ -96,6 +96,18 @@ describe('application mouse tracking ownership', () => {
     expect(terminal.getViewportY()).toBe(viewportBefore);
   });
 
+  test('unconfigured mouse reporting preserves fractional gesture distance', async () => {
+    const terminal = await openTerminal({ cols: 20, rows: 4 });
+    terminal.write('\x1b[?1000h\x1b[?1006h');
+    const data: string[] = [];
+    terminal.onData((value) => data.push(value));
+    gesture(terminal, 1);
+    gesture(terminal, 1);
+    expect(data).toEqual([]);
+    gesture(terminal, 1);
+    expect(data).toEqual(['\x1b[<65;1;1M']);
+  });
+
   test('runs a custom wheel handler before application reporting', async () => {
     const terminal = await openTerminal({ cols: 20, rows: 4 });
     terminal.write('\x1b[?1000h\x1b[?1006h');
@@ -278,6 +290,61 @@ describe('hvir wheel compatibility configuration', () => {
     expect(data).toHaveLength(2);
     gesture(terminal, 2);
     expect(data.at(-1)).toBe('\x1b[<65;1;1M');
+  });
+
+  test('custom handler ownership discards an application remainder', async () => {
+    const terminal = await openTerminal(hvirWheelOptions);
+    terminal.write('\x1b[?1000h\x1b[?1006h');
+    const data: string[] = [];
+    terminal.onData((value) => data.push(value));
+    gesture(terminal, 2);
+    let customCalls = 0;
+    terminal.attachCustomWheelEventHandler(() => {
+      customCalls++;
+      return true;
+    });
+    gesture(terminal, 3);
+    expect(customCalls).toBe(1);
+    expect(data).toEqual([]);
+    terminal.attachCustomWheelEventHandler(() => false);
+    gesture(terminal, 1);
+    expect(data).toEqual([]);
+    gesture(terminal, 2);
+    expect(data).toEqual(['\x1b[<65;1;1M']);
+  });
+
+  test('normal-buffer local scrolling discards an application remainder', async () => {
+    const terminal = await openTerminal(hvirWheelOptions);
+    for (let row = 0; row < 10; row++) terminal.write(`row ${row}\r\n`);
+    terminal.write('\x1b[?1000h\x1b[?1006h');
+    const data: string[] = [];
+    terminal.onData((value) => data.push(value));
+    gesture(terminal, -2);
+    terminal.write('\x1b[?1000l');
+    gesture(terminal, -3);
+    expect(terminal.getViewportY()).toBeGreaterThan(0);
+    expect(data).toEqual([]);
+    terminal.write('\x1b[?1000h');
+    gesture(terminal, -1);
+    expect(data).toEqual([]);
+    gesture(terminal, -2);
+    expect(data).toEqual(['\x1b[<64;1;1M']);
+  });
+
+  test('disableStdin transitions discard an application remainder', async () => {
+    const terminal = await openTerminal(hvirWheelOptions);
+    terminal.write('\x1b[?1000h\x1b[?1006h');
+    const data: string[] = [];
+    terminal.onData((value) => data.push(value));
+    gesture(terminal, 2);
+    terminal.options.disableStdin = true;
+    gesture(terminal, 2);
+    expect(data).toEqual([]);
+    terminal.options.disableStdin = false;
+    gesture(terminal, 1);
+    expect(data).toEqual([]);
+    gesture(terminal, 2);
+    expect(data).toEqual(['\x1b[<65;1;1M']);
   });
 
   test('consumes unsupported encoding without reports or page fallback', async () => {
