@@ -16,6 +16,7 @@ import type { Ghostty, KeyEncoder } from './ghostty';
 import type { ClipboardFilePasteResolver, IKeyEvent } from './interfaces';
 import { encodePaste } from './paste';
 import { Key, KeyAction, KeyEncoderOption, KittyKeyFlags, Mods } from './types';
+import { WheelGesture, type WheelScrollOptions } from './wheel-gesture';
 
 /**
  * Map KeyboardEvent.code values to USB HID Key enum values
@@ -219,6 +220,9 @@ export interface MouseTrackingConfig {
   hasSgrMouseMode: () => boolean;
   /** Get cell dimensions for pixel to cell conversion */
   getCellDimensions: () => { width: number; height: number };
+  /** Current grid bounds for every mouse report. */
+  getGridDimensions?: () => { cols: number; rows: number };
+  getWheelOptions?: () => WheelScrollOptions | undefined;
   /** Get canvas/container offset for accurate position calculation */
   getCanvasOffset: () => { left: number; top: number };
 }
@@ -259,6 +263,7 @@ export class InputHandler {
   private wheelListener: ((e: WheelEvent) => void) | null = null;
   private isComposing = false;
   private isDisposed = false;
+  private readonly wheelGesture = new WheelGesture();
   private mouseButtonsPressed = 0; // Track which buttons are pressed for motion reporting
   private locallyOwnedMouseButtons = 0; // Buttons reserved by a host/local-selection override
   private lastKeyDownData: string | null = null;
@@ -349,6 +354,41 @@ export class InputHandler {
       }
     } catch (error) {
       console.warn(`Failed to encode ${direction} arrow wheel fallback:`, error);
+    }
+  }
+
+  /** Called by the terminal capture route when local or custom input takes ownership. */
+  resetWheelGesture(): void {
+    this.wheelGesture.reset();
+  }
+
+  sendAlternateWheel(event: WheelEvent): void {
+    if (this.isDisposed) return;
+    const options = this.mouseConfig?.getWheelOptions?.();
+    if (!options) {
+      // Preserve the unconfigured engine's existing negotiated arrow cadence.
+      this.resetWheelGesture();
+      if (Number.isFinite(event.deltaY)) {
+        this.sendArrowKeys(
+          event.deltaY < 0 ? 'up' : 'down',
+          Math.min(Math.abs(Math.round(event.deltaY / 33)), 5)
+        );
+      }
+      return;
+    }
+    const steps = this.wheelGesture.consume(
+      event,
+      this.mouseConfig?.getCellDimensions().height ?? 16,
+      'fallback',
+      options
+    );
+    if (steps === 0) return;
+    if (options?.alternateScreenFallback === 'page') {
+      for (let i = 0; i < Math.abs(steps); i++) {
+        this.onDataCallback(steps < 0 ? '\x1b[5~' : '\x1b[6~');
+      }
+    } else {
+      this.sendArrowKeys(steps < 0 ? 'up' : 'down', Math.abs(steps));
     }
   }
 
@@ -940,10 +980,16 @@ export class InputHandler {
     const dims = this.mouseConfig.getCellDimensions();
     const offset = this.mouseConfig.getCanvasOffset();
 
-    if (dims.width <= 0 || dims.height <= 0) return null;
+    if (
+      !Number.isFinite(dims.width) ||
+      !Number.isFinite(dims.height) ||
+      dims.width <= 0 ||
+      dims.height <= 0
+    )
+      return null;
 
-    const x = event.clientX - offset.left;
-    const y = event.clientY - offset.top;
+    const x = Number.isFinite(event.clientX) ? event.clientX - offset.left : 0;
+    const y = Number.isFinite(event.clientY) ? event.clientY - offset.top : 0;
 
     // Convert to 1-based cell coordinates (terminal uses 1-based)
     const col = Math.floor(x / dims.width) + 1;
@@ -951,8 +997,8 @@ export class InputHandler {
 
     // Clamp to valid range (at least 1)
     return {
-      col: Math.max(1, col),
-      row: Math.max(1, row),
+      col: Math.max(1, Math.min(col, this.mouseConfig.getGridDimensions?.().cols ?? col)),
+      row: Math.max(1, Math.min(row, this.mouseConfig.getGridDimensions?.().rows ?? row)),
     };
   }
 
@@ -962,7 +1008,7 @@ export class InputHandler {
   private getMouseModifiers(event: MouseEvent): number {
     let mods = 0;
     if (event.shiftKey) mods |= 4;
-    if (event.metaKey) mods |= 8; // Meta (Cmd on Mac)
+    if (event.altKey || event.metaKey) mods |= 8; // Alt, with the existing Meta alias
     if (event.ctrlKey) mods |= 16;
     return mods;
   }
@@ -1141,15 +1187,27 @@ export class InputHandler {
     // the Terminal callback applies that input policy without exposing local scroll.
     event.preventDefault();
     event.stopPropagation();
-    if (event.deltaY === 0) return;
+    const options = this.mouseConfig.getWheelOptions?.();
+    if (options?.mouseEncoding === 'sgr' && !this.mouseConfig.hasSgrMouseMode()) {
+      this.resetWheelGesture();
+      return;
+    }
+    const steps = this.wheelGesture.consume(
+      event,
+      this.mouseConfig.getCellDimensions().height,
+      'mouse',
+      options
+    );
+    if (steps === 0) return;
 
     const cell = this.pixelToCell(event);
     if (!cell) return;
 
     // Wheel events: button 64 = scroll up, button 65 = scroll down
-    const button = event.deltaY < 0 ? 64 : 65;
-
-    this.sendMouseEvent(button, cell.col, cell.row, false, event);
+    const button = steps < 0 ? 64 : 65;
+    for (let i = 0; i < Math.abs(steps); i++) {
+      this.sendMouseEvent(button, cell.col, cell.row, false, event);
+    }
   }
 
   /**
@@ -1325,6 +1383,7 @@ export class InputHandler {
 
     this.mouseButtonsPressed = 0;
     this.locallyOwnedMouseButtons = 0;
+    this.resetWheelGesture();
 
     this.encoder.dispose();
   }

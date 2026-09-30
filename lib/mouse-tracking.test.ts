@@ -211,3 +211,120 @@ describe('application mouse tracking ownership', () => {
     expect(data).toEqual(['\x1b[<32;7;1M']);
   });
 });
+
+const hvirWheelOptions: ITerminalOptions = {
+  cols: 20,
+  rows: 4,
+  disableContextMenu: true,
+  wheelScroll: {
+    linesPerStep: 3,
+    maxMouseReports: 5,
+    maxFallbackKeys: 1,
+    alternateScreenFallback: 'page',
+    mouseEncoding: 'sgr',
+  },
+};
+
+function gesture(terminal: Terminal, deltaY: number, fields: Partial<WheelEvent> = {}): void {
+  const event = new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY });
+  for (const [key, value] of Object.entries({
+    deltaMode: 1,
+    clientX: 1,
+    clientY: 1,
+    shiftKey: false,
+    altKey: false,
+    ctrlKey: false,
+    ...fields,
+  }))
+    Object.defineProperty(event, key, { configurable: true, value });
+  canvasFor(terminal).dispatchEvent(event);
+}
+
+describe('hvir wheel compatibility configuration', () => {
+  for (const mode of [1000, 1002, 1003]) {
+    for (const alternate of [false, true]) {
+      test(`routes fractional wheel once with mode ${mode}, alternate=${alternate}`, async () => {
+        const terminal = await openTerminal(hvirWheelOptions);
+        terminal.write(`${alternate ? '\x1b[?1049h' : ''}\x1b[?${mode}h\x1b[?1006h`);
+        const data: string[] = [];
+        terminal.onData((value) => data.push(value));
+        gesture(terminal, 1);
+        gesture(terminal, 1);
+        expect(data).toEqual([]);
+        gesture(terminal, 1);
+        expect(data).toEqual(['\x1b[<65;1;1M']);
+        gesture(terminal, -300, { altKey: true, ctrlKey: true, clientX: 1e6, clientY: -20 });
+        expect(data.slice(1)).toEqual(Array(5).fill('\x1b[<88;20;1M'));
+        gesture(terminal, -1);
+        expect(data).toHaveLength(6);
+      });
+    }
+  }
+
+  test('dispatches bounded page fallback and resets on route and direction changes', async () => {
+    const terminal = await openTerminal(hvirWheelOptions);
+    terminal.write('\x1b[?1049h');
+    const data: string[] = [];
+    terminal.onData((value) => data.push(value));
+    gesture(terminal, 2);
+    gesture(terminal, -1);
+    expect(data).toEqual([]);
+    gesture(terminal, -2);
+    gesture(terminal, 300);
+    expect(data).toEqual(['\x1b[5~', '\x1b[6~']);
+    gesture(terminal, 2);
+    terminal.write('\x1b[?1000h\x1b[?1006h');
+    gesture(terminal, 1);
+    expect(data).toHaveLength(2);
+    gesture(terminal, 2);
+    expect(data.at(-1)).toBe('\x1b[<65;1;1M');
+  });
+
+  test('consumes unsupported encoding without reports or page fallback', async () => {
+    const terminal = await openTerminal(hvirWheelOptions);
+    terminal.write('\x1b[?1049h\x1b[?1000h');
+    const data: string[] = [];
+    terminal.onData((value) => data.push(value));
+    gesture(terminal, 3);
+    expect(data).toEqual([]);
+    terminal.write('\x1b[?1006h');
+    gesture(terminal, 1);
+    expect(data).toEqual([]);
+  });
+
+  test('Shift takes local ownership and context menu buttons emit no reports', async () => {
+    const terminal = await openTerminal(hvirWheelOptions);
+    terminal.write('hello world\x1b[?1002h\x1b[?1006h');
+    const canvas = canvasFor(terminal);
+    const data: string[] = [];
+    terminal.onData((value) => data.push(value));
+    gesture(terminal, 2);
+    gesture(terminal, -3, { shiftKey: true });
+    gesture(terminal, 1);
+    expect(data).toEqual([]);
+    dispatchMouse(canvas, 'mousedown', 1, true);
+    dispatchMouse(canvas, 'mousemove', 50, true);
+    dispatchMouse(canvas, 'mouseup', 50, true);
+    expect(terminal.hasSelection()).toBe(true);
+    for (const type of ['mousedown', 'mouseup', 'contextmenu']) {
+      canvas.dispatchEvent(new MouseEvent(type, { bubbles: true, button: 2, buttons: 0 }));
+    }
+    expect(data).toEqual([]);
+  });
+
+  test('disabled input blocks both mouse and page input without local scrolling', async () => {
+    const terminal = await openTerminal({ ...hvirWheelOptions, disableStdin: true });
+    const data: string[] = [];
+    terminal.onData((value) => data.push(value));
+    terminal.write('\x1b[?1049h');
+    gesture(terminal, 300);
+    terminal.write('\x1b[?1000h\x1b[?1006h');
+    gesture(terminal, 300);
+    expect(data).toEqual([]);
+    expect(terminal.getViewportY()).toBe(0);
+    const retainedCanvas = canvasFor(terminal);
+    terminal.dispose();
+    dispatchWheel(retainedCanvas, 300);
+    expect(data).toEqual([]);
+  });
+});
