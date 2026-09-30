@@ -21,6 +21,7 @@ interface SearchJob {
   matchCount: number;
   nextMatch: number;
   ranges: IRetainedBufferRange[];
+  rangesById: Map<number, IRetainedBufferRange>;
   timer?: ReturnType<typeof setTimeout>;
   resolve?: (value: IRetainedBufferSearchResult) => void;
   reject?: (reason: Error) => void;
@@ -33,7 +34,7 @@ class RetainedBufferSearchResult implements IRetainedBufferSearchResult {
   disposed = false;
   dirty = false;
   refreshTimer?: ReturnType<typeof setTimeout>;
-  readonly ranges = new Map<number, IRetainedBufferRange>();
+  ranges = new Map<number, IRetainedBufferRange>();
   private readonly listeners = new Set<() => void>();
   constructor(
     private readonly owner: RetainedBufferSearchManager,
@@ -122,6 +123,7 @@ export class RetainedBufferSearchManager implements IDisposable {
         matchCount: 0,
         nextMatch: 0,
         ranges: [],
+        rangesById: new Map(),
         resolve,
         reject,
       };
@@ -261,6 +263,7 @@ export class RetainedBufferSearchManager implements IDisposable {
         matchCount: 0,
         nextMatch: 0,
         ranges: [],
+        rangesById: new Map(),
       };
       this.currentJob = job;
       result.publish();
@@ -314,14 +317,16 @@ export class RetainedBufferSearchManager implements IDisposable {
         this.identities.set(range, { sessionId: job.result.sessionId, occurrenceId: id });
       }
       job.ranges.push(range);
+      job.rangesById.set(range.id, range);
     }
     if (job.nextMatch < job.matchCount) {
       this.schedule(job);
       return;
     }
     this.currentJob = undefined;
-    job.result.ranges.clear();
-    for (const range of job.ranges) job.result.ranges.set(range.id, range);
+    // Build lookup metadata inside the same bounded batches, then publish by
+    // swapping references rather than traversing all matches in the final task.
+    job.result.ranges = job.rangesById;
     job.result.matches = Object.freeze(job.ranges);
     job.result.pending = false;
     job.resolve?.(job.result);
