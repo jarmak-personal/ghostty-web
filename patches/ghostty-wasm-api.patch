@@ -8,14 +8,16 @@ index 74f3f85eb..814e13ccd 100644
  
 +node_modules/
 diff --git a/build.zig b/build.zig
-index f9d861b19..3f2527dc8 100644
+index f9d861b19..90d398119 100644
 --- a/build.zig
 +++ b/build.zig
-@@ -33,6 +33,13 @@ pub fn build(b: *std.Build) !void {
+@@ -33,6 +33,15 @@ pub fn build(b: *std.Build) !void {
          &deps,
      );
  
 +    if (b.option(bool, "retained-fixture-only", "Run retained-search fixtures without application SDKs") orelse false) {
++        // The C terminal ABI uses c_allocator on native targets.
++        mod.vt_c.link_libc = true;
 +        const step = b.step("test-lib-vt", "Run retained-search native fixtures");
 +        const exe = b.addTest(.{ .root_module = mod.vt_c, .filters = &.{"streaming retained search"} });
 +        step.dependOn(&b.addRunArtifact(exe).step);
