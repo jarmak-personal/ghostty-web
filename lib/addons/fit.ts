@@ -40,17 +40,20 @@ export class FitAddon implements ITerminalAddon {
 
   /** Initial manual fitting remains available before observation starts. */
   fit(): void {
-    if (!this.terminal || this.suspended) return;
+    this.fitCurrentGeometry();
+  }
+
+  /** True only after current geometry is measurable, including an unchanged grid. */
+  private fitCurrentGeometry(): boolean {
+    if (!this.terminal || this.suspended) return false;
     if (this.resizing) {
       this.schedule();
-      return;
+      return false;
     }
     const dimensions = this.proposeDimensions();
-    if (
-      !dimensions ||
-      (dimensions.cols === this.terminal.cols && dimensions.rows === this.terminal.rows)
-    ) {
-      return;
+    if (!dimensions) return false;
+    if (dimensions.cols === this.terminal.cols && dimensions.rows === this.terminal.rows) {
+      return true;
     }
     this.resizing = true;
     try {
@@ -58,6 +61,7 @@ export class FitAddon implements ITerminalAddon {
     } finally {
       this.resizing = false;
     }
+    return true;
   }
 
   proposeDimensions(): ITerminalDimensions | undefined {
@@ -84,7 +88,7 @@ export class FitAddon implements ITerminalAddon {
     this.resume();
   }
 
-  /** Resume fitting the current host, then notify after the latest settled fit. */
+  /** Notify after a measurable settled fit; keep completion pending while geometry is invalid. */
   resume(afterSettledFit?: () => void): void {
     if (!this.terminal) return;
     this.suspended = false;
@@ -142,8 +146,7 @@ export class FitAddon implements ITerminalAddon {
       this.frame = requestAnimationFrame(() => {
         if (!this.current(generation)) return;
         this.frame = undefined;
-        this.fit();
-        if (!this.current(generation)) return;
+        if (!this.fitCurrentGeometry() || !this.current(generation)) return;
         const completion = this.completion;
         this.completion = undefined;
         completion?.();

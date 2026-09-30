@@ -128,6 +128,44 @@ describe('FitAddon presentation lifecycle', () => {
     expect(completions).toBe(2);
   });
 
+  test('waits for measurable geometry before completing, even for an unchanged grid', () => {
+    const f = fixture();
+    let completions = 0;
+    f.setWidth(0);
+    f.addon.resume(() => completions++);
+    settle();
+    expect(f.sizes).toEqual([]);
+    expect(completions).toBe(0);
+    expect(timers.size).toBe(0);
+    expect(frames.size).toBe(0);
+    f.setWidth(800);
+    f.setMetric(Number.NaN);
+    f.addon.onCellMetricsChange();
+    settle();
+    expect(completions).toBe(0);
+    f.setMetric(10);
+    ObservedResize.instances[0].emit();
+    settle();
+    expect(f.sizes).toEqual([]);
+    expect(completions).toBe(1);
+  });
+
+  test('suspension cancels a completion waiting for measurable geometry', () => {
+    const f = fixture();
+    let completions = 0;
+    f.setWidth(0);
+    f.addon.resume(() => completions++);
+    const observer = ObservedResize.instances[0];
+    settle();
+    f.addon.suspend();
+    f.setWidth(900);
+    observer.emit();
+    f.addon.resume();
+    settle();
+    expect(f.sizes).toEqual([{ cols: 90, rows: 20 }]);
+    expect(completions).toBe(0);
+  });
+
   test('replaces a pending frame with latest metric and display-scale work', () => {
     const f = fixture();
     let completions = 0;
