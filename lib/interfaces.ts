@@ -4,6 +4,7 @@
 
 import type { Ghostty } from './ghostty';
 import type { CursorBlink, CursorStyle } from './types';
+import type { WheelScrollOptions } from './wheel-gesture';
 
 export interface ITerminalOptions {
   cols?: number; // Default: 80
@@ -65,6 +66,8 @@ export interface ITerminalOptions {
   linkHandler?: ILinkHandler | null;
 
   // Scrolling options
+  /** Engine-owned application wheel scale, limits, and alternate-screen fallback. */
+  wheelScroll?: WheelScrollOptions;
   smoothScrollDuration?: number; // Duration in ms for smooth scroll animation (default: 100, 0 = instant)
 
   // Internal: Ghostty WASM instance (optional, for test isolation)

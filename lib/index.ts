@@ -155,3 +155,5 @@ export type {
   TerminalSemanticAction,
 } from './types';
 export { Key, KeyAction, Mods } from './types';
+
+export type { WheelScrollOptions } from './wheel-gesture';

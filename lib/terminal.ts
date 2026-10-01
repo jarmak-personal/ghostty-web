@@ -267,6 +267,7 @@ export class Terminal implements ITerminalCore {
       resolveClipboardFilePaste: options.resolveClipboardFilePaste,
       linkHandler: options.linkHandler ?? null,
       smoothScrollDuration: normalizeSmoothScrollDuration(options.smoothScrollDuration),
+      wheelScroll: options.wheelScroll,
     };
 
     // Wrap in Proxy to intercept runtime changes (xterm.js compatibility)
@@ -335,8 +336,8 @@ export class Terminal implements ITerminalCore {
 
     switch (key) {
       case 'disableStdin':
-        // Input handler already checks this.options.disableStdin dynamically
-        // No action needed
+        this.inputHandler?.resetWheelGesture();
+        // Input handler checks this.options.disableStdin dynamically.
         break;
 
       case 'cursorBlink':
@@ -667,6 +668,8 @@ export class Terminal implements ITerminalCore {
           width: renderer.charWidth,
           height: renderer.charHeight,
         }),
+        getGridDimensions: () => ({ cols: this.cols, rows: this.rows }),
+        getWheelOptions: () => this.options.wheelScroll,
         getCanvasOffset: () => {
           const rect = canvas.getBoundingClientRect();
           return { left: rect.left, top: rect.top };
@@ -2292,6 +2295,7 @@ export class Terminal implements ITerminalCore {
 
     // Allow custom handler to override
     if (this.customWheelEventHandler && this.customWheelEventHandler(e)) {
+      this.inputHandler?.resetWheelGesture();
       e.stopPropagation();
       return;
     }
@@ -2308,14 +2312,9 @@ export class Terminal implements ITerminalCore {
     const isAltScreen = this.wasmTerm?.isAlternateScreen() ?? false;
 
     if (isAltScreen) {
-      // Alternate screen: send arrow keys to the application
-      // Applications like vim handle scrolling internally
-      // Standard: ~3 arrow presses per wheel "click"
-      const direction = e.deltaY > 0 ? 'down' : 'up';
-      const count = Math.min(Math.abs(Math.round(e.deltaY / 33)), 5); // Cap at 5
-
-      this.inputHandler?.sendArrowKeys(direction, count);
+      this.inputHandler?.sendAlternateWheel(e);
     } else {
+      this.inputHandler?.resetWheelGesture();
       // Normal screen: scroll viewport through history with smooth scrolling
       // Handle different deltaMode values for better trackpad/mouse support
       let deltaLines: number;
