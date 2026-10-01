@@ -32,6 +32,7 @@ import type {
   IRetainedBufferRange,
   IRetainedBufferSearchOptions,
   IRetainedBufferSearchResult,
+  IRetainedRangeHighlightStyle,
   ITerminalAddon,
   ITerminalCore,
   ITerminalDataEvent,
@@ -1187,7 +1188,10 @@ export class Terminal implements ITerminalCore {
   ): Promise<IRetainedBufferSearchResult> {
     this.assertOpen();
     if (!this.retainedBufferSearch) {
-      this.retainedBufferSearch = new RetainedBufferSearchManager(() => this.wasmTerm);
+      this.retainedBufferSearch = new RetainedBufferSearchManager(
+        () => this.wasmTerm,
+        () => this.renderer?.clearRetainedRangeHighlight()
+      );
     }
     return this.retainedBufferSearch.search(query, options);
   }
@@ -1195,6 +1199,28 @@ export class Terminal implements ITerminalCore {
   /** Cancel the current retained-buffer query and release its result state. */
   public cancelRetainedBufferSearch(): void {
     this.retainedBufferSearch?.cancel();
+  }
+
+  /** Reveal an authenticated current normal-buffer range without changing selection. */
+  public revealRetainedBufferRange(range: IRetainedBufferRange): boolean {
+    if (this.isDisposed || !this.isOpen || this.wasmTerm?.isAlternateScreen()) return false;
+    const current = this.retainedBufferSearch?.resolveRange(range);
+    if (!current) return false;
+    this.scrollToLine(Math.max(0, this.getScrollbackLength() - current.start.row));
+    return true;
+  }
+
+  /** Paint one current search range. The returned handle owns only this highlight. */
+  public highlightRetainedBufferRange(
+    range: IRetainedBufferRange,
+    style: IRetainedRangeHighlightStyle
+  ): IDisposable | undefined {
+    if (this.isDisposed || !this.isOpen || !this.renderer) return undefined;
+    const search = this.retainedBufferSearch;
+    if (!search?.resolveRange(range)) return undefined;
+    if (!Number.isFinite(style.borderWidth) || style.borderWidth < 0)
+      throw new Error('Invalid highlight border width');
+    return this.renderer.showRetainedRangeHighlight(() => search.resolveRange(range), style);
   }
 
   /** Extract a current, same-terminal search range as exact plain text. */

@@ -159,6 +159,13 @@ export interface IRetainedBufferRange {
   readonly end: Readonly<{ row: number; column: number }>;
 }
 
+/** Presentation of one authenticated retained search range. Border width is in CSS pixels. */
+export interface IRetainedRangeHighlightStyle {
+  readonly fill: string;
+  readonly border: string;
+  readonly borderWidth: number;
+}
+
 export interface IRetainedBufferSearchOptions {
   /**
    * Required literal matching policy. `false` folds ASCII case only;

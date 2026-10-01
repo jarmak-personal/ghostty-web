@@ -106,6 +106,7 @@ export type {
   IRetainedBufferRange,
   IRetainedBufferSearchOptions,
   IRetainedBufferSearchResult,
+  IRetainedRangeHighlightStyle,
   ITerminalAddon,
   ITerminalCore,
   ITerminalDataEvent,
