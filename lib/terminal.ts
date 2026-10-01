@@ -967,7 +967,6 @@ export class Terminal implements ITerminalCore {
     // This avoids the background-tab regression of using an isResizing flag
     // cleared via requestAnimationFrame (rAF is throttled/paused in background tabs).
     this.cancelRenderLoop();
-    this.retainedBufferSearch?.invalidateAll();
     this.retainedBufferExtraction?.invalidateAll();
 
     try {
@@ -977,6 +976,7 @@ export class Terminal implements ITerminalCore {
 
       // Resize WASM terminal (may reallocate buffers, invalidating TypedArray views)
       this.wasmTerm!.resize(cols, rows);
+      this.retainedBufferSearch?.invalidateAll();
       this.reconcileSynchronizedOutput();
 
       // Fire resize event
