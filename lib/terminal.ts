@@ -34,6 +34,7 @@ import type {
   IRetainedBufferSearchResult,
   ITerminalAddon,
   ITerminalCore,
+  ITerminalDataEvent,
   ITerminalOptions,
   ITheme,
   IUnicodeVersionProvider,
@@ -50,6 +51,7 @@ import {
 } from './retained-buffer-extraction';
 import { RetainedBufferSearchManager } from './retained-buffer-search';
 import { SelectionManager } from './selection-manager';
+import { TerminalDataChannel } from './terminal-data';
 import type { DecodedTerminalEvent } from './terminal-events';
 import type {
   ILink,
@@ -152,7 +154,7 @@ export class Terminal implements ITerminalCore {
   private currentLinkHoverRequest?: { requestSerial: number; col: number; row: number };
 
   // Event emitters
-  private dataEmitter = new EventEmitter<string>();
+  private readonly dataChannel = new TerminalDataChannel();
   private resizeEmitter = new EventEmitter<{ cols: number; rows: number }>();
   private bellEmitter = new EventEmitter<void>();
   private selectionChangeEmitter = new EventEmitter<void>();
@@ -163,7 +165,11 @@ export class Terminal implements ITerminalCore {
   private cursorMoveEmitter = new EventEmitter<void>();
   private terminalEventEmitter = new EventEmitter<TerminalEvent>();
   // Public event accessors (xterm.js compatibility)
-  public readonly onData: IEvent<string> = this.dataEmitter.event;
+  public readonly onData: IEvent<string> = this.dataChannel.onData;
+  /** PTY-bound data with explicit producer-owned provenance. */
+  public onDataWithSource(listener: (event: ITerminalDataEvent) => void): IDisposable {
+    return this.dataChannel.onDataWithSource(listener);
+  }
   public readonly onResize: IEvent<{ cols: number; rows: number }> = this.resizeEmitter.event;
   public readonly onBell: IEvent<void> = this.bellEmitter.event;
   public readonly onSelectionChange: IEvent<void> = this.selectionChangeEmitter.event;
@@ -688,7 +694,7 @@ export class Terminal implements ITerminalCore {
           // Clear selection when user types
           this.selectionManager?.clearSelection();
           // Input handler fires data events
-          this.dataEmitter.fire(data);
+          this.dataChannel.emit(data, 'user');
         },
         () => {
           // Input handler can also fire bell
@@ -932,7 +938,7 @@ export class Terminal implements ITerminalCore {
       return;
     }
 
-    this.dataEmitter.fire(encodePaste(data, this.wasmTerm!.hasBracketedPaste()));
+    this.dataChannel.emit(encodePaste(data, this.wasmTerm!.hasBracketedPaste()), 'user');
   }
 
   /**
@@ -951,7 +957,7 @@ export class Terminal implements ITerminalCore {
 
     if (wasUserInput) {
       // Trigger onData event as if user typed it
-      this.dataEmitter.fire(data);
+      this.dataChannel.emit(data, 'user');
     } else {
       // Just write to terminal without triggering onData
       this.write(data);
@@ -1578,7 +1584,7 @@ export class Terminal implements ITerminalCore {
     this.ghostty = undefined;
 
     // Dispose event emitters
-    this.dataEmitter.dispose();
+    this.dataChannel.dispose();
     this.resizeEmitter.dispose();
     this.bellEmitter.dispose();
     this.selectionChangeEmitter.dispose();
@@ -2574,11 +2580,11 @@ export class Terminal implements ITerminalCore {
     // Read all pending responses from the WASM terminal
     // Multiple responses can be queued if a single write() contained multiple queries
     while (true) {
-      const response = this.wasmTerm.readResponse();
-      if (response === null) break;
+      const response = this.wasmTerm?.readResponse();
+      if (response == null) break;
       // Send response back to the PTY via onData
       // This is the same path as user keyboard input
-      this.dataEmitter.fire(response);
+      this.dataChannel.emit(response, 'terminal-response');
     }
   }
 

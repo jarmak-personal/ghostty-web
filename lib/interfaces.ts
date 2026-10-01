@@ -79,6 +79,14 @@ export type ClipboardFilePasteResolver = (
   file: File | undefined
 ) => string | undefined | Promise<string | undefined>;
 
+/** Origin assigned by the producer of PTY-bound data, independent of delivery time. */
+export type TerminalDataSource = 'user' | 'terminal-response';
+
+export interface ITerminalDataEvent {
+  readonly data: string;
+  readonly source: TerminalDataSource;
+}
+
 export interface ITheme {
   foreground?: string;
   background?: string;
