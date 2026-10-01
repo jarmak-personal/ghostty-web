@@ -2,7 +2,8 @@ import { stat } from 'node:fs/promises';
 
 // Keep a small, explicit growth budget for native APIs while retaining a hard
 // ceiling that catches accidental debug or dependency bloat.
-const MAX_WASM_KIB = 520;
+// Native cell provenance and finite live-query refreshes add about 15 KiB.
+const MAX_WASM_KIB = 544;
 const MAX_WASM_BYTES = MAX_WASM_KIB * 1024;
 
 async function main(): Promise<void> {

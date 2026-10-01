@@ -35,6 +35,7 @@ import type {
   IRetainedRangeHighlightStyle,
   ITerminalAddon,
   ITerminalCore,
+  ITerminalDataEvent,
   ITerminalOptions,
   ITheme,
   IUnicodeVersionProvider,
@@ -51,6 +52,7 @@ import {
 } from './retained-buffer-extraction';
 import { RetainedBufferSearchManager } from './retained-buffer-search';
 import { SelectionManager } from './selection-manager';
+import { TerminalDataChannel } from './terminal-data';
 import type { DecodedTerminalEvent } from './terminal-events';
 import type {
   ILink,
@@ -153,7 +155,7 @@ export class Terminal implements ITerminalCore {
   private currentLinkHoverRequest?: { requestSerial: number; col: number; row: number };
 
   // Event emitters
-  private dataEmitter = new EventEmitter<string>();
+  private readonly dataChannel = new TerminalDataChannel();
   private resizeEmitter = new EventEmitter<{ cols: number; rows: number }>();
   private bellEmitter = new EventEmitter<void>();
   private selectionChangeEmitter = new EventEmitter<void>();
@@ -164,7 +166,11 @@ export class Terminal implements ITerminalCore {
   private cursorMoveEmitter = new EventEmitter<void>();
   private terminalEventEmitter = new EventEmitter<TerminalEvent>();
   // Public event accessors (xterm.js compatibility)
-  public readonly onData: IEvent<string> = this.dataEmitter.event;
+  public readonly onData: IEvent<string> = this.dataChannel.onData;
+  /** PTY-bound data with explicit producer-owned provenance. */
+  public onDataWithSource(listener: (event: ITerminalDataEvent) => void): IDisposable {
+    return this.dataChannel.onDataWithSource(listener);
+  }
   public readonly onResize: IEvent<{ cols: number; rows: number }> = this.resizeEmitter.event;
   public readonly onBell: IEvent<void> = this.bellEmitter.event;
   public readonly onSelectionChange: IEvent<void> = this.selectionChangeEmitter.event;
@@ -268,6 +274,7 @@ export class Terminal implements ITerminalCore {
       resolveClipboardFilePaste: options.resolveClipboardFilePaste,
       linkHandler: options.linkHandler ?? null,
       smoothScrollDuration: normalizeSmoothScrollDuration(options.smoothScrollDuration),
+      wheelScroll: options.wheelScroll,
     };
 
     // Wrap in Proxy to intercept runtime changes (xterm.js compatibility)
@@ -336,8 +343,8 @@ export class Terminal implements ITerminalCore {
 
     switch (key) {
       case 'disableStdin':
-        // Input handler already checks this.options.disableStdin dynamically
-        // No action needed
+        this.inputHandler?.resetWheelGesture();
+        // Input handler checks this.options.disableStdin dynamically.
         break;
 
       case 'cursorBlink':
@@ -413,6 +420,15 @@ export class Terminal implements ITerminalCore {
     // Clear any active selection since pixel positions have changed
     if (this.selectionManager) {
       this.selectionManager.clearSelection();
+    }
+
+    for (const addon of [...this.addons]) {
+      if (this.isDisposed || !this.isOpen) break;
+      try {
+        addon.onCellMetricsChange?.();
+      } catch (error) {
+        console.error('Addon metric-change handler failed:', error);
+      }
     }
 
     // CanvasRenderer owns the DPI-aware backing store. It will resize and
@@ -659,6 +675,8 @@ export class Terminal implements ITerminalCore {
           width: renderer.charWidth,
           height: renderer.charHeight,
         }),
+        getGridDimensions: () => ({ cols: this.cols, rows: this.rows }),
+        getWheelOptions: () => this.options.wheelScroll,
         getCanvasOffset: () => {
           const rect = canvas.getBoundingClientRect();
           return { left: rect.left, top: rect.top };
@@ -677,7 +695,7 @@ export class Terminal implements ITerminalCore {
           // Clear selection when user types
           this.selectionManager?.clearSelection();
           // Input handler fires data events
-          this.dataEmitter.fire(data);
+          this.dataChannel.emit(data, 'user');
         },
         () => {
           // Input handler can also fire bell
@@ -921,7 +939,7 @@ export class Terminal implements ITerminalCore {
       return;
     }
 
-    this.dataEmitter.fire(encodePaste(data, this.wasmTerm!.hasBracketedPaste()));
+    this.dataChannel.emit(encodePaste(data, this.wasmTerm!.hasBracketedPaste()), 'user');
   }
 
   /**
@@ -940,7 +958,7 @@ export class Terminal implements ITerminalCore {
 
     if (wasUserInput) {
       // Trigger onData event as if user typed it
-      this.dataEmitter.fire(data);
+      this.dataChannel.emit(data, 'user');
     } else {
       // Just write to terminal without triggering onData
       this.write(data);
@@ -968,7 +986,6 @@ export class Terminal implements ITerminalCore {
     // This avoids the background-tab regression of using an isResizing flag
     // cleared via requestAnimationFrame (rAF is throttled/paused in background tabs).
     this.cancelRenderLoop();
-    this.retainedBufferSearch?.invalidateAll();
     this.retainedBufferExtraction?.invalidateAll();
 
     try {
@@ -978,6 +995,7 @@ export class Terminal implements ITerminalCore {
 
       // Resize WASM terminal (may reallocate buffers, invalidating TypedArray views)
       this.wasmTerm!.resize(cols, rows);
+      this.retainedBufferSearch?.invalidateAll();
       this.reconcileSynchronizedOutput();
 
       // Fire resize event
@@ -1592,7 +1610,7 @@ export class Terminal implements ITerminalCore {
     this.ghostty = undefined;
 
     // Dispose event emitters
-    this.dataEmitter.dispose();
+    this.dataChannel.dispose();
     this.resizeEmitter.dispose();
     this.bellEmitter.dispose();
     this.selectionChangeEmitter.dispose();
@@ -2309,6 +2327,7 @@ export class Terminal implements ITerminalCore {
 
     // Allow custom handler to override
     if (this.customWheelEventHandler && this.customWheelEventHandler(e)) {
+      this.inputHandler?.resetWheelGesture();
       e.stopPropagation();
       return;
     }
@@ -2325,14 +2344,9 @@ export class Terminal implements ITerminalCore {
     const isAltScreen = this.wasmTerm?.isAlternateScreen() ?? false;
 
     if (isAltScreen) {
-      // Alternate screen: send arrow keys to the application
-      // Applications like vim handle scrolling internally
-      // Standard: ~3 arrow presses per wheel "click"
-      const direction = e.deltaY > 0 ? 'down' : 'up';
-      const count = Math.min(Math.abs(Math.round(e.deltaY / 33)), 5); // Cap at 5
-
-      this.inputHandler?.sendArrowKeys(direction, count);
+      this.inputHandler?.sendAlternateWheel(e);
     } else {
+      this.inputHandler?.resetWheelGesture();
       // Normal screen: scroll viewport through history with smooth scrolling
       // Handle different deltaMode values for better trackpad/mouse support
       let deltaLines: number;
@@ -2592,11 +2606,11 @@ export class Terminal implements ITerminalCore {
     // Read all pending responses from the WASM terminal
     // Multiple responses can be queued if a single write() contained multiple queries
     while (true) {
-      const response = this.wasmTerm.readResponse();
-      if (response === null) break;
+      const response = this.wasmTerm?.readResponse();
+      if (response == null) break;
       // Send response back to the PTY via onData
       // This is the same path as user keyboard input
-      this.dataEmitter.fire(response);
+      this.dataChannel.emit(response, 'terminal-response');
     }
   }
 

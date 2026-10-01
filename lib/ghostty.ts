@@ -559,6 +559,18 @@ export class GhosttyTerminal {
     this.exports.ghostty_terminal_retained_search_cancel(this.handle, searchId);
   }
 
+  refreshRetainedSearch(searchId: number): boolean {
+    return (
+      !!this.handle && this.exports.ghostty_terminal_retained_search_refresh(this.handle, searchId)
+    );
+  }
+
+  getRetainedSearchMatchId(searchId: number, index: number): number {
+    return this.handle
+      ? this.exports.ghostty_terminal_retained_search_match_id(this.handle, searchId, index) >>> 0
+      : 0;
+  }
+
   getRetainedSearchMatchCount(searchId: number): number {
     if (!this.handle || searchId === 0) return -1;
     return this.exports.ghostty_terminal_retained_search_match_count(this.handle, searchId);
@@ -566,7 +578,7 @@ export class GhosttyTerminal {
 
   getRetainedSearchMatchRange(
     searchId: number,
-    matchIndex: number
+    occurrenceId: number
   ): { startRow: number; startColumn: number; endRow: number; endColumn: number } | null {
     if (!this.handle || searchId === 0) return null;
     const byteLength = 4 * Uint32Array.BYTES_PER_ELEMENT;
@@ -576,7 +588,7 @@ export class GhosttyTerminal {
       const count = this.exports.ghostty_terminal_retained_search_match_range(
         this.handle,
         searchId,
-        matchIndex,
+        occurrenceId,
         ptr,
         4
       );
@@ -593,12 +605,12 @@ export class GhosttyTerminal {
     }
   }
 
-  getRetainedSearchMatchText(searchId: number, matchIndex: number): string | null {
+  getRetainedSearchMatchText(searchId: number, occurrenceId: number): string | null {
     if (!this.handle || searchId === 0) return null;
     const byteLength = this.exports.ghostty_terminal_retained_search_match_text(
       this.handle,
       searchId,
-      matchIndex,
+      occurrenceId,
       0,
       0
     );
@@ -610,7 +622,7 @@ export class GhosttyTerminal {
       const written = this.exports.ghostty_terminal_retained_search_match_text(
         this.handle,
         searchId,
-        matchIndex,
+        occurrenceId,
         ptr,
         byteLength
       );

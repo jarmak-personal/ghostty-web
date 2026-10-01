@@ -90,7 +90,7 @@ describe('retained range presentation', () => {
     other.write('hit');
     const result = await terminal.searchRetainedBuffer('hit', { caseSensitive: true });
     const range = result.matches[0];
-    const forged = { start: { ...range.start }, end: { ...range.end } };
+    const forged = { id: range.id, start: { ...range.start }, end: { ...range.end } };
     for (const [owner, candidate] of [
       [terminal, forged],
       [other, range],
@@ -103,7 +103,7 @@ describe('retained range presentation', () => {
     expect(terminal.highlightRetainedBufferRange(range, style)).toBeUndefined();
   });
 
-  test('query cancellation, replacement, writes, reset, resize and disposal release surfaces', async () => {
+  test('query cancellation, replacement, reset, resize and disposal release surfaces', async () => {
     const { terminal, container } = await openTerminal();
     terminal.write('hit');
     const search = async () => {
@@ -122,8 +122,7 @@ describe('retained range presentation', () => {
     old.handle.dispose();
     expect(container.querySelectorAll('[data-ghostty-retained-range-highlight]')).toHaveLength(1);
     terminal.write(' more');
-    expect(container.querySelector('[data-ghostty-retained-range-highlight]')).toBeNull();
-    await search();
+    expect(container.querySelectorAll('[data-ghostty-retained-range-highlight]')).toHaveLength(1);
     terminal.resize(12, 3);
     expect(container.querySelector('[data-ghostty-retained-range-highlight]')).toBeNull();
     await search();
@@ -134,6 +133,54 @@ describe('retained range presentation', () => {
     terminal.dispose();
     expect(container.querySelector('[data-ghostty-retained-range-highlight]')).toBeNull();
     expect(terminal.revealRetainedBufferRange(current.result.matches[0])).toBe(false);
+  });
+
+  test('highlight identity survives streaming refresh and follows the selected match into history', async () => {
+    const { terminal, container } = await openTerminal();
+    terminal.write('hit');
+    const result = await terminal.searchRetainedBuffer('hit', { caseSensitive: true });
+    const range = result.matches[0];
+    const paint = captureHighlightPaint(terminal, range);
+    await presentFrame(terminal);
+    terminal.write(' more\r\nplain\r\ntail\r\nhit-new');
+    const deadline = performance.now() + 2000;
+    while (result.pending || result.matches.length !== 2) {
+      if (performance.now() > deadline) throw new Error('Streaming search did not refresh');
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    expect(result.matches[0]).toBe(range);
+    expect(container.querySelectorAll('[data-ghostty-retained-range-highlight]')).toHaveLength(1);
+    expect(terminal.revealRetainedBufferRange(range)).toBe(true);
+    paint.rectangles.length = 0;
+    await presentFrame(terminal);
+    const metrics = terminal.renderer!.getMetrics();
+    expect(paint.rectangles).toEqual([[0, 0, 3 * metrics.width, metrics.height]]);
+    // The public resolved range carries the same authenticated presentation authority.
+    const resolved = result.resolve(range)!;
+    expect(resolved.id).toBe(range.id);
+    expect(terminal.highlightRetainedBufferRange(resolved, style)).toBeDefined();
+  });
+
+  test('identical overwrite revokes the old highlight without affecting its replacement', async () => {
+    const { terminal, container } = await openTerminal();
+    terminal.write('hit');
+    const result = await terminal.searchRetainedBuffer('hit', { caseSensitive: true });
+    const range = result.matches[0];
+    const handle = terminal.highlightRetainedBufferRange(range, style)!;
+    await presentFrame(terminal);
+    terminal.write('\rhit');
+    expect(terminal.revealRetainedBufferRange(range)).toBe(false);
+    expect(terminal.highlightRetainedBufferRange(range, style)).toBeUndefined();
+    await presentFrame(terminal);
+    expect(container.querySelector('[data-ghostty-retained-range-highlight]')).toBeNull();
+    const deadline = performance.now() + 2000;
+    while (result.pending || result.matches[0]?.id === range.id) {
+      if (performance.now() > deadline) throw new Error('Replacement search did not refresh');
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    expect(terminal.highlightRetainedBufferRange(result.matches[0], style)).toBeDefined();
+    handle.dispose();
+    expect(container.querySelectorAll('[data-ghostty-retained-range-highlight]')).toHaveLength(1);
   });
 
   test('range surface uses viewport metrics, wide cells and device scaling', () => {
@@ -147,6 +194,7 @@ describe('retained range presentation', () => {
     canvas.style.height = '48px';
     container.append(canvas);
     let range: IRetainedBufferRange | undefined = {
+      id: 1,
       start: { row: 5, column: 7 },
       end: { row: 6, column: 2 },
     };

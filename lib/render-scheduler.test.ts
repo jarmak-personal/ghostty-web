@@ -209,7 +209,7 @@ function createSchedulerHarness(): Terminal & {
     },
     addons: [],
     cleanupComponents: () => {},
-    dataEmitter: disposable,
+    dataChannel: disposable,
     resizeEmitter: disposable,
     bellEmitter: disposable,
     selectionChangeEmitter: disposable,

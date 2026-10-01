@@ -81,7 +81,7 @@ export function getGhostty(): Ghostty {
   return ghosttyInstance;
 }
 
-export type { ITerminalDimensions } from './addons/fit';
+export type { FitAddonOptions, ITerminalDimensions } from './addons/fit';
 // Addons
 export { FitAddon } from './addons/fit';
 export { EventEmitter } from './event-emitter';
@@ -109,9 +109,11 @@ export type {
   IRetainedRangeHighlightStyle,
   ITerminalAddon,
   ITerminalCore,
+  ITerminalDataEvent,
   ITerminalOptions,
   ITheme,
   IUnicodeVersionProvider,
+  TerminalDataSource,
 } from './interfaces';
 export { LinkDetector } from './link-detector';
 // Link providers
@@ -156,3 +158,5 @@ export type {
   TerminalSemanticAction,
 } from './types';
 export { Key, KeyAction, Mods } from './types';
+
+export type { WheelScrollOptions } from './wheel-gesture';

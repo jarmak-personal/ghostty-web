@@ -7,6 +7,26 @@ index 74f3f85eb..814e13ccd 100644
  vgcore.*
  
 +node_modules/
+diff --git a/build.zig b/build.zig
+index f9d861b19..90d398119 100644
+--- a/build.zig
++++ b/build.zig
+@@ -33,6 +33,15 @@ pub fn build(b: *std.Build) !void {
+         &deps,
+     );
+ 
++    if (b.option(bool, "retained-fixture-only", "Run retained-search fixtures without application SDKs") orelse false) {
++        // The C terminal ABI uses c_allocator on native targets.
++        mod.vt_c.link_libc = true;
++        const step = b.step("test-lib-vt", "Run retained-search native fixtures");
++        const exe = b.addTest(.{ .root_module = mod.vt_c, .filters = &.{"streaming retained search"} });
++        step.dependOn(&b.addRunArtifact(exe).step);
++        return;
++    }
++
+     // All our steps which we'll hook up later. The steps are shown
+     // up here just so that they are more self-documenting.
+     const libvt_step = b.step("lib-vt", "Build libghostty-vt");
 diff --git a/include/ghostty/vt.h b/include/ghostty/vt.h
 index 4f8fef88e..ca9fb1d4d 100644
 --- a/include/ghostty/vt.h
@@ -29,10 +49,10 @@ index 4f8fef88e..ca9fb1d4d 100644
  #include <ghostty/vt/key.h>
 diff --git a/include/ghostty/vt/terminal.h b/include/ghostty/vt/terminal.h
 new file mode 100644
-index 000000000..7b4c2a47c
+index 000000000..81cbed033
 --- /dev/null
 +++ b/include/ghostty/vt/terminal.h
-@@ -0,0 +1,535 @@
+@@ -0,0 +1,539 @@
 +/**
 + * @file terminal.h
 + *
@@ -207,7 +227,7 @@ index 000000000..7b4c2a47c
 +int ghostty_terminal_retained_search_match_range(
 +    GhosttyTerminal term,
 +    uint32_t search_id,
-+    uint32_t match_index,
++    uint32_t occurrence_id,
 +    uint32_t* out_buffer,
 +    size_t buffer_size
 +);
@@ -219,7 +239,7 @@ index 000000000..7b4c2a47c
 +int ghostty_terminal_retained_search_match_text(
 +    GhosttyTerminal term,
 +    uint32_t search_id,
-+    uint32_t match_index,
++    uint32_t occurrence_id,
 +    uint8_t* out_buffer,
 +    size_t buffer_size
 +);
@@ -563,16 +583,20 @@ index 000000000..7b4c2a47c
 +    size_t buffer_size
 +);
 +
++/** Start one finite refresh, preserving surviving occurrence identities. */
++bool ghostty_terminal_retained_search_refresh(GhosttyTerminal term, uint32_t search_id);
++uint32_t ghostty_terminal_retained_search_match_id(GhosttyTerminal term, uint32_t search_id, uint32_t index);
++
 +#ifdef __cplusplus
 +}
 +#endif
 +
 +#endif /* GHOSTTY_VT_TERMINAL_H */
 diff --git a/src/lib_vt.zig b/src/lib_vt.zig
-index 426660621..30a91c593 100644
+index 426660621..ab6451414 100644
 --- a/src/lib_vt.zig
 +++ b/src/lib_vt.zig
-@@ -143,6 +143,84 @@ comptime {
+@@ -143,6 +143,86 @@ comptime {
          @export(&c.sgr_unknown_partial, .{ .name = "ghostty_sgr_unknown_partial" });
          @export(&c.sgr_attribute_tag, .{ .name = "ghostty_sgr_attribute_tag" });
          @export(&c.sgr_attribute_value, .{ .name = "ghostty_sgr_attribute_value" });
@@ -586,6 +610,8 @@ index 426660621..30a91c593 100644
 +        @export(&c.terminal_write, .{ .name = "ghostty_terminal_write" });
 +        @export(&c.terminal_retained_search_create, .{ .name = "ghostty_terminal_retained_search_create" });
 +        @export(&c.terminal_retained_search_step, .{ .name = "ghostty_terminal_retained_search_step" });
++        @export(&c.terminal_retained_search_refresh, .{ .name = "ghostty_terminal_retained_search_refresh" });
++        @export(&c.terminal_retained_search_match_id, .{ .name = "ghostty_terminal_retained_search_match_id" });
 +        @export(&c.terminal_retained_search_cancel, .{ .name = "ghostty_terminal_retained_search_cancel" });
 +        @export(&c.terminal_retained_search_match_count, .{ .name = "ghostty_terminal_retained_search_match_count" });
 +        @export(&c.terminal_retained_search_match_range, .{ .name = "ghostty_terminal_retained_search_match_range" });
@@ -658,10 +684,18 @@ index 426660621..30a91c593 100644
          // On Wasm we need to export our allocator convenience functions.
          if (builtin.target.cpu.arch.isWasm()) {
 diff --git a/src/terminal/PageList.zig b/src/terminal/PageList.zig
-index 6e39428db..aac4b567c 100644
+index 6e39428db..a69959cd8 100644
 --- a/src/terminal/PageList.zig
 +++ b/src/terminal/PageList.zig
-@@ -477,10 +477,10 @@ fn initPages(
+@@ -449,6 +449,7 @@ fn initPages(
+     errdefer {
+         var it = page_list.first;
+         while (it) |node| : (it = node.next) {
++            node.data.clearRetainedCellIds();
+             if (node.data.memory.len > std_size) {
+                 page_alloc.free(node.data.memory);
+             }
+@@ -477,10 +478,10 @@ fn initPages(
          else
              page_alloc.free(page_buf);
  
@@ -676,7 +710,40 @@ index 6e39428db..aac4b567c 100644
  
          // Initialize the first set of pages to contain our viewport so that
          // the top of the first page is always the active area.
-@@ -3385,9 +3385,10 @@ inline fn createPageExt(
+@@ -635,6 +636,7 @@ pub fn deinit(self: *PageList) void {
+     const page_alloc = self.pool.pages.arena.child_allocator;
+     var it = self.pages.first;
+     while (it) |node| : (it = node.next) {
++        node.data.clearRetainedCellIds();
+         if (node.data.memory.len > std_size) {
+             page_alloc.free(node.data.memory);
+         }
+@@ -676,6 +678,7 @@ pub fn reset(self: *PageList) void {
+         const page_alloc = self.pool.pages.arena.child_allocator;
+         var it = self.pages.first;
+         while (it) |node| : (it = node.next) {
++            node.data.clearRetainedCellIds();
+             if (node.data.memory.len > std_size) {
+                 page_alloc.free(node.data.memory);
+             }
+@@ -840,7 +843,7 @@ pub fn clone(
+         defer node.data.assertIntegrity();
+         node.data.size.rows = chunk.end - chunk.start;
+         node.data.size.cols = chunk.node.data.size.cols;
+-        try node.data.cloneFrom(
++        try node.data.cloneFromUntracked(
+             &chunk.node.data,
+             chunk.start,
+             chunk.end,
+@@ -3171,6 +3174,7 @@ pub fn grow(self: *PageList) Allocator.Error!?*List.Node {
+         }
+ 
+         // Reset our memory
++        first.data.clearRetainedCellIds();
+         const buf = first.data.memory;
+         @memset(buf, 0);
+         assert(buf.len <= std_size);
+@@ -3385,9 +3389,10 @@ inline fn createPageExt(
      else
          page_alloc.free(page_buf);
  
@@ -690,6 +757,14 @@ index 6e39428db..aac4b567c 100644
  
      page.* = .{
          .data = .initBuf(.init(page_buf), layout),
+@@ -3423,6 +3428,7 @@ fn destroyNodeExt(
+     total_size: ?*usize,
+ ) void {
+     const page: *Page = &node.data;
++    page.clearRetainedCellIds();
+ 
+     // Update our accounting for page size
+     if (total_size) |v| v.* -= page.memory.len;
 diff --git a/src/terminal/Parser.zig b/src/terminal/Parser.zig
 index 88e7edf7c..b5c3896e1 100644
 --- a/src/terminal/Parser.zig
@@ -703,7 +778,7 @@ index 88e7edf7c..b5c3896e1 100644
  
  /// Transition action is an action that can be taken during a state
 diff --git a/src/terminal/Screen.zig b/src/terminal/Screen.zig
-index ea8ca1445..75a72480b 100644
+index ea8ca1445..1ad1eaf93 100644
 --- a/src/terminal/Screen.zig
 +++ b/src/terminal/Screen.zig
 @@ -871,15 +871,24 @@ pub fn cursorDownScroll(self: *Screen) !void {
@@ -736,8 +811,98 @@ index ea8ca1445..75a72480b 100644
          }
      }
  
+@@ -889,6 +898,7 @@ pub fn cursorDownScroll(self: *Screen) !void {
+         if (self.cursor.style.bgCell()) |blank_cell| {
+             const cell_current: [*]pagepkg.Cell = @ptrCast(self.cursor.page_cell);
+             const cells = cell_current - self.cursor.x;
++            self.cursor.page_pin.node.data.revokeRetainedCells(cells[0..self.pages.cols]);
+             @memset(cells[0..self.pages.cols], blank_cell);
+         }
+     }
+@@ -987,6 +997,7 @@ pub fn cursorScrollAbove(self: *Screen) !void {
+         if (self.cursor.style.bgCell()) |blank_cell| {
+             const cell_current: [*]pagepkg.Cell = @ptrCast(self.cursor.page_cell);
+             const cells = cell_current - self.cursor.x;
++            self.cursor.page_pin.node.data.revokeRetainedCells(cells[0..self.pages.cols]);
+             @memset(cells[0..self.pages.cols], blank_cell);
+         }
+     }
+@@ -1446,6 +1457,7 @@ pub fn clearCells(
+         }
+     }
+ 
++    page.revokeRetainedCells(cells);
+     @memset(cells, self.blankCell());
+ }
+ 
+@@ -8254,8 +8266,10 @@ test "Screen: selectWord" {
+ 
+     // Default boundary codepoints for word selection
+     const boundary_codepoints = &[_]u21{
+-        0,   ' ', '\t', '\'', '"', '│', '`', '|', ':', ';',
+-        ',', '(', ')',  '[',  ']', '{',   '}', '<', '>', '$',
++        0,     ' ', '\t', '\'', '"',
++        '│', '`', '|',  ':',  ';',
++        ',',   '(', ')',  '[',  ']',
++        '{',   '}', '<',  '>',  '$',
+     };
+ 
+     // Outside of active area
+@@ -8375,8 +8389,10 @@ test "Screen: selectWord across soft-wrap" {
+ 
+     // Default boundary codepoints for word selection
+     const boundary_codepoints = &[_]u21{
+-        0,   ' ', '\t', '\'', '"', '│', '`', '|', ':', ';',
+-        ',', '(', ')',  '[',  ']', '{',   '}', '<', '>', '$',
++        0,     ' ', '\t', '\'', '"',
++        '│', '`', '|',  ':',  ';',
++        ',',   '(', ')',  '[',  ']',
++        '{',   '}', '<',  '>',  '$',
+     };
+ 
+     {
+@@ -8447,8 +8463,10 @@ test "Screen: selectWord whitespace across soft-wrap" {
+ 
+     // Default boundary codepoints for word selection
+     const boundary_codepoints = &[_]u21{
+-        0,   ' ', '\t', '\'', '"', '│', '`', '|', ':', ';',
+-        ',', '(', ')',  '[',  ']', '{',   '}', '<', '>', '$',
++        0,     ' ', '\t', '\'', '"',
++        '│', '`', '|',  ':',  ';',
++        ',',   '(', ')',  '[',  ']',
++        '{',   '}', '<',  '>',  '$',
+     };
+ 
+     // Going forward
+@@ -8509,8 +8527,10 @@ test "Screen: selectWord with character boundary" {
+ 
+     // Default boundary codepoints for word selection
+     const boundary_codepoints = &[_]u21{
+-        0,   ' ', '\t', '\'', '"', '│', '`', '|', ':', ';',
+-        ',', '(', ')',  '[',  ']', '{',   '}', '<', '>', '$',
++        0,     ' ', '\t', '\'', '"',
++        '│', '`', '|',  ':',  ';',
++        ',',   '(', ')',  '[',  ']',
++        '{',   '}', '<',  '>',  '$',
+     };
+ 
+     const cases = [_][]const u8{
+diff --git a/src/terminal/Terminal.zig b/src/terminal/Terminal.zig
+index 706f235c7..9393973d4 100644
+--- a/src/terminal/Terminal.zig
++++ b/src/terminal/Terminal.zig
+@@ -795,6 +795,9 @@ fn printCell(
+     // Keep track if we had a hyperlink so we can unset it.
+     const had_hyperlink = cell.hyperlink;
+ 
++    // Every overwrite creates a new retained-cell incarnation, including
++    // writes of identical text. Styling alone does not revoke provenance.
++    self.screens.active.cursor.page_pin.node.data.revokeRetainedCells(cell[0..1]);
+     // Write
+     cell.* = .{
+         .content_tag = .codepoint,
 diff --git a/src/terminal/c/main.zig b/src/terminal/c/main.zig
-index bc92597f5..e351e9a58 100644
+index bc92597f5..a5db14eee 100644
 --- a/src/terminal/c/main.zig
 +++ b/src/terminal/c/main.zig
 @@ -4,6 +4,7 @@ pub const key_event = @import("key_event.zig");
@@ -834,7 +999,7 @@ index bc92597f5..e351e9a58 100644
  test {
      _ = color;
      _ = osc;
-@@ -59,6 +137,7 @@ test {
+@@ -59,7 +139,11 @@ test {
      _ = key_encode;
      _ = paste;
      _ = sgr;
@@ -842,12 +1007,16 @@ index bc92597f5..e351e9a58 100644
  
      // We want to make sure we run the tests for the C allocator interface.
      _ = @import("../../lib/allocator.zig");
+ }
++
++pub const terminal_retained_search_refresh = terminal.retainedSearchRefresh;
++pub const terminal_retained_search_match_id = terminal.retainedSearchMatchId;
 diff --git a/src/terminal/c/terminal.zig b/src/terminal/c/terminal.zig
 new file mode 100644
-index 000000000..fb903e7aa
+index 000000000..6696410e3
 --- /dev/null
 +++ b/src/terminal/c/terminal.zig
-@@ -0,0 +1,3057 @@
+@@ -0,0 +1,3442 @@
 +//! C API wrapper for Terminal
 +//!
 +//! This provides a minimal, high-performance interface to Ghostty's Terminal
@@ -1542,67 +1711,141 @@ index 000000000..fb903e7aa
 +}, Allocator.Error);
 +
 +const RetainedSearchRegistry = struct {
-+    const Entry = struct {
-+        search: ScreenSearch,
-+        phase: enum { search, index, complete } = .search,
-+        index_node: ?*PageList.List.Node = null,
-+        index_row: u32 = 0,
-+        node_rows: std.AutoHashMapUnmanaged(*PageList.List.Node, NodeRows) = .empty,
++    const Occurrence = struct {
++        start_row: u64,
++        end_row: u64,
++        start_column: u16,
++        end_column: u16,
++        cells: []u64,
++        wraps: []bool,
++        seen: u64,
 +
-+        fn deinit(self: *Entry, alloc: Allocator) void {
-+            self.search.deinit();
-+            self.node_rows.deinit(alloc);
++        fn deinit(self: *Occurrence, alloc: Allocator) void {
++            alloc.free(self.cells);
++            alloc.free(self.wraps);
++        }
++
++        fn anchor(locations: *pagepkg.Page.RetainedRowLocations, row_id: u64, cell_id: u64, column: u16) ?PageList.Pin {
++            const loc = locations.getPtr(row_id) orelse return null;
++            const page = loc.page;
++            const rows = page.rows.ptr(page.memory)[0..page.size.rows];
++            if (loc.y >= rows.len or page.retainedCellIndex(&rows[loc.y].cells.ptr(page.memory)[0]) != loc.cell_index) {
++                loc.y = for (rows, 0..) |row, y| {
++                    if (page.retainedCellIndex(&row.cells.ptr(page.memory)[0]) == loc.cell_index) break y;
++                } else return null;
++            }
++            const cells = page.getCells(&rows[loc.y]);
++            const x = if (column < cells.len and page.currentRetainedCellId(&cells[column]) == cell_id) column else for (cells, 0..) |*cell, x| {
++                if (page.currentRetainedCellId(cell) == cell_id) break @as(u16, @intCast(x));
++            } else return null;
++            const node: *align(@alignOf(pagepkg.Page)) PageList.List.Node = @fieldParentPtr("data", page);
++            return .{ .node = @alignCast(node), .y = @intCast(loc.y), .x = x };
++        }
++
++        fn pins(self: *const Occurrence, locations: *pagepkg.Page.RetainedRowLocations) ?struct { start: PageList.Pin, end: PageList.Pin } {
++            const start = anchor(locations, self.start_row, self.cells[0], self.start_column) orelse return null;
++            const end = anchor(locations, self.end_row, self.cells[self.cells.len - 1], self.end_column) orelse return null;
++            if (end.before(start)) return null;
++            return .{ .start = start, .end = end };
++        }
++
++        fn valid(self: *const Occurrence, locations: *pagepkg.Page.RetainedRowLocations) bool {
++            const current = self.pins(locations) orelse return false;
++            var it = current.start.rowIterator(.right_down, current.end);
++            var index: usize = 0;
++            var row_index: usize = 0;
++            while (it.next()) |row| {
++                const left: usize = if (index == 0) current.start.x else 0;
++                const right: usize = if (row.node == current.end.node and row.y == current.end.y) current.end.x + 1 else row.node.data.size.cols;
++                if (left >= right or right > row.node.data.size.cols) return false;
++                const cells = row.node.data.getCells(row.rowAndCell().row)[left..right];
++                for (cells) |*cell| {
++                    if (index >= self.cells.len or row.node.data.currentRetainedCellId(cell) != self.cells[index]) return false;
++                    index += 1;
++                }
++                if (index < self.cells.len and (row_index >= self.wraps.len or row.rowAndCell().row.wrap != self.wraps[row_index])) return false;
++                row_index += 1;
++            }
++            return index == self.cells.len;
 +        }
 +    };
 +
-+    const NodeRows = struct {
-+        serial: u64,
-+        row: u32,
++    const Entry = struct {
++        screen: *@import("../Screen.zig"),
++        scan: ?ScreenSearch,
++        query: []u8,
++        case_sensitive: bool,
++        phase: enum { search, ranges, cleanup, compact, order, complete } = .search,
++        next_match: usize = 0,
++        cleanup_index: usize = 0,
++        compact_read: usize = 0,
++        compact_write: usize = 0,
++        sort_width: usize = 1,
++        sort_left: usize = 0,
++        sort_a: usize = 0,
++        sort_b: usize = 0,
++        sort_mid: usize = 0,
++        sort_end: usize = 0,
++        cycle: u64 = 1,
++        next_id: u32 = 1,
++        occurrences: std.AutoArrayHashMapUnmanaged(u32, Occurrence) = .empty,
++        by_cell: std.AutoHashMapUnmanaged(u64, u32) = .empty,
++        published: std.ArrayList(u32) = .empty,
++        building: std.ArrayList(u32) = .empty,
++        ordering: std.ArrayList(u32) = .empty,
++
++        fn deinit(self: *Entry, alloc: Allocator) void {
++            if (self.scan) |*scan| scan.deinit();
++            for (self.occurrences.values()) |*occ| occ.deinit(alloc);
++            self.occurrences.deinit(alloc);
++            self.by_cell.deinit(alloc);
++            self.published.deinit(alloc);
++            self.building.deinit(alloc);
++            self.ordering.deinit(alloc);
++            alloc.free(self.query);
++        }
 +    };
 +
 +    entries: std.AutoHashMapUnmanaged(u32, Entry) = .empty,
 +    next_id: u32 = 1,
++    cell_sequence: u64 = 0,
++    row_locations: pagepkg.Page.RetainedRowLocations = .empty,
 +
 +    fn deinit(self: *RetainedSearchRegistry, alloc: Allocator) void {
-+        var it = self.entries.valueIterator();
-+        while (it.next()) |entry| entry.deinit(alloc);
++        self.clear(alloc);
 +        self.entries.deinit(alloc);
-+        self.* = .{};
++        self.row_locations.deinit(alloc);
 +    }
 +
 +    fn clear(self: *RetainedSearchRegistry, alloc: Allocator) void {
 +        var it = self.entries.valueIterator();
-+        while (it.next()) |entry| entry.deinit(alloc);
++        while (it.next()) |entry| {
++            entry.deinit(alloc);
++            var node = entry.screen.pages.pages.first;
++            while (node) |n| : (node = n.next) n.data.clearRetainedCellIds();
++        }
 +        self.entries.clearRetainingCapacity();
 +    }
 +
-+    fn create(
-+        self: *RetainedSearchRegistry,
-+        alloc: Allocator,
-+        terminal: *Terminal,
-+        query: []const u8,
-+        case_sensitive: bool,
-+    ) ?u32 {
++    fn create(self: *RetainedSearchRegistry, alloc: Allocator, terminal: *Terminal, query: []const u8, case_sensitive: bool) ?u32 {
 +        if (query.len == 0 or query.len > max_search_query_bytes) return null;
 +        const primary = terminal.screens.get(.primary) orelse return null;
-+        var search = ScreenSearch.initWithCaseSensitivity(
-+            alloc,
-+            primary,
-+            query,
-+            if (case_sensitive) .sensitive else .ascii_insensitive,
-+        ) catch return null;
-+
++        var scan = ScreenSearch.initWithCaseSensitivity(alloc, primary, query, if (case_sensitive) .sensitive else .ascii_insensitive) catch return null;
++        const owned = alloc.dupe(u8, query) catch {
++            scan.deinit();
++            return null;
++        };
 +        var id = self.next_id;
 +        while (id == 0 or self.entries.contains(id)) id +%= 1;
 +        self.next_id = id +% 1;
-+        if (self.next_id == 0) self.next_id = 1;
 +        const inserted = inserted: {
 +            retained_search_create_tw.check(.registry_insert) catch break :inserted false;
-+            self.entries.put(alloc, id, .{ .search = search }) catch break :inserted false;
++            self.entries.put(alloc, id, .{ .screen = primary, .scan = scan, .query = owned, .case_sensitive = case_sensitive }) catch break :inserted false;
 +            break :inserted true;
 +        };
 +        if (!inserted) {
-+            search.deinit();
++            scan.deinit();
++            alloc.free(owned);
 +            return null;
 +        }
 +        return id;
@@ -1612,42 +1855,203 @@ index 000000000..fb903e7aa
 +        if (self.entries.fetchRemove(id)) |removed| {
 +            var entry = removed.value;
 +            entry.deinit(alloc);
++            if (self.entries.count() == 0) {
++                var node = entry.screen.pages.pages.first;
++                while (node) |n| : (node = n.next) n.data.clearRetainedCellIds();
++            }
 +        }
 +    }
 +
-+    /// One call performs at most one core tick, one page feed, or indexes one
-+    /// retained page for constant-time range materialization.
++    fn refresh(self: *RetainedSearchRegistry, alloc: Allocator, id: u32) bool {
++        const entry = self.entries.getPtr(id) orelse return false;
++        if (entry.phase != .complete) return false;
++        entry.scan = ScreenSearch.initWithCaseSensitivity(alloc, entry.screen, entry.query, if (entry.case_sensitive) .sensitive else .ascii_insensitive) catch return false;
++        entry.cycle += 1;
++        entry.next_match = 0;
++        entry.cleanup_index = 0;
++        entry.compact_read = 0;
++        entry.compact_write = 0;
++        entry.sort_width = 1;
++        entry.sort_left = 0;
++        entry.sort_a = 0;
++        entry.sort_b = 0;
++        entry.sort_mid = 0;
++        entry.sort_end = 0;
++        entry.ordering.clearRetainingCapacity();
++        entry.building.clearRetainingCapacity();
++        entry.phase = .search;
++        return true;
++    }
++
++    /// A finite scan never restarts or extends its frontier on parser writes.
++    /// One step performs one search tick/page feed or materializes one range.
 +    fn step(self: *RetainedSearchRegistry, alloc: Allocator, id: u32) c_int {
 +        const entry = self.entries.getPtr(id) orelse return -1;
 +        switch (entry.phase) {
-+            .search => entry.search.tick() catch |err| switch (err) {
++            .search => entry.scan.?.tick() catch |err| switch (err) {
 +                error.FeedRequired => {
-+                    entry.search.feed() catch return -1;
++                    entry.scan.?.feed() catch return -1;
 +                    return 0;
 +                },
 +                error.SearchComplete => {
-+                    entry.phase = .index;
-+                    entry.index_node = entry.search.screen.pages.pages.first;
++                    entry.phase = .ranges;
 +                    return 0;
 +                },
 +                error.OutOfMemory => return -1,
 +            },
-+            .index => {
-+                const node = entry.index_node orelse {
-+                    entry.phase = .complete;
-+                    return 1;
++            .ranges => {
++                const scan = &entry.scan.?;
++                if (entry.next_match >= scan.matchesLen()) {
++                    entry.phase = .cleanup;
++                    return 0;
++                }
++                const index = entry.next_match;
++                entry.next_match += 1;
++                const history = scan.history_results.items;
++                const hl = if (index < history.len) &history[history.len - index - 1] else &scan.active_results.items[index - history.len];
++                // Check serials before dereferencing a snapshot's borrowed pins.
++                for (hl.chunks.items(.serial), hl.chunks.items(.node)) |serial, node| {
++                    // A pruned page may have been recycled at the same address.
++                    if (serial < entry.screen.pages.page_serial_min) return 0;
++                    var live = entry.screen.pages.pages.first;
++                    while (live) |n| : (live = n.next) {
++                        if (n == node) break;
++                    }
++                    if (live == null or live.?.serial != serial) return 0;
++                }
++                const start = hl.startPin();
++                const end = hl.endPin();
++                if (entry.screen.pages.pointFromPin(.screen, start) == null or entry.screen.pages.pointFromPin(.screen, end) == null) return 0;
++                // A scan may have copied active cells before an interleaved write.
++                // Never publish that snapshot as a match of replacement text.
++                const text = extractSearchText(alloc, entry.screen, start, end) catch return -1;
++                defer alloc.free(text);
++                const equal = if (entry.case_sensitive) std.mem.eql(u8, text, entry.query) else std.ascii.eqlIgnoreCase(text, entry.query);
++                if (!equal) return 0;
++                const first_cell = start.rowAndCell().cell;
++                const first_id = start.node.data.retainedCellId(first_cell, alloc, &self.cell_sequence, &self.row_locations) catch return -1;
++                if (entry.by_cell.get(first_id)) |existing| {
++                    const occ = entry.occurrences.getPtr(existing).?;
++                    if (occ.valid(&self.row_locations)) {
++                        occ.seen = entry.cycle;
++                        entry.building.append(alloc, existing) catch return -1;
++                        return 0;
++                    }
++                }
++                var ids: std.ArrayList(u64) = .empty;
++                defer ids.deinit(alloc);
++                var wraps: std.ArrayList(bool) = .empty;
++                defer wraps.deinit(alloc);
++                var rows = start.rowIterator(.right_down, end);
++                var first = true;
++                while (rows.next()) |row| {
++                    wraps.append(alloc, row.rowAndCell().row.wrap) catch return -1;
++                    const left: usize = if (first) start.x else 0;
++                    const right: usize = if (row.node == end.node and row.y == end.y) end.x + 1 else row.node.data.size.cols;
++                    first = false;
++                    for (row.node.data.getCells(row.rowAndCell().row)[left..right]) |*cell| {
++                        ids.append(alloc, row.node.data.retainedCellId(cell, alloc, &self.cell_sequence, &self.row_locations) catch return -1) catch return -1;
++                    }
++                }
++                const start_row = start.node.data.retainedRowId(start.rowAndCell().row, alloc, &self.cell_sequence, &self.row_locations) catch return -1;
++                const end_row = end.node.data.retainedRowId(end.rowAndCell().row, alloc, &self.cell_sequence, &self.row_locations) catch return -1;
++                const owned_wraps = wraps.toOwnedSlice(alloc) catch return -1;
++                const cells = ids.toOwnedSlice(alloc) catch {
++                    alloc.free(owned_wraps);
++                    return -1;
 +                };
-+                entry.node_rows.put(alloc, node, .{
-+                    .serial = node.serial,
-+                    .row = entry.index_row,
-+                }) catch return -1;
-+                entry.index_row = std.math.add(
-+                    u32,
-+                    entry.index_row,
-+                    node.data.size.rows,
-+                ) catch return -1;
-+                entry.index_node = node.next;
++                if (entry.next_id == std.math.maxInt(u32)) {
++                    alloc.free(cells);
++                    alloc.free(owned_wraps);
++                    return -1;
++                }
++                const occurrence_id = entry.next_id;
++                entry.next_id += 1;
++                var occ: Occurrence = .{ .start_row = start_row, .end_row = end_row, .start_column = start.x, .end_column = end.x, .cells = cells, .wraps = owned_wraps, .seen = entry.cycle };
++                entry.occurrences.put(alloc, occurrence_id, occ) catch {
++                    occ.deinit(alloc);
++                    return -1;
++                };
++                entry.by_cell.put(alloc, first_id, occurrence_id) catch return -1;
++                entry.building.append(alloc, occurrence_id) catch return -1;
++            },
++            .cleanup => {
++                if (entry.cleanup_index < entry.occurrences.count()) {
++                    const key = entry.occurrences.keys()[entry.cleanup_index];
++                    const occ = &entry.occurrences.values()[entry.cleanup_index];
++                    if (occ.valid(&self.row_locations)) {
++                        // Borrowed scan coordinates may expire during page
++                        // compaction. Surviving cells still own their identity.
++                        if (occ.seen != entry.cycle) entry.building.append(alloc, key) catch return -1;
++                        entry.cleanup_index += 1;
++                        return 0;
++                    }
++                    const first_id = occ.cells[0];
++                    if (entry.by_cell.get(first_id) == key) _ = entry.by_cell.remove(first_id);
++                    occ.deinit(alloc);
++                    _ = entry.occurrences.swapRemove(key);
++                    return 0;
++                }
++                entry.phase = .compact;
 +                return 0;
++            },
++            .compact => {
++                if (entry.compact_read < entry.building.items.len) {
++                    const key = entry.building.items[entry.compact_read];
++                    entry.compact_read += 1;
++                    if (entry.occurrences.getPtr(key)) |occ| {
++                        if (occ.valid(&self.row_locations)) {
++                            entry.building.items[entry.compact_write] = key;
++                            entry.compact_write += 1;
++                        }
++                    }
++                    return 0;
++                }
++                entry.building.items.len = entry.compact_write;
++                entry.phase = .order;
++                return 0;
++            },
++            .order => {
++                const count = entry.building.items.len;
++                // Bottom-up merge sort materializes at most one ID per step.
++                // No whole-result sort can monopolize the render task.
++                if (entry.sort_width < count) {
++                    if (entry.sort_left >= count) {
++                        std.mem.swap(std.ArrayList(u32), &entry.building, &entry.ordering);
++                        entry.ordering.clearRetainingCapacity();
++                        entry.sort_width *= 2;
++                        entry.sort_left = 0;
++                        entry.sort_end = 0;
++                        return 0;
++                    }
++                    if (entry.sort_end == 0) {
++                        entry.sort_a = entry.sort_left;
++                        entry.sort_mid = @min(count, entry.sort_left + entry.sort_width);
++                        entry.sort_b = entry.sort_mid;
++                        entry.sort_end = @min(count, entry.sort_mid + entry.sort_width);
++                    }
++                    if (entry.sort_a == entry.sort_mid and entry.sort_b == entry.sort_end) {
++                        entry.sort_left = entry.sort_end;
++                        entry.sort_end = 0;
++                        return 0;
++                    }
++                    const take_a = if (entry.sort_b == entry.sort_end) true else if (entry.sort_a == entry.sort_mid) false else order: {
++                        const a = entry.occurrences.getPtr(entry.building.items[entry.sort_a]).?;
++                        const b = entry.occurrences.getPtr(entry.building.items[entry.sort_b]).?;
++                        const a_pins = a.pins(&self.row_locations) orelse break :order false;
++                        const b_pins = b.pins(&self.row_locations) orelse break :order true;
++                        break :order a_pins.start.before(b_pins.start);
++                    };
++                    const key = if (take_a) entry.building.items[entry.sort_a] else entry.building.items[entry.sort_b];
++                    entry.ordering.append(alloc, key) catch return -1;
++                    if (take_a) entry.sort_a += 1 else entry.sort_b += 1;
++                    return 0;
++                }
++                std.mem.swap(std.ArrayList(u32), &entry.published, &entry.building);
++                entry.scan.?.deinit();
++                entry.scan = null;
++                entry.phase = .complete;
++                return 1;
 +            },
 +            .complete => return 1,
 +        }
@@ -1657,25 +2061,16 @@ index 000000000..fb903e7aa
 +    fn matchCount(self: *const RetainedSearchRegistry, id: u32) ?usize {
 +        const entry = self.entries.getPtr(id) orelse return null;
 +        if (entry.phase != .complete) return null;
-+        return entry.search.matchesLen();
++        return entry.published.items.len;
 +    }
 +
-+    fn matchAt(self: *const RetainedSearchRegistry, id: u32, index: usize) ?*const @import("../highlight.zig").Flattened {
-+        const entry = self.entries.getPtr(id) orelse return null;
-+        if (entry.phase != .complete) return null;
-+        const history = entry.search.history_results.items;
-+        if (index < history.len) return &history[history.len - index - 1];
-+        const active_index = index - history.len;
-+        const active = entry.search.active_results.items;
-+        if (active_index >= active.len) return null;
-+        return &active[active_index];
++    fn matchId(self: *const RetainedSearchRegistry, id: u32, index: usize) u32 {
++        const entry = self.entries.getPtr(id) orelse return 0;
++        if (index >= entry.published.items.len) return 0;
++        return entry.published.items[index];
 +    }
 +
-+    fn validatedPins(
-+        self: *const RetainedSearchRegistry,
-+        id: u32,
-+        index: usize,
-+    ) ?struct {
++    fn validatedPins(self: *const RetainedSearchRegistry, id: u32, occurrence_id: u32) ?struct {
 +        screen: *@import("../Screen.zig"),
 +        start: PageList.Pin,
 +        end: PageList.Pin,
@@ -1683,33 +2078,18 @@ index 000000000..fb903e7aa
 +        end_row: u32,
 +    } {
 +        const entry = self.entries.getPtr(id) orelse return null;
-+        const highlight = self.matchAt(id, index) orelse return null;
-+        const chunks = highlight.chunks.slice();
-+        if (chunks.len == 0) return null;
-+
-+        const nodes = chunks.items(.node);
-+        const serials = chunks.items(.serial);
-+        const starts = chunks.items(.start);
-+        const ends = chunks.items(.end);
-+        for (nodes, serials, starts, ends) |node, serial, start, end| {
-+            const indexed = entry.node_rows.get(node) orelse return null;
-+            if (indexed.serial != serial or start >= end or end > node.data.size.rows) return null;
-+        }
-+
-+        const start = highlight.startPin();
-+        const end = highlight.endPin();
-+        if (start.x >= start.node.data.size.cols or end.x >= end.node.data.size.cols) return null;
-+        const start_page = entry.node_rows.get(start.node) orelse return null;
-+        const end_page = entry.node_rows.get(end.node) orelse return null;
-+        return .{
-+            .screen = entry.search.screen,
-+            .start = start,
-+            .end = end,
-+            .start_row = std.math.add(u32, start_page.row, start.y) catch return null,
-+            .end_row = std.math.add(u32, end_page.row, end.y) catch return null,
-+        };
++        const occ = entry.occurrences.getPtr(occurrence_id) orelse return null;
++        if (!occ.valid(@constCast(&self.row_locations))) return null;
++        const current = occ.pins(@constCast(&self.row_locations)) orelse return null;
++        const start = entry.screen.pages.pointFromPin(.screen, current.start) orelse return null;
++        const end = entry.screen.pages.pointFromPin(.screen, current.end) orelse return null;
++        return .{ .screen = entry.screen, .start = current.start, .end = current.end, .start_row = @intCast(start.screen.y), .end_row = @intCast(end.screen.y) };
 +    }
 +};
++
++fn extractSearchText(alloc: Allocator, screen: *Screen, start: PageList.Pin, end: PageList.Pin) ![:0]const u8 {
++    return screen.selectionString(alloc, .{ .sel = Selection.init(start, end, false), .trim = false });
++}
 +
 +/// Response handler that processes VT sequences and queues responses.
 +/// This extends the readonly stream handler to also handle queries.
@@ -1720,6 +2100,7 @@ index 000000000..fb903e7aa
 +    events: *EventQueue,
 +    provenance: *ProvenanceRegistry,
 +    retained_ranges: *RetainedRangeRegistry,
++    retained_searches: *RetainedSearchRegistry,
 +    cursor_defaults: *CursorDefaults,
 +    synchronized_output_generation: *u32,
 +    write_screen_mask: *u8,
@@ -1731,6 +2112,7 @@ index 000000000..fb903e7aa
 +        events: *EventQueue,
 +        provenance: *ProvenanceRegistry,
 +        retained_ranges: *RetainedRangeRegistry,
++        retained_searches: *RetainedSearchRegistry,
 +        cursor_defaults: *CursorDefaults,
 +        synchronized_output_generation: *u32,
 +        write_screen_mask: *u8,
@@ -1742,6 +2124,7 @@ index 000000000..fb903e7aa
 +            .events = events,
 +            .provenance = provenance,
 +            .retained_ranges = retained_ranges,
++            .retained_searches = retained_searches,
 +            .cursor_defaults = cursor_defaults,
 +            .synchronized_output_generation = synchronized_output_generation,
 +            .write_screen_mask = write_screen_mask,
@@ -1888,6 +2271,7 @@ index 000000000..fb903e7aa
 +            .active_status_display => self.terminal.status_display = value,
 +            .decaln => try self.terminal.decaln(),
 +            .full_reset => {
++                self.retained_searches.clear(self.alloc);
 +                const before = self.terminal.screens.active_key;
 +                self.events.clearRetainingScreenChanges();
 +                self.retained_ranges.clear(self.terminal);
@@ -2456,6 +2840,7 @@ index 000000000..fb903e7aa
 +        &wrapper.events,
 +        &wrapper.provenance,
 +        &wrapper.retained_ranges,
++        &wrapper.retained_searches,
 +        &wrapper.cursor_defaults,
 +        &wrapper.synchronized_output_generation,
 +        &wrapper.write_screen_mask,
@@ -2542,7 +2927,6 @@ index 000000000..fb903e7aa
 +        if (touched & primary_screen_touched != 0) {
 +            wrapper.primary_screen_generation +%= 1;
 +            if (wrapper.primary_screen_generation == 0) wrapper.primary_screen_generation = 1;
-+            wrapper.retained_searches.clear(wrapper.alloc);
 +            wrapper.retained_ranges.invalidateScreen(&wrapper.terminal, .primary);
 +        }
 +        if (touched & alternate_screen_touched != 0) {
@@ -2582,6 +2966,16 @@ index 000000000..fb903e7aa
 +pub fn retainedSearchCancel(ptr: ?*anyopaque, search_id: u32) callconv(.c) void {
 +    const wrapper: *TerminalWrapper = @ptrCast(@alignCast(ptr orelse return));
 +    wrapper.retained_searches.remove(wrapper.alloc, search_id);
++}
++
++pub fn retainedSearchRefresh(ptr: ?*anyopaque, search_id: u32) callconv(.c) bool {
++    const wrapper: *TerminalWrapper = @ptrCast(@alignCast(ptr orelse return false));
++    return wrapper.retained_searches.refresh(wrapper.alloc, search_id);
++}
++
++pub fn retainedSearchMatchId(ptr: ?*anyopaque, search_id: u32, index: u32) callconv(.c) u32 {
++    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return 0));
++    return wrapper.retained_searches.matchId(search_id, index);
 +}
 +
 +pub fn retainedSearchMatchCount(ptr: ?*anyopaque, search_id: u32) callconv(.c) c_int {
@@ -3905,6 +4299,166 @@ index 000000000..fb903e7aa
 +    try std.testing.expectEqual(@as(c_int, -2), retainedRangeStep(term, large_id));
 +    try std.testing.expect(wrapper.retained_ranges.entry == null);
 +}
++
++fn finishRetainedSearchFixture(term: ?*anyopaque, id: u32) !void {
++    for (0..20_000_000) |_| {
++        const status = retainedSearchStep(term, id);
++        try std.testing.expect(status >= 0);
++        if (status == 1) return;
++    }
++    return error.SearchFixtureTimeout;
++}
++
++test "streaming retained search progresses and preserves native occurrence identity" {
++    const term = new(40, 4);
++    defer free(term);
++    const initial = "needle-first\r\nneedle-second\r\n";
++    write(term, initial, initial.len);
++    const id = retainedSearchCreate(term, "needle", 6, true);
++    try std.testing.expect(id != 0);
++    var completed: ?usize = null;
++    for (0..500) |producer_step| {
++        const append = "other output\r\n";
++        write(term, append, append.len);
++        const status = retainedSearchStep(term, id);
++        try std.testing.expect(status >= 0);
++        if (status == 1 and completed == null) completed = producer_step;
++    }
++    try std.testing.expect(completed != null and completed.? < 499);
++    try std.testing.expectEqual(@as(c_int, 2), retainedSearchMatchCount(term, id));
++    const selected = retainedSearchMatchId(term, id, 1);
++    try std.testing.expect(selected != 0);
++    const more = "needle-third\r\n";
++    write(term, more, more.len);
++    try std.testing.expect(retainedSearchRefresh(term, id));
++    for (0..500) |producer_step| {
++        const append = "unrelated\r\n";
++        write(term, append, append.len);
++        const status = retainedSearchStep(term, id);
++        try std.testing.expect(status >= 0);
++        if (status == 1) {
++            try std.testing.expect(producer_step < 499);
++            break;
++        }
++    }
++    try std.testing.expectEqual(@as(c_int, 3), retainedSearchMatchCount(term, id));
++    try std.testing.expectEqual(selected, retainedSearchMatchId(term, id, 1));
++    var text: [6]u8 = undefined;
++    try std.testing.expectEqual(@as(c_int, 6), retainedSearchMatchText(term, id, selected, &text, text.len));
++    try std.testing.expectEqualStrings("needle", &text);
++    retainedSearchCancel(term, id);
++    try std.testing.expectEqual(@as(c_int, -1), retainedSearchMatchText(term, id, selected, null, 0));
++    const wrapper: *TerminalWrapper = @ptrCast(@alignCast(term.?));
++    var node = wrapper.terminal.screens.active.pages.pages.first;
++    while (node) |n| : (node = n.next) try std.testing.expect(n.data.retained_cell_ids == null);
++}
++
++test "streaming retained search rejects identical overwrite and revoked native ranges" {
++    const term = new(20, 3);
++    defer free(term);
++    write(term, "needle", 6);
++    const id = retainedSearchCreate(term, "needle", 6, true);
++    try finishRetainedSearchFixture(term, id);
++    const old = retainedSearchMatchId(term, id, 0);
++    const rewrite = "\rneedle";
++    write(term, rewrite, rewrite.len);
++    try std.testing.expectEqual(@as(c_int, -1), retainedSearchMatchText(term, id, old, null, 0));
++    try std.testing.expect(retainedSearchRefresh(term, id));
++    try finishRetainedSearchFixture(term, id);
++    const current = retainedSearchMatchId(term, id, 0);
++    try std.testing.expect(current != old);
++    var cells: [4]u32 = undefined;
++    try std.testing.expectEqual(@as(c_int, -1), retainedSearchMatchRange(term, id, old, &cells, cells.len));
++    resize(term, 21, 3);
++    try std.testing.expectEqual(@as(c_int, -1), retainedSearchMatchRange(term, id, current, &cells, cells.len));
++}
++
++test "streaming retained search eviction preserves the byte budget" {
++    var config = std.mem.zeroes(GhosttyTerminalConfig);
++    config.scrollback_limit = 65_536;
++    config.scrollback_unit = @intFromEnum(ScrollbackUnit.bytes);
++    const term = newWithConfig(80, 3, &config);
++    defer free(term);
++    const initial = "needle\r\n";
++    write(term, initial, initial.len);
++    const id = retainedSearchCreate(term, "needle", 6, true);
++    try finishRetainedSearchFixture(term, id);
++    const old = retainedSearchMatchId(term, id, 0);
++    for (0..4000) |_| write(term, "filler\r\n", 8);
++    try std.testing.expectEqual(@as(c_int, -1), retainedSearchMatchText(term, id, old, null, 0));
++    const wrapper: *TerminalWrapper = @ptrCast(@alignCast(term.?));
++    const baseline = newWithConfig(80, 3, &config);
++    defer free(baseline);
++    write(baseline, initial, initial.len);
++    for (0..4000) |_| write(baseline, "filler\r\n", 8);
++    const original: *TerminalWrapper = @ptrCast(@alignCast(baseline.?));
++    try std.testing.expectEqual(original.terminal.screens.active.pages.maxSize(), wrapper.terminal.screens.active.pages.maxSize());
++    try std.testing.expectEqual(original.terminal.screens.active.pages.total_rows, wrapper.terminal.screens.active.pages.total_rows);
++    try std.testing.expect(retainedSearchRefresh(term, id));
++    try finishRetainedSearchFixture(term, id);
++    try std.testing.expectEqual(@as(c_int, 0), retainedSearchMatchCount(term, id));
++}
++
++test "streaming retained search row anchors follow row and column movement" {
++    const term = new(30, 5);
++    defer free(term);
++    const initial = "other\r\nneedle\r\nlast";
++    write(term, initial, initial.len);
++    const id = retainedSearchCreate(term, "needle", 6, true);
++    try finishRetainedSearchFixture(term, id);
++    const selected = retainedSearchMatchId(term, id, 0);
++    const shift = "\x1b[1;5r\x1b[1;1H\x1b[M";
++    write(term, shift, shift.len);
++    var range: [4]u32 = undefined;
++    try std.testing.expectEqual(@as(c_int, 4), retainedSearchMatchRange(term, id, selected, &range, range.len));
++    try std.testing.expectEqual(@as(u32, 0), range[0]);
++    const insert = "\x1b[1;1H\x1b[@";
++    write(term, insert, insert.len);
++    try std.testing.expectEqual(@as(c_int, 4), retainedSearchMatchRange(term, id, selected, &range, range.len));
++    try std.testing.expectEqual(@as(u32, 1), range[1]);
++    var text: [6]u8 = undefined;
++    try std.testing.expectEqual(@as(c_int, 6), retainedSearchMatchText(term, id, selected, &text, text.len));
++    try std.testing.expectEqualStrings("needle", &text);
++}
++
++test "streaming retained search high match count adds no parser tracked pins" {
++    var config = std.mem.zeroes(GhosttyTerminalConfig);
++    config.scrollback_limit = 10_000_000;
++    config.scrollback_unit = @intFromEnum(ScrollbackUnit.bytes);
++    const term = newWithConfig(80, 3, &config);
++    defer free(term);
++    const line = "needle needle needle needle needle needle needle needle needle needle needle\r\n";
++    for (0..20_000) |_| write(term, line, line.len);
++    const wrapper: *TerminalWrapper = @ptrCast(@alignCast(term.?));
++    const screen = wrapper.terminal.screens.active;
++    const parser_pins = screen.pages.tracked_pins.count();
++    const budget_before = screen.pages.maxSize();
++    const id = retainedSearchCreate(term, "needle", 6, true);
++    try finishRetainedSearchFixture(term, id);
++    const count = retainedSearchMatchCount(term, id);
++    try std.testing.expect(count > 100_000);
++    try std.testing.expectEqual(parser_pins, screen.pages.tracked_pins.count());
++    var cell_bytes: usize = 0;
++    var row_bytes: usize = 0;
++    var node = screen.pages.pages.first;
++    while (node) |n| : (node = n.next) {
++        if (n.data.retained_cell_ids) |ids| {
++            cell_bytes += ids.values.len * @sizeOf(u64);
++            row_bytes += ids.rows.len * @sizeOf(u64);
++        }
++    }
++    // Identity arrays are bounded by the same retained pages, without
++    // consuming scrollback accounting or adding match-owned parser pins.
++    try std.testing.expect(cell_bytes < 10_000_000);
++    const started = try std.time.Instant.now();
++    for (0..1000) |_| write(term, "unrelated\r\n", 11);
++    const elapsed = (try std.time.Instant.now()).since(started);
++    try std.testing.expectEqual(parser_pins, screen.pages.tracked_pins.count());
++    try std.testing.expectEqual(budget_before, screen.pages.maxSize());
++    std.debug.print("high-match query: {d} matches, {d} cell-ID bytes, {d} row-ID bytes, {d} row anchors, {d} parser pins, 1000 writes in {d} ms\n", .{ count, cell_bytes, row_bytes, wrapper.retained_searches.row_locations.count(), parser_pins, elapsed / std.time.ns_per_ms });
++    retainedSearchCancel(term, id);
++    try std.testing.expectEqual(@as(usize, 0), wrapper.retained_searches.row_locations.count());
++}
 diff --git a/src/terminal/color.zig b/src/terminal/color.zig
 index 3b806f8b8..869496c0f 100644
 --- a/src/terminal/color.zig
@@ -4132,6 +4686,229 @@ index d3a117515..494807f73 100644
      pub const Action = enum {
          fresh_line, // 'L'
          fresh_line_new_prompt, // 'A'
+diff --git a/src/terminal/page.zig b/src/terminal/page.zig
+index 3e7ca9ac3..719746244 100644
+--- a/src/terminal/page.zig
++++ b/src/terminal/page.zig
+@@ -116,6 +116,10 @@ pub const Page = struct {
+     ///       have occurred since it was last cleared.
+     dirty: bool,
+ 
++    /// Lazy provenance for retained queries. Kept outside page bytes so
++    /// enabling search does not change the scrollback retention budget.
++    retained_cell_ids: ?RetainedCellIds = null,
++
+     /// The string allocator for this page used for shared utf-8 encoded
+     /// strings. Liveness of strings and memory management is deferred to
+     /// the individual use case.
+@@ -158,6 +162,123 @@ pub const Page = struct {
+     pause_integrity_checks: if (build_options.slow_runtime_safety) usize else void =
+         if (build_options.slow_runtime_safety) 0 else {},
+ 
++    pub const RetainedRowLocation = struct {
++        page: *Page,
++        cell_index: usize,
++        y: usize,
++    };
++    pub const RetainedRowLocations = std.AutoHashMapUnmanaged(u64, RetainedRowLocation);
++    const RetainedCellIds = struct {
++        alloc: std.mem.Allocator,
++        sequence: *u64,
++        locations: *RetainedRowLocations,
++        values: []u64,
++        rows: []u64,
++    };
++
++    pub fn clearRetainedCellIds(self: *Page) void {
++        if (self.retained_cell_ids) |ids| {
++            for (ids.rows) |id| {
++                if (ids.locations.get(id)) |loc| {
++                    if (loc.page == self) _ = ids.locations.remove(id);
++                }
++            }
++            ids.alloc.free(ids.values);
++            ids.alloc.free(ids.rows);
++        }
++        self.retained_cell_ids = null;
++    }
++
++    pub fn retainedCellIndex(self: *const Page, cell: *const Cell) usize {
++        return (@intFromPtr(cell) - @intFromPtr(self.cells.ptr(self.memory))) / @sizeOf(Cell);
++    }
++
++    fn ensureRetainedCellIds(self: *Page, alloc: std.mem.Allocator, sequence: *u64, locations: *RetainedRowLocations) !*RetainedCellIds {
++        if (self.retained_cell_ids == null) {
++            const values = try alloc.alloc(u64, @as(usize, self.capacity.rows) * self.capacity.cols);
++            errdefer alloc.free(values);
++            const rows = try alloc.alloc(u64, self.capacity.rows);
++            @memset(values, 0);
++            @memset(rows, 0);
++            self.retained_cell_ids = .{ .alloc = alloc, .sequence = sequence, .locations = locations, .values = values, .rows = rows };
++        }
++        return &self.retained_cell_ids.?;
++    }
++
++    pub fn retainedCellId(self: *Page, cell: *const Cell, alloc: std.mem.Allocator, sequence: *u64, locations: *RetainedRowLocations) !u64 {
++        const ids = try self.ensureRetainedCellIds(alloc, sequence, locations);
++        const value = &ids.values[self.retainedCellIndex(cell)];
++        if (value.* == 0) {
++            if (sequence.* == std.math.maxInt(u64)) return error.OutOfMemory;
++            sequence.* += 1;
++            value.* = sequence.*;
++        }
++        return value.*;
++    }
++
++    pub fn retainedRowId(self: *Page, row: *const Row, alloc: std.mem.Allocator, sequence: *u64, locations: *RetainedRowLocations) !u64 {
++        const ids = try self.ensureRetainedCellIds(alloc, sequence, locations);
++        const index = self.retainedCellIndex(&row.cells.ptr(self.memory)[0]);
++        const value = &ids.rows[index / self.capacity.cols];
++        if (value.* == 0) {
++            if (sequence.* == std.math.maxInt(u64)) return error.OutOfMemory;
++            sequence.* += 1;
++            try locations.put(alloc, sequence.*, .{ .page = self, .cell_index = index, .y = (@intFromPtr(row) - @intFromPtr(self.rows.ptr(self.memory))) / @sizeOf(Row) });
++            value.* = sequence.*;
++        }
++        return value.*;
++    }
++
++    pub fn currentRetainedCellId(self: *const Page, cell: *const Cell) u64 {
++        const ids = self.retained_cell_ids orelse return 0;
++        return ids.values[self.retainedCellIndex(cell)];
++    }
++
++    pub fn revokeRetainedCells(self: *Page, cells: []const Cell) void {
++        const ids = self.retained_cell_ids orelse return;
++        if (cells.len == 0) return;
++        const start = self.retainedCellIndex(&cells[0]);
++        @memset(ids.values[start..][0..cells.len], 0);
++    }
++
++    fn copyRetainedCellIds(self: *Page, other: *const Page, dst: []const Cell, src: []const Cell) void {
++        const source = other.retained_cell_ids orelse {
++            self.revokeRetainedCells(dst);
++            return;
++        };
++        if (src.len == 0) return;
++        const target = self.ensureRetainedCellIds(source.alloc, source.sequence, source.locations) catch return;
++        const from = source.values[other.retainedCellIndex(&src[0])..][0..src.len];
++        const to = target.values[self.retainedCellIndex(&dst[0])..][0..dst.len];
++        std.mem.copyForwards(u64, to, from);
++    }
++
++    // Only row moves update anchors. Parser work depends on rows copied, never
++    // on query match count. Cell edits continue to revoke cell incarnations.
++    fn copyRetainedRowId(self: *Page, other: *const Page, dst: *const Row, src: *const Row) void {
++        const source = other.retained_cell_ids orelse return;
++        const target = self.retained_cell_ids orelse return;
++        const from = other.retainedCellIndex(&src.cells.ptr(other.memory)[0]) / other.capacity.cols;
++        const to_index = self.retainedCellIndex(&dst.cells.ptr(self.memory)[0]);
++        const to = to_index / self.capacity.cols;
++        const id = source.rows[from];
++        const old = target.rows[to];
++        if (old != id) {
++            if (target.locations.get(old)) |loc| {
++                if (loc.page == self and loc.cell_index == to_index) _ = target.locations.remove(old);
++            }
++        }
++        target.rows[to] = id;
++        if (source.locations.getPtr(id)) |loc| loc.* = .{ .page = self, .cell_index = to_index, .y = (@intFromPtr(dst) - @intFromPtr(self.rows.ptr(self.memory))) / @sizeOf(Row) };
++    }
++
++    /// Independent render/search clones must not move live row anchors.
++    pub fn cloneFromUntracked(self: *Page, other: *const Page, y_start: usize, y_end: usize) CloneFromError!void {
++        var contents = other.*;
++        contents.retained_cell_ids = null;
++        try self.cloneFrom(&contents, y_start, y_end);
++    }
++
+     /// Initialize a new page, allocating the required backing memory.
+     /// The size of the initialized page defaults to the full capacity.
+     ///
+@@ -245,12 +366,14 @@ pub const Page = struct {
+     /// this if you allocated the backing memory yourself (i.e. you used
+     /// initBuf).
+     pub inline fn deinit(self: *Page) void {
++        self.clearRetainedCellIds();
+         posix.munmap(self.memory);
+         self.* = undefined;
+     }
+ 
+     /// Reinitialize the page with the same capacity.
+     pub inline fn reinit(self: *Page) void {
++        self.clearRetainedCellIds();
+         // We zero the page memory as u64 instead of u8 because
+         // we can and it's empirically quite a bit faster.
+         @memset(@as([*]u64, @ptrCast(self.memory))[0 .. self.memory.len / 8], 0);
+@@ -600,6 +723,7 @@ pub const Page = struct {
+         // as offsets so we can do a simple linear copy of the backing
+         // memory and copy all the offsets and everything will work.
+         var result = self.*;
++        result.retained_cell_ids = null;
+         result.memory = buf[0..self.memory.len];
+ 
+         // This is a memcpy. We may want to investigate if there are
+@@ -983,6 +1107,8 @@ pub const Page = struct {
+                 last.wide = .narrow;
+             }
+         }
++        self.copyRetainedCellIds(other, cells, other_cells);
++        if (x_start == 0 and x_end == other.size.cols) self.copyRetainedRowId(other, dst_row, src_row);
+     }
+ 
+     /// Get a single row. y must be valid.
+@@ -1038,6 +1164,8 @@ pub const Page = struct {
+         // Clear our destination now matter what
+         self.clearCells(dst_row, dst_left, dst_left + len);
+ 
++        self.copyRetainedCellIds(self, dst_cells, src_cells);
++
+         // If src has no managed memory, this is very fast.
+         if (!src_row.managedMemory()) {
+             fastmem.copy(Cell, dst_cells, src_cells);
+@@ -1078,6 +1206,7 @@ pub const Page = struct {
+         //
+         // Zero the cells as u64s since empirically this seems
+         // to be a bit faster than using @memset(src_cells, .{})
++        self.revokeRetainedCells(src_cells);
+         @memset(@as([]u64, @ptrCast(src_cells)), 0);
+         if (src_cells.len == self.size.cols) {
+             src_row.grapheme = false;
+@@ -1138,6 +1267,10 @@ pub const Page = struct {
+             }
+         }
+ 
++        if (self.retained_cell_ids) |ids| {
++            std.mem.swap(u64, &ids.values[self.retainedCellIndex(src)], &ids.values[self.retainedCellIndex(dst)]);
++        }
++
+         // Copy the metadata. Note that we do NOT have to worry about
+         // styles because styles are keyed by ID and we're preserving the
+         // exact ref count and row state here.
+@@ -1160,6 +1293,7 @@ pub const Page = struct {
+         defer self.assertIntegrity();
+ 
+         const cells = row.cells.ptr(self.memory)[left..end];
++        self.revokeRetainedCells(cells);
+ 
+         // If we have managed memory (styles, graphemes, or hyperlinks)
+         // in this row then we go cell by cell and clear them if present.
+@@ -1482,6 +1616,7 @@ pub const Page = struct {
+ 
+     /// Append a codepoint to the given cell as a grapheme.
+     pub fn appendGrapheme(self: *Page, row: *Row, cell: *Cell, cp: u21) Allocator.Error!void {
++        self.revokeRetainedCells(cell[0..1]);
+         defer self.assertIntegrity();
+ 
+         if (build_options.slow_runtime_safety) assert(cell.codepoint() != 0);
+@@ -1577,6 +1712,7 @@ pub const Page = struct {
+     /// `updateRowGraphemeFlag` after you finish clearing any
+     /// graphemes in the row.
+     pub fn clearGrapheme(self: *Page, cell: *Cell) void {
++        self.revokeRetainedCells(cell[0..1]);
+         defer self.assertIntegrity();
+         if (build_options.slow_runtime_safety) assert(cell.hasGrapheme());
+ 
 diff --git a/src/terminal/parse_table.zig b/src/terminal/parse_table.zig
 index 01bd569cb..66674d3b4 100644
 --- a/src/terminal/parse_table.zig
