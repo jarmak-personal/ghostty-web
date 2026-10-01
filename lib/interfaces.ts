@@ -111,6 +111,8 @@ export type IEvent<T> = (listener: (arg: T) => void) => IDisposable;
 
 export interface ITerminalAddon {
   activate(terminal: ITerminalCore): void;
+  /** Reconcile font changes without requiring a container resize. */
+  onCellMetricsChange?(): void;
   /** Reconcile any layout derived from renderer cell metrics after a DPR transition. */
   onDevicePixelRatioChange?(): void;
   dispose(): void;

@@ -81,7 +81,7 @@ export function getGhostty(): Ghostty {
   return ghosttyInstance;
 }
 
-export type { ITerminalDimensions } from './addons/fit';
+export type { FitAddonOptions, ITerminalDimensions } from './addons/fit';
 // Addons
 export { FitAddon } from './addons/fit';
 export { EventEmitter } from './event-emitter';
